@@ -1,13 +1,17 @@
-# twig
+<div align="left">
+  <img
+    src="https://github.com/user-attachments/assets/2948ab96-17a6-4d1f-910c-074d5b0779ba"
+    alt="Twig logo"
+    width="420"
+    align="right"
+  />
 
-<img width="1774" height="887" alt="Image" src="https://github.com/user-attachments/assets/2948ab96-17a6-4d1f-910c-074d5b0779ba" />
-
-A diff viewer for the terminal, built for the repository you actually have open.
-Files come as a flat list or a directory tree, with a tab for commits. The diff
-has line numbers, word-level highlighting, split or unified layout, scrollbars
-both ways, hunk jumps, search and smooth scrolling. You can stage, unstage and
-copy patches without leaving it. If the tree is clean, a small twig grows where
-the diff would be.
+  <p style="margin: 0;">
+    A diff viewer for the terminal, built for the repository you actually have open.
+    Files come as a flat list or a directory tree, with a tab for commits.
+    The diff has line numbers, word-level highlighting, split or unified layout, scrollbars both ways, hunk jumps, search and smooth scrolling. You can stage, unstage and copy patches without leaving it. If the tree is clean, a small twig grows where the diff would be.
+  </p>
+</div>
 
 It reads the repository by driving `git` itself through its machine-readable
 porcelain, so ignore rules, rename detection and index race checks behave
@@ -231,8 +235,8 @@ go test ./internal/diff ./internal/ui/components/diffview \
 
 ### Throughput
 
-| Benchmark              | What it measures                                             | Time    | Bytes/op | Allocs/op |
-| ---------------------- | ------------------------------------------------------------ | ------- | -------- | --------- |
+| Benchmark              | What it measures                                              | Time    | Bytes/op | Allocs/op |
+| ---------------------- | ------------------------------------------------------------- | ------- | -------- | --------- |
 | `GenerateLarge`        | 5 000 lines, 400 scattered edits, rows materialised           | 12.6 ms | 3.69 MB  | 19 698    |
 | `GenerateLargePaged`   | the same diff as a paged plan (descriptors, no rendered rows) | 3.04 ms | 371 KB   | 56        |
 | `GenerateWholeFileAdd` | a 100 000 line file added whole                               | 4.68 ms | 402 KB   | 14        |
@@ -248,10 +252,10 @@ side is one hunk and two runs, whatever its length.
 
 What a finished diff keeps, as reported by `File.Bytes()` rather than guessed:
 
-| Diff                     | Rows    | Hunks | Retained | Source text |
-| ------------------------ | ------- | ----- | -------- | ----------- |
-| 100 000 line addition    | 100 001 | 1     | 3.09 MB  | 2.69 MB     |
-| 5 000 line rewrite       | 10 001  | 1     | 348 KB   | 308 KB      |
+| Diff                  | Rows    | Hunks | Retained | Source text |
+| --------------------- | ------- | ----- | -------- | ----------- |
+| 100 000 line addition | 100 001 | 1     | 3.09 MB  | 2.69 MB     |
+| 5 000 line rewrite    | 10 001  | 1     | 348 KB   | 308 KB      |
 
 Peak RSS while producing those, measured against a 4.3 MB test-binary baseline:
 15.7 MB for the 100 000 line addition and 15.2 MB for a 20 000 line rewrite that
@@ -260,10 +264,10 @@ strings, so treat them as an upper bound rather than the engine's share.
 
 ### Size and startup
 
-| Measure                        | Value |
-| ------------------------------ | ----- |
-| Release binary (`-s -w`)       | 10.73 MB |
-| Warm process start (`--help`)  | a few ms |
+| Measure                       | Value    |
+| ----------------------------- | -------- |
+| Release binary (`-s -w`)      | 10.73 MB |
+| Warm process start (`--help`) | a few ms |
 
 The binary is small for a TUI because it embeds no git implementation and no
 config framework: git is a subprocess, and the config is plain
