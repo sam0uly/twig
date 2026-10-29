@@ -1,0 +1,76 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "these files are not gofmt clean:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test -count=1 ./...
+
+      - name: race
+        run: go test -race -count=1 ./...
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: build release binary
+        run: |
+          go build -trimpath -ldflags "-s -w" -o twig .
+          ./twig --version
+          echo "binary size: $(stat -c%s twig) bytes"
+          # a regression guard: the small binary is a stated feature
+          size=$(stat -c%s twig)
+          if [ "$size" -gt 12582912 ]; then
+            echo "binary grew past 12 MB ($size bytes); revisit the dependency set"
+            exit 1
+          fi
+      - name: build without cgo
+        run: CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o twig-nocgo .
+
+      - name: check the module graph stays small
+        run: |
+          count=$(go list -m all | wc -l)
+          echo "modules in graph: $count"
+          if [ "$count" -gt 60 ]; then
+            echo "the module graph grew past 60 modules"
+            exit 1
+          fi

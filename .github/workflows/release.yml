@@ -1,0 +1,60 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build and publish release binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: build
+        env:
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          LDFLAGS="-s -w -X samouly.fun/twig/internal/version.Version=${VERSION#v} -X samouly.fun/twig/internal/version.Commit=${COMMIT}"
+          mkdir -p dist
+          targets=(
+            "linux/amd64 twig-linux-amd64"
+            "linux/arm64 twig-linux-arm64"
+            "darwin/amd64 twig-darwin-amd64"
+            "darwin/arm64 twig-darwin-arm64"
+            "windows/amd64 twig-windows-amd64.exe"
+          )
+          for target in "${targets[@]}"; do
+            os=${target%% *}
+            out=${target##* }
+            GOOS=${os%/*} GOARCH=${os#*/} CGO_ENABLED=0 \
+              go build -trimpath -ldflags "$LDFLAGS" -o "dist/$out" .
+          done
+
+      - name: checksums
+        run: (cd dist && sha256sum * > checksums.txt)
+
+      - name: verify the version lands in the binary
+        run: |
+          # -X on a miss fails silently, so smoke test it before publishing
+          dist/twig-linux-amd64 --version | grep -F "${GITHUB_REF_NAME#v}"
+
+      - name: upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: twig-${{ github.ref_name }}
+          path: dist/
+
+      - name: publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
