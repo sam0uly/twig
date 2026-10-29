@@ -288,6 +288,11 @@ the repository without a git binary; [cobra] and [viper] for the CLI; and [Task]
 for the build. Thanks also to the authors of the diff tools above, whose
 documented trade-offs settled several arguments in this codebase.
 
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the
+full text.
+
 [Bubble Tea v2]: https://github.com/charmbracelet/bubbletea
 [Bubbles v2]: https://github.com/charmbracelet/bubbles
 [Lip Gloss v2]: https://github.com/charmbracelet/lipgloss
