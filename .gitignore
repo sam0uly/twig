@@ -1,0 +1,7 @@
+/twig
+/dist/
+/debug.log
+*.test
+*.out
+.DS_Store
+notes.md
