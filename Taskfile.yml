@@ -1,0 +1,97 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: "3"
+
+vars:
+  BINARY: twig
+
+tasks:
+  default:
+    desc: build the twig binary
+    cmds:
+      - go build -o {{.BINARY}} .
+
+  run:
+    desc: run twig against the current repository
+    interactive: true
+    cmds:
+      - go run . {{.CLI_ARGS}}
+
+  run:staged:
+    desc: run twig showing staged changes
+    interactive: true
+    cmds:
+      - go run . --staged
+
+  run:log:
+    desc: run twig in commit browser mode
+    interactive: true
+    cmds:
+      - go run . log
+
+  install:
+    desc: installing twig binary
+    interactive: true
+    cmds:
+      - go install .
+
+  debug:
+    desc: run twig with debug logging to debug.log
+    interactive: true
+    cmds:
+      - go run . 2> debug.log
+
+  debug:basic:
+    desc: run with reduced color depth for compatibility testing
+    interactive: true
+    cmds:
+      - env TERM=xterm-color COLORTERM=xterm-color go run .
+
+  test:
+    desc: run tests with the race detector
+    cmds:
+      - go test -race -count 1 ./...
+
+  test:update:
+    desc: run tests and update snapshots
+    cmds:
+      - go test -count 1 ./...
+
+  bench:
+    desc: run benchmarks
+    cmds:
+      - go test -bench . -benchmem ./internal/diff/
+
+  vet:
+    desc: go vet
+    cmds:
+      - go vet ./...
+
+  fmt:
+    desc: format code
+    cmds:
+      - gofumpt -w .
+      - gofmt -w .
+
+  lint:
+    desc: golangci-lint
+    cmds:
+      - golangci-lint run
+
+  tidy:
+    desc: go mod tidy
+    cmds:
+      - go mod tidy
+
+  build:all:
+    desc: cross-compile release binaries
+    cmds:
+      - env GOOS=linux   GOARCH=amd64 go build -o dist/{{.BINARY}}-linux-amd64 .
+      - env GOOS=linux   GOARCH=arm64 go build -o dist/{{.BINARY}}-linux-arm64 .
+      - env GOOS=darwin  GOARCH=amd64 go build -o dist/{{.BINARY}}-darwin-amd64 .
+      - env GOOS=darwin  GOARCH=arm64 go build -o dist/{{.BINARY}}-darwin-arm64 .
+      - env GOOS=windows GOARCH=amd64 go build -o dist/{{.BINARY}}-windows-amd64.exe .
+
+  clean:
+    desc: remove build artifacts
+    cmds:
+      - rm -rf dist {{.BINARY}} debug.log
