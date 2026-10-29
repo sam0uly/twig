@@ -3,30 +3,31 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
-
-	"github.com/spf13/viper"
+	"os"
+	"path/filepath"
 )
 
 // Config is the twig configuration.
 type Config struct {
 	// Context is the number of context lines shown around hunks.
-	Context int `mapstructure:"context"`
+	Context int `json:"context"`
 	// IgnoreWhitespace ignores whitespace changes when diffing.
-	IgnoreWhitespace bool `mapstructure:"ignore-whitespace"`
+	IgnoreWhitespace bool `json:"ignore-whitespace"`
 	// Wrap soft-wraps long lines in the diff view.
-	Wrap bool `mapstructure:"wrap"`
+	Wrap bool `json:"wrap"`
 	// LineNumbers shows old/new line numbers in the gutter.
-	LineNumbers bool `mapstructure:"line-numbers"`
+	LineNumbers bool `json:"line-numbers"`
 	// SidebarWidth is the width of the file list sidebar in cells.
-	SidebarWidth int `mapstructure:"sidebar-width"`
+	SidebarWidth int `json:"sidebar-width"`
 	// SmoothScroll animates large scroll jumps.
-	SmoothScroll bool `mapstructure:"smooth-scroll"`
+	SmoothScroll bool `json:"smooth-scroll"`
 	// LogLimit is the number of commits shown in the log browser.
-	LogLimit int `mapstructure:"log-limit"`
+	LogLimit int `json:"log-limit"`
 	// SplitView shows diffs as two side-by-side columns instead of one.
-	SplitView bool `mapstructure:"split-view"`
+	SplitView bool `json:"split-view"`
 }
 
 // Default returns the built-in default configuration.
@@ -45,42 +46,30 @@ func Default() Config {
 
 // Load reads the configuration, starting with defaults and merging any
 // config file found in the search paths, plus an explicit path when given.
-// viper is seeded with Default so Unmarshal always yields complete values.
+// Values left out of the file keep their defaults.
 func Load(path string) (Config, error) {
 	cfg := Default()
 
-	v := viper.New()
-	v.SetConfigType("yaml")
-
-	for key, val := range map[string]any{
-		"context":           cfg.Context,
-		"ignore-whitespace": cfg.IgnoreWhitespace,
-		"wrap":              cfg.Wrap,
-		"line-numbers":      cfg.LineNumbers,
-		"sidebar-width":     cfg.SidebarWidth,
-		"smooth-scroll":     cfg.SmoothScroll,
-		"log-limit":         cfg.LogLimit,
-		"split-view":        cfg.SplitView,
-	} {
-		v.SetDefault(key, val)
-	}
-
-	if path != "" {
-		v.SetConfigFile(path)
-	} else {
-		v.SetConfigName("twig")
-		v.AddConfigPath("$XDG_CONFIG_HOME/twig")
-		v.AddConfigPath("$HOME/.config/twig")
-	}
-
-	if err := v.ReadInConfig(); err != nil {
-		// A missing config file is fine; anything else is a problem.
-		if path != "" || !errors.As(err, new(viper.ConfigFileNotFoundError)) {
-			return cfg, fmt.Errorf("read config: %w", err)
+	file := path
+	if file == "" {
+		dir, err := userConfigDir()
+		if err != nil {
+			return cfg, nil
 		}
+		file = filepath.Join(dir, "twig.json")
 	}
 
-	if err := v.Unmarshal(&cfg); err != nil {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		// A missing config file in the search path is fine; anything else is a
+		// problem.
+		if errors.Is(err, os.ErrNotExist) && path == "" {
+			return cfg, nil
+		}
+		return cfg, fmt.Errorf("read config: %w", err)
+	}
+
+	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, fmt.Errorf("parse config: %w", err)
 	}
 
@@ -95,4 +84,17 @@ func Load(path string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// userConfigDir returns the directory twig reads its config file from:
+// $XDG_CONFIG_HOME/twig when set, $HOME/.config/twig otherwise.
+func userConfigDir() (string, error) {
+	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
+		return filepath.Join(x, "twig"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", "twig"), nil
 }

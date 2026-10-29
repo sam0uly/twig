@@ -20,8 +20,8 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadExplicitFile(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "twig.yaml")
-	content := "context: 10\nignore-whitespace: true\nsidebar-width: 40\n"
+	path := filepath.Join(dir, "twig.json")
+	content := "{\"context\": 10, \"ignore-whitespace\": true, \"sidebar-width\": 40}\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -48,8 +48,8 @@ func TestLoadExplicitFile(t *testing.T) {
 func TestLoadExplicitFileOverridesSearch(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
-	path := filepath.Join(dir, "other.yaml")
-	if err := os.WriteFile(path, []byte("log-limit: 9\n"), 0o644); err != nil {
+	path := filepath.Join(dir, "other.json")
+	if err := os.WriteFile(path, []byte("{\"log-limit\": 9}\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
@@ -64,8 +64,8 @@ func TestLoadExplicitFileOverridesSearch(t *testing.T) {
 
 func TestLoadInvalidFile(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "twig.yaml")
-	if err := os.WriteFile(path, []byte("context: [not,a,number\n"), 0o644); err != nil {
+	path := filepath.Join(dir, "twig.json")
+	if err := os.WriteFile(path, []byte("{\"context\": [not,a,number]}\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
@@ -76,8 +76,8 @@ func TestLoadInvalidFile(t *testing.T) {
 
 func TestLoadClamps(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "twig.yaml")
-	if err := os.WriteFile(path, []byte("context: -1\nsidebar-width: 0\nlog-limit: -5\n"), 0o644); err != nil {
+	path := filepath.Join(dir, "twig.json")
+	if err := os.WriteFile(path, []byte("{\"context\": -1, \"sidebar-width\": 0, \"log-limit\": -5}\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
