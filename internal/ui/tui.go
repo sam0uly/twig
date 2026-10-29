@@ -826,6 +826,15 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.files.ToggleTree()
 		m.message = "tree view " + onOff(m.files.Tree())
 		return m, setMessageCmd(m.message)
+	case key.Matches(msg, m.keys.ToggleView):
+		m.view.ToggleSplit()
+		m.message = "view " + viewMode(m.view.Split())
+		return m, setMessageCmd(m.message)
+	case key.Matches(msg, m.keys.ToggleWrap):
+		m.cfg.Wrap = !m.cfg.Wrap
+		m.view.SetWrap(m.cfg.Wrap)
+		m.message = "wrap " + onOff(m.cfg.Wrap)
+		return m, setMessageCmd(m.message)
 	case key.Matches(msg, m.keys.AllChanges):
 		return m.toggleAllChanges()
 	}
@@ -976,15 +985,6 @@ func (m model) updateFocus(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, tea.SetClipboard(patch)
 			}
 			return m, nil
-		case key.Matches(msg, m.keys.ToggleView):
-			m.view.ToggleSplit()
-			m.message = "view " + viewMode(m.view.Split())
-			return m, setMessageCmd(m.message)
-		case key.Matches(msg, m.keys.ToggleWrap):
-			m.cfg.Wrap = !m.cfg.Wrap
-			m.view.SetWrap(m.cfg.Wrap)
-			m.message = "wrap " + onOff(m.cfg.Wrap)
-			return m, setMessageCmd(m.message)
 		case key.Matches(msg, m.keys.ToggleWS):
 			m.cfg.IgnoreWhitespace = !m.cfg.IgnoreWhitespace
 			m.message = "ignore whitespace " + onOff(m.cfg.IgnoreWhitespace)

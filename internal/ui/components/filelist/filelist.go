@@ -104,6 +104,9 @@ func New(width, height int, st styles.Styles) Model {
 
 func newGlowList(d glowDelegate, st styles.Styles) list.Model {
 	l := list.New(nil, d, 0, 0)
+	// The bubbles list quits on "v" by default, which would exit twig
+	// whenever the sidebar has focus; twig owns quitting.
+	l.DisableQuitKeybindings()
 	l.SetShowStatusBar(false)
 	l.SetShowTitle(false)
 	l.SetShowHelp(false)
