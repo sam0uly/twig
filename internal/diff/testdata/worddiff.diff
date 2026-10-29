@@ -1,0 +1,10 @@
+diff --git a/greet.js b/greet.js
+index 1a2b3c4..4d5e6f7 100644
+--- a/greet.js
++++ b/greet.js
+@@ -1,3 +1,3 @@
+ function greet() {
+-  const greeting = 'hello';
++  const greeting = 'hi';
+   console.log(greeting);
+ }

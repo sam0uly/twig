@@ -1,0 +1,22 @@
+diff --git a/internal/ui/ui.go b/internal/ui/ui.go
+index 1b2c3d4..e5f6a7b 100644
+--- a/internal/ui/ui.go
++++ b/internal/ui/ui.go
+@@ -1,7 +1,5 @@
+ package ui
+ 
+-import (
+-	"errors"
+-	"fmt"
+-	"strings"
+-)
++import "strings"
++
+ import "fmt"
+@@ -20,3 +18,4 @@ func Render(name string) string {
+ 	var b strings.Builder
+ 	b.WriteString("Hello, ")
+ 	b.WriteString(name)
++	b.WriteString("!")
+ 	return b.String()
+ }
