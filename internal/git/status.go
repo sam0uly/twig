@@ -13,7 +13,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
 
-	"twig/internal/diff"
+	"samouly.fun/twig/internal/diff"
 )
 
 // FileStatus is one changed file as shown in the Files page.

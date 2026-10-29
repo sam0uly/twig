@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"twig/internal/diff"
-	"twig/internal/ui/styles"
+	"samouly.fun/twig/internal/diff"
+	"samouly.fun/twig/internal/ui/styles"
 )
 
 // largeFile builds a diff with many thousands of rows so the paint path is

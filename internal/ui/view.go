@@ -12,10 +12,10 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 
-	"twig/internal/git"
-	"twig/internal/ui/components/composer"
-	"twig/internal/ui/components/filelist"
-	"twig/internal/ui/components/statusbar"
+	"samouly.fun/twig/internal/git"
+	"samouly.fun/twig/internal/ui/components/composer"
+	"samouly.fun/twig/internal/ui/components/filelist"
+	"samouly.fun/twig/internal/ui/components/statusbar"
 )
 
 // View implements tea.Model.

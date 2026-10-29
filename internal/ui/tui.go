@@ -13,15 +13,15 @@ import (
 	"github.com/charmbracelet/ultraviolet/layout"
 	"github.com/charmbracelet/x/ansi"
 
-	"twig/internal/config"
-	"twig/internal/diff"
-	"twig/internal/git"
-	"twig/internal/ui/components/composer"
-	"twig/internal/ui/components/diffview"
-	"twig/internal/ui/components/filelist"
-	"twig/internal/ui/components/searchbar"
-	"twig/internal/ui/components/statusbar"
-	"twig/internal/ui/styles"
+	"samouly.fun/twig/internal/config"
+	"samouly.fun/twig/internal/diff"
+	"samouly.fun/twig/internal/git"
+	"samouly.fun/twig/internal/ui/components/composer"
+	"samouly.fun/twig/internal/ui/components/diffview"
+	"samouly.fun/twig/internal/ui/components/filelist"
+	"samouly.fun/twig/internal/ui/components/searchbar"
+	"samouly.fun/twig/internal/ui/components/statusbar"
+	"samouly.fun/twig/internal/ui/styles"
 )
 
 const (

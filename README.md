@@ -17,7 +17,7 @@ v2], [Lip Gloss v2], [ultraviolet] and [harmonica], with a [cobra] CLI styled by
 ## Install
 
 ```sh
-go install github.com/sam0uly/twig@latest
+go install samouly.fun/twig@latest
 ```
 
 Or build it yourself, with [Task] or plain Go:

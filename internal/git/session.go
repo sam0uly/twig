@@ -18,7 +18,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/format/index"
 	"github.com/go-git/go-git/v5/plumbing/object"
 
-	"twig/internal/diff"
+	"samouly.fun/twig/internal/diff"
 )
 
 // repoContext is the shared repository session: one open handle, one decoded

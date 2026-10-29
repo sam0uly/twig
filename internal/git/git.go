@@ -14,7 +14,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 
-	"twig/internal/diff"
+	"samouly.fun/twig/internal/diff"
 )
 
 // ErrNotARepository is returned when the current directory is not inside a

@@ -27,7 +27,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"twig/internal/diff"
+	"samouly.fun/twig/internal/diff"
 )
 
 const (

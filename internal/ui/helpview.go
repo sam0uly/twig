@@ -6,7 +6,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"twig/internal/ui/styles"
+	"samouly.fun/twig/internal/ui/styles"
 )
 
 // helpEntry is a keystroke and its action, rendered glow-style.

@@ -8,9 +8,9 @@ import (
 	"github.com/charmbracelet/fang"
 	"github.com/spf13/cobra"
 
-	"twig/internal/config"
-	"twig/internal/git"
-	"twig/internal/ui"
+	"samouly.fun/twig/internal/config"
+	"samouly.fun/twig/internal/git"
+	"samouly.fun/twig/internal/ui"
 )
 
 // Build information, overridable with -ldflags.

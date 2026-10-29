@@ -1,9 +1,9 @@
 package ui
 
 import (
-	"twig/internal/diff"
-	"twig/internal/git"
-	"twig/internal/ui/components/filelist"
+	"samouly.fun/twig/internal/diff"
+	"samouly.fun/twig/internal/git"
+	"samouly.fun/twig/internal/ui/components/filelist"
 )
 
 // statusLoadedMsg carries the working tree status for the Files page.

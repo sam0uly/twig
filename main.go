@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"twig/cmd"
+	"samouly.fun/twig/cmd"
 )
 
 func main() {

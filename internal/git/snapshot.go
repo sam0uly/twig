@@ -14,7 +14,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/format/index"
 
-	"twig/internal/diff"
+	"samouly.fun/twig/internal/diff"
 )
 
 // snapshot is one coherent view of the repository state: the staged changes

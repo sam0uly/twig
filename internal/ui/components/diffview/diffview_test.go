@@ -7,8 +7,8 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"twig/internal/diff"
-	"twig/internal/ui/styles"
+	"samouly.fun/twig/internal/diff"
+	"samouly.fun/twig/internal/ui/styles"
 )
 
 func sampleFile() *diff.File {

@@ -11,7 +11,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"twig/internal/ui/styles"
+	"samouly.fun/twig/internal/ui/styles"
 )
 
 // Tab is one segment in the header bar.

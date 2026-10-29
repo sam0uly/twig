@@ -7,7 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"twig/internal/ui/styles"
+	"samouly.fun/twig/internal/ui/styles"
 )
 
 // Model is the diff search input.

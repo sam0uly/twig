@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"twig/internal/diff"
-	"twig/internal/git"
+	"samouly.fun/twig/internal/diff"
+	"samouly.fun/twig/internal/git"
 )
 
 // paddedFile is a diff whose estimate is easy to predict: 100 rows at the

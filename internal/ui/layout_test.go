@@ -11,11 +11,11 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 
-	"twig/internal/config"
-	"twig/internal/diff"
-	"twig/internal/git"
-	"twig/internal/ui/components/diffview"
-	"twig/internal/ui/components/filelist"
+	"samouly.fun/twig/internal/config"
+	"samouly.fun/twig/internal/diff"
+	"samouly.fun/twig/internal/git"
+	"samouly.fun/twig/internal/ui/components/diffview"
+	"samouly.fun/twig/internal/ui/components/filelist"
 )
 
 func testModel(width, height int) model {

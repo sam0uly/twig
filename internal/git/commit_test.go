@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"twig/internal/diff"
+	"samouly.fun/twig/internal/diff"
 )
 
 // TestCommitChangeListAndFileAtCommit checks the two halves of the lazy commit

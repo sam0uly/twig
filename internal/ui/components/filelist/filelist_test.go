@@ -7,9 +7,9 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"twig/internal/diff"
-	"twig/internal/git"
-	"twig/internal/ui/styles"
+	"samouly.fun/twig/internal/diff"
+	"samouly.fun/twig/internal/git"
+	"samouly.fun/twig/internal/ui/styles"
 )
 
 func TestViewsNeverExceedPaneHeight(t *testing.T) {

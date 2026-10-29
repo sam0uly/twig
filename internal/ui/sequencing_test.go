@@ -7,9 +7,9 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"twig/internal/diff"
-	"twig/internal/git"
-	"twig/internal/ui/components/filelist"
+	"samouly.fun/twig/internal/diff"
+	"samouly.fun/twig/internal/git"
+	"samouly.fun/twig/internal/ui/components/filelist"
 )
 
 // TestCommitLoadKeepsFileDiffArriving pins the sequencing rule that made a large

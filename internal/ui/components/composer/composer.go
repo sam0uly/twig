@@ -8,7 +8,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 
-	"twig/internal/ui/styles"
+	"samouly.fun/twig/internal/ui/styles"
 )
 
 // Model is the commit message editor.

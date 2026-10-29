@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"twig/internal/diff"
+	"samouly.fun/twig/internal/diff"
 )
 
 // TestWorkCacheBoundedByBytes checks that one oversized file cannot stay

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"twig/internal/diff"
-	"twig/internal/ui/styles"
+	"samouly.fun/twig/internal/diff"
+	"samouly.fun/twig/internal/ui/styles"
 )
 
 // bigFile builds a diff of n added lines with a few marker lines so search and

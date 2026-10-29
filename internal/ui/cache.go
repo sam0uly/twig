@@ -3,8 +3,8 @@ package ui
 import (
 	"strconv"
 
-	"twig/internal/config"
-	"twig/internal/diff"
+	"samouly.fun/twig/internal/config"
+	"samouly.fun/twig/internal/diff"
 )
 
 // cacheBytes bounds the diffs kept in memory while navigating, in the currency

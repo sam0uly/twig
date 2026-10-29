@@ -1,4 +1,4 @@
-module twig
+module samouly.fun/twig
 
 go 1.27.3
 

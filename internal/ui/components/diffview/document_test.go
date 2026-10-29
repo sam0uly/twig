@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"twig/internal/diff"
-	"twig/internal/ui/styles"
+	"samouly.fun/twig/internal/diff"
+	"samouly.fun/twig/internal/ui/styles"
 )
 
 // docTestFile builds a diff with a single changed line in the middle.
