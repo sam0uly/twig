@@ -1,0 +1,6 @@
+rows=4 hunks=1
+row 00 kind=3 old=0 new=0 text="@@ -1,2 +1,2 @@" spans=[]
+row 01 kind=2 old=1 new=0 text="-Built with the Charm stack: [Bubble Tea v2], [Bubbles v2]," spans=[7:11]
+row 02 kind=1 old=0 new=1 text="+Built on the Charm stack: [Bubble Tea v2], [Bubbles v2]," spans=[7:9]
+row 03 kind=0 old=2 new=2 text=" [ultraviolet] and [harmonica], wrapped in a [cobra] CLI." spans=[]
+words=6

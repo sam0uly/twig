@@ -1,0 +1,10 @@
+rows=8 hunks=1
+row 00 kind=3 old=0 new=0 text="@@ -1,5 +1,5 @@" spans=[]
+row 01 kind=0 old=1 new=1 text=" func f() {" spans=[]
+row 02 kind=2 old=2 new=0 text="-\ta()" spans=[]
+row 03 kind=2 old=3 new=0 text="-\tb()" spans=[]
+row 04 kind=0 old=4 new=2 text=" \tc()" spans=[]
+row 05 kind=1 old=0 new=3 text="+\tb()" spans=[]
+row 06 kind=1 old=0 new=4 text="+\ta()" spans=[]
+row 07 kind=0 old=5 new=5 text=" }" spans=[]
+words=0

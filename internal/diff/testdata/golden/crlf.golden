@@ -1,0 +1,6 @@
+rows=4 hunks=1
+row 00 kind=3 old=0 new=0 text="@@ -1,2 +1,2 @@" spans=[]
+row 01 kind=2 old=1 new=0 text="-x := 1" spans=[6:7]
+row 02 kind=1 old=0 new=1 text="+x := 9" spans=[6:7]
+row 03 kind=0 old=2 new=2 text=" y := 2" spans=[]
+words=2
