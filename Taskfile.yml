@@ -3,12 +3,25 @@ version: "3"
 
 vars:
   BINARY: twig
+  VERSION:
+    sh: git describe --tags --always --dirty
+  COMMIT:
+    sh: git rev-parse HEAD
+  LDFLAGS: >-
+    -s -w
+    -X samouly.fun/twig/internal/version.Version={{.VERSION}}
+    -X samouly.fun/twig/internal/version.Commit={{.COMMIT}}
 
 tasks:
   default:
-    desc: build the twig binary
+    desc: build the release twig binary
     cmds:
-      - go build -o {{.BINARY}} .
+      - go build -trimpath -ldflags '{{.LDFLAGS}}' -o {{.BINARY}} .
+
+  build:debug:
+    desc: build an unstripped binary with full debug info
+    cmds:
+      - go build -gcflags "all=-N -l" -o {{.BINARY}} .
 
   run:
     desc: run twig against the current repository
@@ -85,11 +98,17 @@ tasks:
   build:all:
     desc: cross-compile release binaries
     cmds:
-      - env GOOS=linux   GOARCH=amd64 go build -o dist/{{.BINARY}}-linux-amd64 .
-      - env GOOS=linux   GOARCH=arm64 go build -o dist/{{.BINARY}}-linux-arm64 .
-      - env GOOS=darwin  GOARCH=amd64 go build -o dist/{{.BINARY}}-darwin-amd64 .
-      - env GOOS=darwin  GOARCH=arm64 go build -o dist/{{.BINARY}}-darwin-arm64 .
-      - env GOOS=windows GOARCH=amd64 go build -o dist/{{.BINARY}}-windows-amd64.exe .
+      - env GOOS=linux   GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '{{.LDFLAGS}}' -o dist/{{.BINARY}}-linux-amd64 .
+      - env GOOS=linux   GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags '{{.LDFLAGS}}' -o dist/{{.BINARY}}-linux-arm64 .
+      - env GOOS=darwin  GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '{{.LDFLAGS}}' -o dist/{{.BINARY}}-darwin-amd64 .
+      - env GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags '{{.LDFLAGS}}' -o dist/{{.BINARY}}-darwin-arm64 .
+      - env GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '{{.LDFLAGS}}' -o dist/{{.BINARY}}-windows-amd64.exe .
+      - task: checksums
+
+  checksums:
+    desc: write sha256 checksums for the dist binaries
+    cmds:
+      - cmd: sha256sum dist/* > dist/checksums.txt
 
   clean:
     desc: remove build artifacts
