@@ -11,12 +11,7 @@ import (
 	"samouly.fun/twig/internal/config"
 	"samouly.fun/twig/internal/git"
 	"samouly.fun/twig/internal/ui"
-)
-
-// Build information, overridable with -ldflags.
-var (
-	version = "dev"
-	commit  = "none"
+	"samouly.fun/twig/internal/version"
 )
 
 // New builds the twig root command.
@@ -106,6 +101,11 @@ search, stage and unstage files, and copy patches to the clipboard.
 				return err
 			}
 
+			// The limit flag overrides the config file.
+			if c.Flags().Changed("limit") {
+				cfg.LogLimit = logLimit
+			}
+
 			if err := git.CheckRepository(); err != nil {
 				return err
 			}
@@ -121,7 +121,7 @@ search, stage and unstage files, and copy patches to the clipboard.
 
 	logCmd.Flags().IntVarP(&logLimit, "limit", "n", 0, "number of commits to load (overrides config)")
 
-	root.PersistentFlags().StringVar(&cfgPath, "config", "", "config file path (default: $XDG_CONFIG_HOME/twig/twig.yaml)")
+	root.PersistentFlags().StringVar(&cfgPath, "config", "", "config file path (default: $XDG_CONFIG_HOME/twig/twig.json)")
 	root.Flags().BoolVarP(&staged, "staged", "s", false, "show staged changes instead of the working tree")
 	root.Flags().IntVarP(&unified, "unified", "U", 0, "number of context lines around hunks (overrides config)")
 	root.Flags().BoolVarP(&ignoreWS, "ignore-whitespace", "w", false, "ignore whitespace changes when diffing")
@@ -138,11 +138,12 @@ func loadConfig(path string) (config.Config, error) {
 }
 
 // Execute runs the root command through fang, which handles help, version,
-// completions, man pages and error presentation.
+// completions, man pages and error presentation. The version comes from the
+// build: -ldflags -X first, the toolchain's stamp in the binary otherwise.
 func Execute(ctx context.Context) error {
 	return fang.Execute(
 		ctx, New(),
-		fang.WithVersion(version),
-		fang.WithCommit(commit),
+		fang.WithVersion(version.Number()),
+		fang.WithCommit(version.CommitShort()),
 	)
 }
