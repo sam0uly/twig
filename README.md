@@ -9,10 +9,12 @@ both ways, hunk jumps, search and smooth scrolling. You can stage, unstage and
 copy patches without leaving it. If the tree is clean, a small twig grows where
 the diff would be.
 
-It talks to the repository directly through [go-git], so there is no `git` binary
-to install or shell out to. The rest of the stack is [Bubble Tea v2], [Bubbles
-v2], [Lip Gloss v2], [ultraviolet] and [harmonica], with a [cobra] CLI styled by
-[fang] and configured through [viper].
+It reads the repository by driving `git` itself through its machine-readable
+porcelain, so ignore rules, rename detection and index race checks behave
+exactly like the `git` you already use. The rest of the stack is [Bubble Tea
+v2], [Bubbles v2], [Lip Gloss v2], [ultraviolet] and [harmonica], with a
+[cobra] CLI styled by [fang] and a plain JSON config file. No embedded git
+implementation: the release binary is about 11 MB.
 
 ## Install
 
@@ -23,8 +25,8 @@ go install samouly.fun/twig@latest
 Or build it yourself, with [Task] or plain Go:
 
 ```sh
-task build
-go build -o twig .
+task                 # trimmed release build, version stamped from git
+go build -trimpath -ldflags "-s -w" -o twig .
 ```
 
 ## Usage
@@ -69,18 +71,20 @@ twig log          # browse commits, open any of them
 
 ## Configuration
 
-Twig reads `twig.yaml` from `$XDG_CONFIG_HOME/twig` or `~/.config/twig`, and
+Twig reads `twig.json` from `$XDG_CONFIG_HOME/twig` or `~/.config/twig`, and
 `--config` points it somewhere else. Every key is optional.
 
-```yaml
-context: 3
-ignore-whitespace: false
-wrap: false
-line-numbers: true
-sidebar-width: 32
-smooth-scroll: true
-log-limit: 200
-split-view: false
+```json
+{
+  "context": 3,
+  "ignore-whitespace": false,
+  "wrap": false,
+  "line-numbers": true,
+  "sidebar-width": 32,
+  "smooth-scroll": true,
+  "log-limit": 200,
+  "split-view": false
+}
 ```
 
 ## Development
@@ -91,6 +95,10 @@ task lint   # golangci-lint
 task run    # go run .
 ```
 
+GitHub Actions runs gofmt, vet, the test suite with the race detector, a
+release build with a 12 MB size guard, and on a `v*` tag, cross-compiled
+binaries with checksums published as a release.
+
 ## How it works
 
 The short version: twig reads the repository and diffs it itself, and it is built
@@ -98,13 +106,15 @@ for the case the usual tools handle badly, a working tree with millions of
 changed lines in it. What follows is the reasoning behind the parts that are not
 obvious, including the trade-offs they cost.
 
-### One session, one walk
+### One session, one status run
 
-Twig decodes the index once per session, re-resolves HEAD when it moves, and
-builds a stat-first snapshot per refresh. Diffs are keyed by content hash, so
-switching files is a lookup rather than another `status`. The content, worktree
-and diff caches are bounded by bytes instead of entry count, because an
-entry-count bound lets a handful of large files hold hundreds of megabytes.
+Twig runs `git status --porcelain=v2` once per refresh and keeps the result as
+a snapshot that everything else reads: the porcelain carries the index and HEAD
+blob ids directly, so no second walk or index decode is needed. Diffs are keyed
+by those ids, so switching files is a lookup rather than another `status`. The
+blob, worktree and diff caches are bounded by bytes instead of entry count,
+because an entry-count bound lets a handful of large files hold hundreds of
+megabytes.
 
 ### Anchor first, diff the gaps
 
@@ -172,12 +182,14 @@ content is missing locally, a shallow or blobless partial clone or a submodule,
 the file shows one band saying so instead of failing the commit. The same rule
 covers any failed load: the pane shows the reason, never the previous file.
 
-### No external git
+### Git does what git is good at
 
-Shelling out to `git diff` would inherit xdiff, rename detection and promisor
-fetches for free, and it is deliberately not done. The cost is real and accepted:
-in a blobless partial clone, history that is not present locally cannot be shown,
-because go-git does not fetch on demand.
+Status, rename detection, ignore rules and the racy-index problem are delegated
+to `git` through its porcelain, which is a stable, machine-readable interface.
+Line and word differences stay in twig's own engine, because that is where the
+fast path for huge files lives. In a blobless partial clone, `git cat-file`
+fetches missing blobs on demand exactly as git does, and an object that is
+genuinely gone degrades to one band saying so instead of failing the view.
 
 The upshot is that opening a file costs what changed, not what the file contains.
 A file added whole is one hunk and a couple of runs however many lines it has, a
@@ -248,14 +260,15 @@ strings, so treat them as an upper bound rather than the engine's share.
 
 ### Size and startup
 
-| Measure                       | Value  |
-| ----------------------------- | ------ |
-| Binary, `CGO_ENABLED=1`       | 24.72 MB |
-| Binary, `CGO_ENABLED=0`       | 24.65 MB |
-| Warm process start (`--help`) | 8–10 ms  |
+| Measure                        | Value |
+| ------------------------------ | ----- |
+| Release binary (`-s -w`)       | 10.73 MB |
+| Warm process start (`--help`)  | a few ms |
 
-The binary is large because of the TUI and git stacks it embeds, not because of
-the diff engine; the engine's own code is a few thousand lines.
+The binary is small for a TUI because it embeds no git implementation and no
+config framework: git is a subprocess, and the config is plain
+`encoding/json`. What remains is the TUI stack, the diff engine and the fang
+CLI presentation.
 
 ## References
 
@@ -283,10 +296,9 @@ twig's own; the ideas and their trade-offs belong to the people who wrote them.
 ## Acknowledgments
 
 Standing on the shoulders of [Charm], for [Bubble Tea v2], [Bubbles v2], [Lip
-Gloss v2], [ultraviolet], [harmonica], [fang] and [tone]; [go-git], for reading
-the repository without a git binary; [cobra] and [viper] for the CLI; and [Task]
-for the build. Thanks also to the authors of the diff tools above, whose
-documented trade-offs settled several arguments in this codebase.
+Gloss v2], [ultraviolet], [harmonica], [fang] and [tone]; and [Task] for the
+build. Thanks also to the authors of the diff tools above, whose documented
+trade-offs settled several arguments in this codebase.
 
 ## License
 
@@ -302,8 +314,6 @@ full text.
 [tone]: https://github.com/charmbracelet/tone
 [Charm]: https://charm.sh
 [cobra]: https://github.com/spf13/cobra
-[viper]: https://github.com/spf13/viper
-[go-git]: https://github.com/go-git/go-git
 [Task]: https://taskfile.dev
 [Myers]: http://www.xmailserver.org/diff2.pdf
 [Bentley–McIlroy]: https://dl.acm.org/doi/10.1145/359460.359467
