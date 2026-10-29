@@ -1,18 +1,14 @@
-// Package git integrates with go-git: it reads repository state (status,
-// diffs, log) and performs staging operations without shelling out to the
-// git binary. Line and word-level differences are produced by twig's own
-// diff engine (internal/diff.Generate), which supports context lines and
+// Package git reads repository state and performs staging operations by
+// driving the git binary through its machine-readable porcelain. Line and
+// word-level differences are produced by twig's own diff engine
+// (internal/diff.Generate), which supports context lines and
 // whitespace-ignoring comparison natively.
 package git
 
 import (
 	"errors"
 	"fmt"
-	"io"
-
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"strings"
 
 	"samouly.fun/twig/internal/diff"
 )
@@ -123,122 +119,20 @@ func Diff(src Source, opts Options) (*diff.Diff, error) {
 // commitFiles shows the changes a single commit introduced, relative to its
 // first parent (or an empty tree for root commits).
 func (rc *repoContext) commitFiles(ref string, opts Options) ([]*diff.File, error) {
-	commit, err := rc.resolveCommit(ref)
+	out, err := rc.diffTreeOut(ref)
 	if err != nil {
 		return nil, err
 	}
-
-	toTree, err := commit.Tree()
-	if err != nil {
-		return nil, err
-	}
-
-	fromTree := &object.Tree{}
-	if commit.NumParents() > 0 {
-		parent, err := commit.Parents().Next()
-		if err != nil {
-			return nil, err
-		}
-		if fromTree, err = parent.Tree(); err != nil {
-			return nil, err
-		}
-	}
-
-	return rc.treeDiff(fromTree, toTree, opts)
+	return rc.patchFiles(out, opts)
 }
 
 // rangeFiles shows the changes between two refs.
 func (rc *repoContext) rangeFiles(fromRef, toRef string, opts Options) ([]*diff.File, error) {
-	from, err := rc.treeForRef(fromRef)
+	out, err := rc.git("diff-tree", "-r", "-M", "-z", fromRef, toRef)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("diff %q..%q: %w", fromRef, toRef, err)
 	}
-	to, err := rc.treeForRef(toRef)
-	if err != nil {
-		return nil, err
-	}
-	return rc.treeDiff(from, to, opts)
-}
-
-// treeForRef resolves a ref, branch or commit hash to its tree.
-func (rc *repoContext) treeForRef(ref string) (*object.Tree, error) {
-	commit, err := rc.resolveCommit(ref)
-	if err != nil {
-		return nil, err
-	}
-	return commit.Tree()
-}
-
-func (rc *repoContext) resolveCommit(ref string) (*object.Commit, error) {
-	if ref == "" || ref == "HEAD" {
-		// HEAD moves when the repository is used outside twig.
-		rc.refreshHead()
-		if rc.head == nil {
-			return nil, errors.New("unborn HEAD")
-		}
-		return rc.head, nil
-	}
-
-	h, err := rc.repo.ResolveRevision(plumbing.Revision(ref))
-	if err != nil {
-		return nil, fmt.Errorf("resolve %q: %w", ref, err)
-	}
-	return rc.repo.CommitObject(*h)
-}
-
-// treeDiff generates a file diff for every change between two trees. A file
-// whose content is missing locally (a shallow or blobless partial clone, or a
-// submodule) becomes a one-line band instead of failing the whole view: the
-// listing is still true, and the reason is visible where the diff would be.
-func (rc *repoContext) treeDiff(from, to *object.Tree, opts Options) ([]*diff.File, error) {
-	changes, err := object.DiffTree(from, to)
-	if err != nil {
-		return nil, err
-	}
-
-	var files []*diff.File
-	for _, c := range changes {
-		fromName, toName := c.From.Name, c.To.Name
-
-		path := toName
-		if path == "" {
-			path = fromName
-		}
-
-		if submoduleMode(c.From.TreeEntry.Mode) || submoduleMode(c.To.TreeEntry.Mode) {
-			files = append(files, diff.Unavailable(path, "submodule"))
-			continue
-		}
-
-		oldText, err := rc.blobContent(c.From.TreeEntry.Hash)
-		if err != nil {
-			files = append(files, unavailableBlob(path, err))
-			continue
-		}
-		newText, err := rc.blobContent(c.To.TreeEntry.Hash)
-		if err != nil {
-			files = append(files, unavailableBlob(path, err))
-			continue
-		}
-
-		kind := diff.Modified
-		switch {
-		case c.From.TreeEntry.Hash.IsZero():
-			kind = diff.Added
-		case c.To.TreeEntry.Hash.IsZero():
-			kind = diff.Deleted
-		case fromName != toName && fromName != "" && toName != "":
-			kind = diff.Renamed
-		}
-
-		f := diff.Generate(path, kind, oldText, newText, generateOptions(opts))
-		f.OldPath = fromName
-		f.NewPath = toName
-		files = append(files, f)
-	}
-
-	sortFiles(files)
-	return files, nil
+	return rc.patchFiles(out, opts)
 }
 
 // Log returns the most recent commits, most recent first.
@@ -247,44 +141,35 @@ func Log(limit int) ([]Commit, error) {
 	if err != nil {
 		return nil, err
 	}
-	rc.refreshHead()
-	if rc.head == nil {
-		return nil, nil
-	}
 
-	iter, err := rc.repo.Log(&git.LogOptions{From: rc.head.Hash})
+	out, err := rc.git("log", "-n", fmt.Sprint(limit),
+		"--pretty=%H%x1f%h%x1f%an%x1f%ad%x1f%s", "--date=format:Jan 2, 2006")
 	if err != nil {
+		// An unborn branch has no log but is not an error to browse.
+		if strings.Contains(err.Error(), "does not have any commits") {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("read log: %w", err)
 	}
-	defer iter.Close()
 
 	var commits []Commit
-	for range limit {
-		c, err := iter.Next()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return nil, err
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\x1f")
+		if len(fields) < 5 {
+			continue
 		}
 		commits = append(commits, Commit{
-			Hash:    c.Hash.String(),
-			Short:   c.Hash.String()[:7],
-			Author:  c.Author.Name,
-			When:    c.Author.When.Format("Jan 2, 2006"),
-			Subject: firstLine(c.Message),
+			Hash:    fields[0],
+			Short:   fields[1],
+			Author:  fields[2],
+			When:    fields[3],
+			Subject: fields[4],
 		})
 	}
 	return commits, nil
-}
-
-func firstLine(s string) string {
-	for i, r := range s {
-		if r == '\n' {
-			return s[:i]
-		}
-	}
-	return s
 }
 
 // Branch returns the current branch name, or "HEAD" when detached.
@@ -293,14 +178,15 @@ func Branch() string {
 	if err != nil {
 		return ""
 	}
-	ref, err := rc.repo.Head()
+	name, err := rc.git("branch", "--show-current")
 	if err != nil {
 		return "HEAD"
 	}
-	if ref.Name().IsBranch() {
-		return ref.Name().Short()
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "HEAD"
 	}
-	return "HEAD"
+	return name
 }
 
 // Stage stages the given paths into the index.
@@ -312,11 +198,8 @@ func Stage(paths ...string) error {
 	if err != nil {
 		return err
 	}
-	if rc.worktree == nil {
-		return ErrNotARepository
-	}
 	for _, p := range paths {
-		if err := rc.worktree.AddWithOptions(&git.AddOptions{Path: p}); err != nil {
+		if _, err := rc.git("add", "--", p); err != nil {
 			return fmt.Errorf("stage %q: %w", p, err)
 		}
 	}
@@ -334,20 +217,15 @@ func Unstage(paths ...string) error {
 	if err != nil {
 		return err
 	}
-	if rc.worktree == nil {
-		return ErrNotARepository
-	}
 
-	headHash := plumbing.ZeroHash
-	if rc.head != nil {
-		headHash = rc.head.Hash
-	}
-	if err := rc.worktree.Reset(&git.ResetOptions{
-		Mode:   git.MixedReset,
-		Commit: headHash,
-		Files:  paths,
-	}); err != nil {
-		return fmt.Errorf("unstage: %w", err)
+	for _, p := range paths {
+		if _, err := rc.git("reset", "-q", "HEAD", "--", p); err != nil {
+			// An unborn branch has no HEAD to reset to: dropping the index
+			// entry is the same operation for git there.
+			if _, err2 := rc.git("rm", "--cached", "-q", "--", p); err2 != nil {
+				return fmt.Errorf("unstage %q: %w", p, err)
+			}
+		}
 	}
 	invalidate()
 	return nil

@@ -7,12 +7,6 @@ import (
 	"sort"
 	"strings"
 
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/filemode"
-	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
-
 	"samouly.fun/twig/internal/diff"
 )
 
@@ -46,9 +40,6 @@ func Status() ([]FileStatus, []FileStatus, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if rc.worktree == nil {
-		return nil, nil, ErrNotARepository
-	}
 
 	snap, err := rc.snapshotFor(true)
 	if err != nil {
@@ -62,14 +53,13 @@ func sortStatus(s []FileStatus) {
 }
 
 // ProjectName returns the repository name: the base name of the work tree
-// root, or the remote repo name when available.
+// root.
 func ProjectName() string {
 	rc, err := open()
-	if err != nil || rc.worktree == nil {
+	if err != nil {
 		return ""
 	}
-	root := rc.worktree.Filesystem.Root()
-	name := filepath.Base(strings.TrimSuffix(root, "/"))
+	name := filepath.Base(strings.TrimSuffix(rc.root, "/"))
 	if name == "" || name == "/" || name == "." {
 		return ""
 	}
@@ -89,9 +79,6 @@ func DiffTargets(targets []DiffTarget, opts Options) ([]*diff.File, error) {
 	rc, err := open()
 	if err != nil {
 		return nil, err
-	}
-	if rc.worktree == nil {
-		return nil, ErrNotARepository
 	}
 
 	snap, err := rc.snapshotFor(false)
@@ -119,19 +106,28 @@ func unavailable(path string) *diff.File {
 	return diff.Unavailable(path, "")
 }
 
-// unavailableBlob is the stand-in for a file whose content is not in the local
-// object database: a shallow or partial (blobless) clone, or a submodule whose
-// repository is not checked out. One path must not take the whole view down.
-func unavailableBlob(path string, err error) *diff.File {
-	if errors.Is(err, plumbing.ErrObjectNotFound) {
-		return diff.Unavailable(path, "content not present locally")
+// diffTreeOut runs diff-tree for one commit against its first parent (the
+// empty tree for a root commit).
+func (rc *repoContext) diffTreeOut(ref string) (string, error) {
+	parent, err := rc.git("rev-parse", "--verify", "--quiet", ref+"^")
+	if err != nil || strings.TrimSpace(parent) == "" {
+		out, err := rc.git("diff-tree", "-r", "-M", "-z", "--root", ref)
+		if err != nil {
+			return "", fmt.Errorf("diff %q: %w", ref, err)
+		}
+		return out, nil
 	}
-	return diff.Unavailable(path, err.Error())
+	out, err := rc.git("diff-tree", "-r", "-M", "-z", strings.TrimSpace(parent), ref)
+	if err != nil {
+		return "", fmt.Errorf("diff %q: %w", ref, err)
+	}
+	return out, nil
 }
 
-// CommitChange is one path a commit changed, derived from tree data alone: no
-// blob is read, so listing even a merge commit is cheap and works in a partial
-// clone. The content is loaded per file, when it is actually looked at.
+// CommitChange is one path a commit changed, derived from tree data alone:
+// no blob is read, so listing even a merge commit is cheap and works in a
+// partial clone. The content is loaded per file, when it is actually looked
+// at.
 type CommitChange struct {
 	Path      string
 	OldPath   string
@@ -146,20 +142,16 @@ func CommitChangeList(ref string) ([]CommitChange, error) {
 	if err != nil {
 		return nil, err
 	}
-	commit, from, to, err := rc.commitTrees(ref)
-	if err != nil {
-		return nil, err
-	}
-	_ = commit
 
-	changes, err := object.DiffTree(from, to)
+	out, err := rc.diffTreeOut(ref)
 	if err != nil {
 		return nil, err
 	}
 
-	out := make([]CommitChange, 0, len(changes))
+	changes := parseRaw(out)
+	list := make([]CommitChange, 0, len(changes))
 	for _, c := range changes {
-		path, oldPath := c.To.Name, c.From.Name
+		path, oldPath := c.path, c.oldPath
 		if path == "" {
 			path = oldPath
 		}
@@ -168,22 +160,22 @@ func CommitChangeList(ref string) ([]CommitChange, error) {
 		}
 		kind := diff.Modified
 		switch {
-		case c.From.TreeEntry.Hash.IsZero():
+		case isZeroOID(c.fromOID):
 			kind = diff.Added
-		case c.To.TreeEntry.Hash.IsZero():
+		case isZeroOID(c.toOID):
 			kind = diff.Deleted
 		case oldPath != "" && path != "" && oldPath != path:
 			kind = diff.Renamed
 		}
-		out = append(out, CommitChange{
+		list = append(list, CommitChange{
 			Path:      path,
 			OldPath:   oldPath,
 			Kind:      kind,
-			Submodule: submoduleMode(c.From.TreeEntry.Mode) || submoduleMode(c.To.TreeEntry.Mode),
+			Submodule: c.fromMode == submoduleMode || c.toMode == submoduleMode,
 		})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	return out, nil
+	sort.Slice(list, func(i, j int) bool { return list[i].Path < list[j].Path })
+	return list, nil
 }
 
 // FileAtCommit builds one file's diff for a commit, on demand.
@@ -196,25 +188,26 @@ func FileAtCommit(ref string, c CommitChange, opts Options) (*diff.File, error) 
 		return diff.Unavailable(c.Path, "submodule"), nil
 	}
 
-	_, from, to, err := rc.commitTrees(ref)
-	if err != nil {
-		return nil, err
-	}
-
 	oldPath := c.OldPath
 	if oldPath == "" {
 		oldPath = c.Path
 	}
-	oldText, newText := "", ""
-	if fromEntry, err := from.File(oldPath); err == nil {
-		if oldText, err = rc.blobContent(fromEntry.Hash); err != nil {
-			return unavailableBlob(c.Path, err), nil
-		}
+
+	// The same diff-tree run lists the two blob ids the content is read
+	// from; re-running it for one file is cheap next to the content reads.
+	out, err := rc.diffTreeOut(ref)
+	if err != nil {
+		return nil, err
 	}
-	if toEntry, err := to.File(c.Path); err == nil {
-		if newText, err = rc.blobContent(toEntry.Hash); err != nil {
-			return unavailableBlob(c.Path, err), nil
-		}
+	fromOID, toOID := rawOIDsFor(out, c.Path, c.OldPath)
+
+	oldText, err := rc.blob(fromOID)
+	if err != nil {
+		return unavailableBlob(c.Path, err), nil
+	}
+	newText, err := rc.blob(toOID)
+	if err != nil {
+		return unavailableBlob(c.Path, err), nil
 	}
 
 	f := diff.Generate(c.Path, c.Kind, oldText, newText, generateOptions(opts))
@@ -223,32 +216,16 @@ func FileAtCommit(ref string, c CommitChange, opts Options) (*diff.File, error) 
 	return f, nil
 }
 
-// commitTrees resolves a commit and its parent's tree (the empty tree for a root
-// commit).
-func (rc *repoContext) commitTrees(ref string) (*object.Commit, *object.Tree, *object.Tree, error) {
-	commit, err := rc.resolveCommit(ref)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	toTree, err := commit.Tree()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	fromTree := &object.Tree{}
-	if commit.NumParents() > 0 {
-		parent, err := commit.Parents().Next()
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		if fromTree, err = parent.Tree(); err != nil {
-			return nil, nil, nil, err
+// rawOIDsFor finds the from/to blob ids of one path in diff-tree output,
+// matching either the new path or, for renames, the old one.
+func rawOIDsFor(out, path, oldPath string) (string, string) {
+	for _, c := range parseRaw(out) {
+		if c.path == path || (oldPath != "" && c.oldPath == oldPath) {
+			return c.fromOID, c.toOID
 		}
 	}
-	return commit, fromTree, toTree, nil
+	return "", ""
 }
-
-// submoduleMode reports whether a tree entry is a gitlink.
-func submoduleMode(m filemode.FileMode) bool { return m == filemode.Submodule }
 
 // FileDiff generates the diff of a single file: staged compares HEAD with
 // the index; unstaged compares the index with the working tree (untracked
@@ -258,14 +235,11 @@ func FileDiff(path string, staged bool, opts Options) (*diff.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if rc.worktree == nil {
-		return nil, ErrNotARepository
-	}
 	return rc.fileDiff(path, staged, opts)
 }
 
-// fileDiff answers from the snapshot: no repository open, no index decode and
-// no worktree walk, just the cached contents of the two sides.
+// fileDiff answers from the snapshot: no extra status run and no repository
+// open, just the cached contents of the two sides.
 func (rc *repoContext) fileDiff(path string, staged bool, opts Options) (*diff.File, error) {
 	snap, err := rc.snapshotFor(false)
 	if err != nil {
@@ -291,50 +265,28 @@ func CommitChanges(message string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if rc.worktree == nil {
-		return "", ErrNotARepository
+
+	if _, err := rc.git("commit", "-q", "-m", message); err != nil {
+		return "", fmt.Errorf("commit: %w", err)
 	}
 
-	opts := &git.CommitOptions{}
-	if rc.head == nil {
-		// First commit on an unborn branch.
-		opts = &git.CommitOptions{}
-	}
-
-	c, err := rc.worktree.Commit(message, opts)
+	hash, err := rc.git("rev-parse", "HEAD")
 	if err != nil {
 		return "", fmt.Errorf("commit: %w", err)
 	}
 	invalidate()
-	return c.String(), nil
+	return strings.TrimSpace(hash), nil
 }
 
-// Push pushes the current branch to its upstream. Authentication is
-// attempted through the SSH agent and then anonymously.
+// Push pushes the current branch to its upstream. Authentication goes
+// through whatever git itself is configured to use.
 func Push() error {
 	rc, err := open()
 	if err != nil {
 		return err
 	}
 
-	ref, err := rc.repo.Head()
-	if err != nil {
-		return fmt.Errorf("push: %w", err)
-	}
-	_ = ref
-
-	if err := rc.repo.Push(&git.PushOptions{}); err == nil {
-		return nil
-	}
-
-	if auth, err := ssh.NewSSHAgentAuth("git"); err == nil {
-		if err := rc.repo.Push(&git.PushOptions{Auth: auth}); err == nil {
-			return nil
-		}
-	}
-
-	// Re-push with no auth to surface the real error message.
-	if err := rc.repo.Push(&git.PushOptions{}); err != nil {
+	if _, err := rc.git("push"); err != nil {
 		return fmt.Errorf("push: %w", err)
 	}
 	return nil

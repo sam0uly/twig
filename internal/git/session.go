@@ -1,58 +1,46 @@
 package git
 
 import (
-	"crypto/sha1"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
-
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/filemode"
-	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
-	"github.com/go-git/go-git/v5/plumbing/format/index"
-	"github.com/go-git/go-git/v5/plumbing/object"
 
 	"samouly.fun/twig/internal/diff"
 )
 
-// repoContext is the shared repository session: one open handle, one decoded
-// index, one HEAD, and the caches every operation reads through.
+// repoContext is the shared repository session: the work tree root, the
+// resolved git directory, and the caches every operation reads through.
+// Repository state is read by driving the git binary through its
+// machine-readable porcelain, so ignore rules, rename detection and the
+// index race checks behave exactly like git itself.
 type repoContext struct {
 	mu sync.Mutex
 
-	cwd      string
-	repo     *git.Repository
-	worktree *git.Worktree
-	head     *object.Commit
+	cwd    string
+	root   string
+	gitDir string
 
-	index     *index.Index
-	indexMod  time.Time
-	indexPath string
-	headTreeC *object.Tree
 	// snapshot is read without taking mu, so a repaint that re-materialises a
-	// block never waits for a status walk that is already in flight.
+	// block never waits for a status run that is already in flight.
 	snapshot atomic.Pointer[snapshot]
-
-	// matcher caches the repository's ignore rules. ReadPatterns walks the
-	// whole tree, so rebuilding it for every status refresh would double the
-	// walk for nothing.
-	matcher    gitignore.Matcher
-	matcherMod time.Time
+	// snapStamp records the mtimes of the index and HEAD at the moment the
+	// snapshot was taken: a change to either means the repository was used
+	// outside twig and the snapshot is stale.
+	snapStamp string
 
 	blobs *blobCache
 	work  *workCache
 	diffs *diffCache
 }
 
-// One session per process: opening a repository and decoding its index is
-// expensive (tens to hundreds of milliseconds on large trees), so everything
-// shares the same handles and caches.
+// One session per process: resolving the work tree root and git directory is
+// a subprocess, so everything shares the same handles and caches.
 var (
 	globalMu sync.Mutex
 	global   *repoContext
@@ -71,175 +59,95 @@ func open() (*repoContext, error) {
 		return global, nil
 	}
 
-	repo, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{
-		DetectDotGit: true,
-	})
+	root, err := runGit(cwd, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrNotARepository, err)
 	}
+	gitDir, err := runGit(cwd, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		gitDir = ""
+	}
 
 	rc := &repoContext{
-		cwd:   cwd,
-		repo:  repo,
-		blobs: newBlobCache(256 << 20),
-		work:  newWorkCache(64 << 20),
-		diffs: newDiffCache(diffCacheBytes),
+		cwd:    cwd,
+		root:   strings.TrimSpace(root),
+		gitDir: strings.TrimSpace(gitDir),
+		blobs:  newBlobCache(256 << 20),
+		work:   newWorkCache(64 << 20),
+		diffs:  newDiffCache(diffCacheBytes),
 	}
-
-	if w, err := repo.Worktree(); err == nil {
-		// Never let an unreadable path (a container volume, a root-owned data
-		// directory) abort status and diff generation.
-		w.Filesystem = lenientFS{w.Filesystem}
-		rc.worktree = w
-		rc.indexPath = findIndexPath(w.Filesystem.Root())
-	}
-	rc.head = resolveHead(repo)
 
 	global = rc
 	return rc, nil
 }
 
-// invalidate drops the cached index, HEAD and status snapshot. Called after
-// staging, unstaging or committing: the working tree changed underneath us.
+// invalidate drops the cached snapshot and worktree contents. Called after
+// staging, unstaging or committing: the repository changed underneath us.
 func invalidate() {
 	globalMu.Lock()
 	defer globalMu.Unlock()
 	if global == nil {
 		return
 	}
-	global.mu.Lock()
-	defer global.mu.Unlock()
-	global.index = nil
-	global.indexMod = time.Time{}
-	global.headTreeC = nil
 	global.snapshot.Store(nil)
-	global.matcher = nil
-	global.matcherMod = time.Time{}
-	global.head = resolveHead(global.repo)
+	global.snapStamp = ""
 	global.work.reset()
 }
 
-func resolveHead(repo *git.Repository) *object.Commit {
-	ref, err := repo.Head()
-	if err != nil {
-		return nil
-	}
-	c, err := repo.CommitObject(ref.Hash())
-	if err != nil {
-		return nil
-	}
-	return c
+// git runs a git subcommand in the session's directory and returns its
+// standard output.
+func (rc *repoContext) git(args ...string) (string, error) {
+	return runGit(rc.cwd, args...)
 }
 
-// findIndexPath locates the index file. Plain repositories keep it in .git;
-// linked worktrees and submodule checkouts replace .git with a file that
-// points at the real git directory.
-func findIndexPath(root string) string {
-	gitPath := filepath.Join(root, ".git")
-	info, err := os.Stat(gitPath)
-	if err != nil {
-		return ""
+// runGit executes git in dir and returns its standard output. Output comes
+// from machine-readable porcelain, so the locale is pinned and git is kept
+// from taking optional index locks while twig is only reading.
+func runGit(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"LC_ALL=C",
+		"GIT_OPTIONAL_LOCKS=0",
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
 	}
-	if info.IsDir() {
-		return filepath.Join(gitPath, "index")
-	}
-
-	b, err := os.ReadFile(gitPath)
-	if err != nil {
-		return ""
-	}
-	rest, ok := strings.CutPrefix(strings.TrimSpace(string(b)), "gitdir:")
-	if !ok {
-		return ""
-	}
-	dir := strings.TrimSpace(rest)
-	if !filepath.IsAbs(dir) {
-		dir = filepath.Join(root, dir)
-	}
-	return filepath.Join(dir, "index")
+	return stdout.String(), nil
 }
 
-// indexModTime returns the index file's own mtime, the reference point for the
-// racy-git rule. An unknown index means "assume every file is racy", which is
-// slower but never misses a change.
-func (rc *repoContext) indexModTime() time.Time {
-	if rc.indexPath == "" {
-		return time.Time{}
-	}
-	if info, err := os.Stat(rc.indexPath); err == nil {
-		return info.ModTime()
-	}
-	return time.Time{}
+// zeroOID is the all-zero object id git reports for a side that does not
+// exist (an unborn HEAD, an added file, a deleted file).
+const zeroOID = "0000000000000000000000000000000000000000"
+
+func isZeroOID(oid string) bool {
+	return oid == "" || oid == zeroOID
 }
 
-// refreshHeadLocked re-resolves HEAD when the repository moved underneath us
-// (a commit, checkout or reset run outside twig). The caller holds rc.mu.
-func (rc *repoContext) refreshHeadLocked() {
-	ref, err := rc.repo.Head()
-	if err != nil {
-		rc.head = nil
-		rc.headTreeC = nil
-		return
-	}
-	if rc.head != nil && rc.head.Hash == ref.Hash() {
-		return
-	}
-	rc.headTreeC = nil
-	c, err := rc.repo.CommitObject(ref.Hash())
-	if err != nil {
-		rc.head = nil
-		return
-	}
-	rc.head = c
-}
-
-// refreshHead re-resolves HEAD under the session lock.
-func (rc *repoContext) refreshHead() {
-	rc.mu.Lock()
-	defer rc.mu.Unlock()
-	rc.refreshHeadLocked()
-}
-
-// headTreeLocked returns HEAD's tree; the caller holds rc.mu.
-func (rc *repoContext) headTreeLocked() (*object.Tree, error) {
-	if rc.headTreeC != nil {
-		return rc.headTreeC, nil
-	}
-	if rc.head == nil {
-		return &object.Tree{}, nil
-	}
-	t, err := rc.head.Tree()
-	if err != nil {
-		return nil, err
-	}
-	rc.headTreeC = t
-	return t, nil
-}
-
-// blobContent returns a blob's contents, cached by object id.
-func (rc *repoContext) blobContent(h plumbing.Hash) (string, error) {
-	if h.IsZero() {
+// blob returns a blob's contents by object id, cached. Git errors surface
+// raw: callers decide whether one missing blob degrades one band or fails
+// the whole view.
+func (rc *repoContext) blob(oid string) (string, error) {
+	if isZeroOID(oid) {
 		return "", nil
 	}
-	if s, ok := rc.blobs.get(h); ok {
+	if s, ok := rc.blobs.get(oid); ok {
 		return s, nil
 	}
 
-	blob, err := rc.repo.BlobObject(h)
+	s, err := runGit(rc.cwd, "cat-file", "blob", oid)
 	if err != nil {
 		return "", err
 	}
-	r, err := blob.Reader()
-	if err != nil {
-		return "", err
-	}
-	defer r.Close()
-
-	s, err := readString(r, blob.Size)
-	if err != nil {
-		return "", err
-	}
-	rc.blobs.put(h, s)
+	rc.blobs.put(oid, s)
 	return s, nil
 }
 
@@ -261,10 +169,7 @@ func readString(r io.Reader, size int64) (string, error) {
 // mtime so repeated selections do not hit the disk. Read errors are reported:
 // an unreadable file must not look like an empty one.
 func (rc *repoContext) worktreeContent(path string) (string, error) {
-	if rc.worktree == nil {
-		return "", ErrNotARepository
-	}
-	full := filepath.Join(rc.worktree.Filesystem.Root(), filepath.FromSlash(path))
+	full := filepath.Join(rc.root, filepath.FromSlash(path))
 	info, err := os.Lstat(full)
 	if err != nil {
 		return "", err
@@ -287,57 +192,21 @@ func (rc *repoContext) worktreeContent(path string) (string, error) {
 	return data, nil
 }
 
-// ignoreMatcher returns the repository's ignore rules, rebuilt only when the
-// root .gitignore changed or the session was invalidated. ReadPatterns walks
-// the whole tree to collect nested files, so rebuilding it per status refresh
-// would double the walk for nothing.
-func (rc *repoContext) ignoreMatcher() gitignore.Matcher {
-	mod := time.Time{}
-	if root := rc.worktree.Filesystem.Root(); root != "" {
-		if info, err := os.Stat(filepath.Join(root, ".gitignore")); err == nil {
-			mod = info.ModTime()
+// stamp returns a fingerprint of the index and HEAD files. A repository used
+// outside twig (a commit, a stage, a reset) rewrites one of them.
+func (rc *repoContext) stamp() string {
+	if rc.gitDir == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, name := range []string{"index", "HEAD"} {
+		if info, err := os.Stat(filepath.Join(rc.gitDir, name)); err == nil {
+			fmt.Fprintf(&b, "%d:%d;", info.ModTime().UnixNano(), info.Size())
+		} else {
+			b.WriteString("missing;")
 		}
 	}
-	if rc.matcher != nil && mod.Equal(rc.matcherMod) {
-		return rc.matcher
-	}
-
-	patterns, err := gitignore.ReadPatterns(rc.worktree.Filesystem, nil)
-	if err != nil {
-		// Do not cache a failed read: the next refresh may succeed.
-		return gitignore.NewMatcher(nil)
-	}
-	rc.matcher = gitignore.NewMatcher(patterns)
-	rc.matcherMod = mod
-	return rc.matcher
-}
-
-// hashWorktreeFile returns the git blob hash of a regular file.
-func hashWorktreeFile(full string) (plumbing.Hash, error) {
-	info, err := os.Stat(full)
-	if err != nil {
-		return plumbing.ZeroHash, err
-	}
-	f, err := os.Open(full)
-	if err != nil {
-		return plumbing.ZeroHash, err
-	}
-	defer f.Close()
-
-	h := sha1.New()
-	_, _ = fmt.Fprintf(h, "blob %d\x00", info.Size())
-	if _, err := io.Copy(h, f); err != nil {
-		return plumbing.ZeroHash, err
-	}
-	return plumbing.Hash(h.Sum(nil)), nil
-}
-
-// hashString returns the git blob hash of an in-memory string.
-func hashString(s string) plumbing.Hash {
-	h := sha1.New()
-	_, _ = fmt.Fprintf(h, "blob %d\x00", len(s))
-	_, _ = io.WriteString(h, s)
-	return plumbing.Hash(h.Sum(nil))
+	return b.String()
 }
 
 // ---------------------------------------------------------------- caches
@@ -345,27 +214,27 @@ func hashString(s string) plumbing.Hash {
 // blobCache is a byte-bounded LRU of blob contents, keyed by object id.
 type blobCache struct {
 	mu    sync.Mutex
-	m     map[plumbing.Hash]string
-	order []plumbing.Hash
+	m     map[string]string
+	order []string
 	bytes int
 	limit int
 }
 
 func newBlobCache(limit int) *blobCache {
-	return &blobCache{m: make(map[plumbing.Hash]string), limit: limit}
+	return &blobCache{m: make(map[string]string), limit: limit}
 }
 
-func (c *blobCache) get(h plumbing.Hash) (string, bool) {
+func (c *blobCache) get(oid string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	s, ok := c.m[h]
+	s, ok := c.m[oid]
 	return s, ok
 }
 
-func (c *blobCache) put(h plumbing.Hash, s string) {
+func (c *blobCache) put(oid, s string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, ok := c.m[h]; ok {
+	if _, ok := c.m[oid]; ok {
 		return
 	}
 	for c.bytes+len(s) > c.limit && len(c.order) > 0 {
@@ -379,8 +248,8 @@ func (c *blobCache) put(h plumbing.Hash, s string) {
 	if len(s) > c.limit {
 		return
 	}
-	c.m[h] = s
-	c.order = append(c.order, h)
+	c.m[oid] = s
+	c.order = append(c.order, oid)
 	c.bytes += len(s)
 }
 
@@ -498,37 +367,4 @@ func (c *diffCache) put(key string, f *diff.File) {
 			delete(c.m, old)
 		}
 	}
-}
-
-// treeEntry is one flattened tree row.
-type treeEntry struct {
-	hash plumbing.Hash
-	mode filemode.FileMode
-}
-
-// treeMap flattens a tree into path -> (oid, mode) for its files. Directory
-// entries come back from the walker too, and submodules carry a commit id:
-// neither is a blob, so neither may enter a map that later gets read as file
-// content (that is what produced phantom staged deletions of directories).
-func treeMap(t *object.Tree) (map[string]treeEntry, error) {
-	out := make(map[string]treeEntry)
-	if t == nil {
-		return out, nil
-	}
-	walker := object.NewTreeWalker(t, true, nil)
-	defer walker.Close()
-	for {
-		name, entry, err := walker.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-		if !entry.Mode.IsFile() {
-			continue
-		}
-		out[name] = treeEntry{hash: entry.Hash, mode: entry.Mode}
-	}
-	return out, nil
 }

@@ -1,26 +1,16 @@
 package git
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
-	"time"
-
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/filemode"
-	"github.com/go-git/go-git/v5/plumbing/format/index"
 
 	"samouly.fun/twig/internal/diff"
 )
 
-// snapshot is one coherent view of the repository state: the staged changes
-// (HEAD vs index, pure object comparison) and the worktree changes (index vs
-// disk, one stat-first walk). Everything else reads from it, so no operation
-// re-runs a full status.
+// snapshot is one coherent view of the repository state, produced by a
+// single `git status --porcelain=v2` run: the staged changes (HEAD vs index)
+// and the worktree changes (index vs disk). Everything else reads from it,
+// so no operation re-runs a status.
 type snapshot struct {
 	staged   []FileStatus
 	unstaged []FileStatus
@@ -41,15 +31,14 @@ type snapFile struct {
 	// change, exactly like git's "old mode / new mode" output.
 	modeChanged bool
 
-	headHash  plumbing.Hash
-	indexHash plumbing.Hash
-	workHash  plumbing.Hash
+	headOID  string
+	indexOID string
 }
 
 // snapshotFor returns a snapshot, computing it when missing (or always when
 // force is set, which is what a refresh does). Readers that only need the
-// current state (a block being re-materialised while painting) take the cached
-// pointer without waiting for a walk that is already in flight.
+// current state (a block being re-materialised while painting) take the
+// cached pointer without waiting for a status run that is already in flight.
 func (rc *repoContext) snapshotFor(force bool) (*snapshot, error) {
 	if !force {
 		if snap := rc.snapshot.Load(); snap != nil {
@@ -74,84 +63,44 @@ func (rc *repoContext) snapshotFor(force bool) (*snapshot, error) {
 	return snap, nil
 }
 
-// buildSnapshot computes the staged and worktree halves of the status. The
-// caller holds rc.mu.
+// buildSnapshot runs one status pass and parses it. The porcelain v2 format
+// carries the index and HEAD blob ids and file modes directly, so the two
+// sides of every diff are identified without walking the object database.
 func (rc *repoContext) buildSnapshot() (*snapshot, error) {
-	if rc.worktree == nil {
-		return nil, ErrNotARepository
-	}
-
-	// The repository moves underneath us: commits, checkouts and resets run
-	// outside twig all the time.
-	rc.refreshHeadLocked()
-
-	idx, idxMod, err := rc.indexLocked()
+	out, err := rc.git("status", "--porcelain=v2", "-z",
+		"--untracked-files=all", "--find-renames")
 	if err != nil {
-		return nil, err
-	}
-	headTree, err := rc.headTreeLocked()
-	if err != nil {
-		return nil, err
-	}
-	headMap, err := treeMap(headTree)
-	if err != nil {
-		return nil, err
-	}
-
-	indexMap := make(map[string]*index.Entry, len(idx.Entries))
-	for _, e := range idx.Entries {
-		if e.Stage != 0 {
-			continue
-		}
-		indexMap[e.Name] = e
+		return nil, fmt.Errorf("status: %w", err)
 	}
 
 	snap := &snapshot{files: make(map[string]*snapFile)}
+	stamp := rc.stamp()
 
-	// ---- staged: HEAD tree vs index, no filesystem access.
-	paths := make([]string, 0, len(indexMap)+len(headMap))
-	for p := range indexMap {
-		paths = append(paths, p)
-	}
-	for p := range headMap {
-		if _, ok := indexMap[p]; !ok {
-			paths = append(paths, p)
-		}
-	}
-	sort.Strings(paths)
-
-	var added, deleted []string
-	for _, p := range paths {
-		ie, inIndex := indexMap[p]
-		he, inHead := headMap[p]
-
+	// With -z, each record is NUL-terminated as one token; a rename record
+	// is followed by a second token holding the original path.
+	tokens := strings.Split(out, "\x00")
+	for i := 0; i < len(tokens); i++ {
+		tok := tokens[i]
 		switch {
-		case inIndex && !inHead:
-			snap.add(p, &snapFile{
-				path: p, staged: true, stagedKind: diff.Added,
-				indexHash: ie.Hash,
-			})
-			added = append(added, p)
-		case !inIndex && inHead:
-			snap.add(p, &snapFile{
-				path: p, staged: true, stagedKind: diff.Deleted,
-				headHash: he.hash,
-			})
-			deleted = append(deleted, p)
-		case inIndex && inHead:
-			if ie.Hash != he.hash || ie.Mode != he.mode {
-				snap.add(p, &snapFile{
-					path: p, staged: true, stagedKind: diff.Modified,
-					headHash: he.hash, indexHash: ie.Hash,
-					modeChanged: ie.Mode != he.mode,
-				})
+		case strings.HasPrefix(tok, "1 "):
+			parseOrdinary(snap, strings.SplitN(tok, " ", 9))
+		case strings.HasPrefix(tok, "2 "):
+			origPath := ""
+			if i+1 < len(tokens) {
+				origPath = tokens[i+1]
+				i++
 			}
+			parseRename(snap, strings.SplitN(tok, " ", 10), origPath)
+		case strings.HasPrefix(tok, "? "):
+			path := tok[2:]
+			if path == "" {
+				continue
+			}
+			snap.add(path, &snapFile{
+				path: path, untracked: true, unstagedKind: diff.Added,
+			})
 		}
 	}
-	snap.detectRenames(added, deleted, headMap)
-
-	// ---- worktree: index vs disk, one stat-first walk.
-	rc.walkWorktree(snap, indexMap, idxMod)
 
 	for _, f := range snap.files {
 		if f.staged {
@@ -173,9 +122,6 @@ func (rc *repoContext) buildSnapshot() (*snapshot, error) {
 		if f.unstagedKind != diff.Modified && f.unstagedKind != diff.Added && f.unstagedKind != diff.Deleted {
 			continue
 		}
-		if f.workHash.IsZero() && f.unstagedKind == diff.Modified {
-			continue
-		}
 		snap.unstaged = append(snap.unstaged, FileStatus{
 			Path:   f.path,
 			Letter: letterFor(f.unstagedKind),
@@ -184,191 +130,120 @@ func (rc *repoContext) buildSnapshot() (*snapshot, error) {
 
 	sortStatus(snap.staged)
 	sortStatus(snap.unstaged)
+
+	rc.snapStamp = stamp
 	return snap, nil
 }
 
-// add stores or merges a file entry. A path can be staged and unstaged at the
-// same time.
+// submoduleOID mode marks a gitlink entry: a submodule, never diffable text.
+const submoduleMode = "160000"
+
+// parseOrdinary handles "1" records: one path, index and worktree status
+// letters, and the modes and blob ids of all three sides.
+func parseOrdinary(snap *snapshot, f []string) {
+	if len(f) < 9 {
+		return
+	}
+	xy, mH, mI, mW, hH, hI, path := f[1], f[3], f[4], f[5], f[6], f[7], f[8]
+	if path == "" || mH == submoduleMode || mI == submoduleMode {
+		return
+	}
+
+	// X is the index side: the staged change, if any.
+	switch x := xy[0]; x {
+	case 'A':
+		snap.add(path, &snapFile{
+			path: path, staged: true, stagedKind: diff.Added, indexOID: hI,
+		})
+	case 'D':
+		snap.add(path, &snapFile{
+			path: path, staged: true, stagedKind: diff.Deleted, headOID: hH,
+		})
+	case 'R', 'C':
+		kind := diff.Renamed
+		if x == 'C' {
+			kind = diff.Copied
+		}
+		snap.add(path, &snapFile{
+			path: path, staged: true, stagedKind: kind,
+			headOID: hH, indexOID: hI,
+		})
+	case 'M':
+		snap.add(path, &snapFile{
+			path: path, staged: true, stagedKind: diff.Modified,
+			headOID: hH, indexOID: hI, modeChanged: mH != mI,
+		})
+	}
+
+	// Y is the worktree side: the unstaged change, if any.
+	switch y := xy[1]; y {
+	case 'M':
+		// mW is 000000 when the file is gone from the worktree, which the
+		// D branch below reports instead.
+		modeChanged := mW != "000000" && mW != mI
+		snap.add(path, &snapFile{
+			path: path, unstagedKind: diff.Modified,
+			indexOID: hI, modeChanged: modeChanged,
+		})
+	case 'D':
+		snap.add(path, &snapFile{
+			path: path, unstagedKind: diff.Deleted, indexOID: hI,
+		})
+	}
+}
+
+// parseRename handles "2" records: the path in the record, the original path
+// in the following token.
+func parseRename(snap *snapshot, f []string, origPath string) {
+	if len(f) < 10 || origPath == "" {
+		return
+	}
+	xy, mH, mI, hH, hI, path := f[1], f[3], f[4], f[6], f[7], f[9]
+	if path == "" || mH == submoduleMode || mI == submoduleMode {
+		return
+	}
+
+	if x := xy[0]; x == 'R' || x == 'C' {
+		kind := diff.Renamed
+		if x == 'C' {
+			kind = diff.Copied
+		}
+		snap.add(path, &snapFile{
+			path: path, oldPath: origPath, staged: true, stagedKind: kind,
+			headOID: hH, indexOID: hI,
+		})
+	}
+
+	switch y := xy[1]; y {
+	case 'M':
+		snap.add(path, &snapFile{path: path, unstagedKind: diff.Modified, indexOID: hI})
+	case 'D':
+		snap.add(path, &snapFile{path: path, unstagedKind: diff.Deleted, indexOID: hI})
+	}
+}
+
+// add stores or merges a file entry. A path can be staged and unstaged at
+// the same time.
 func (s *snapshot) add(path string, f *snapFile) {
 	if existing, ok := s.files[path]; ok {
 		if f.staged {
 			existing.staged = true
 			existing.stagedKind = f.stagedKind
-			existing.headHash = f.headHash
-			existing.indexHash = f.indexHash
+			existing.headOID = f.headOID
+			existing.indexOID = f.indexOID
 			existing.oldPath = f.oldPath
 		} else {
 			existing.untracked = existing.untracked || f.untracked
 			if f.unstagedKind != 0 {
 				existing.unstagedKind = f.unstagedKind
 			}
-			if !f.workHash.IsZero() {
-				existing.workHash = f.workHash
-			}
+		}
+		if f.modeChanged {
+			existing.modeChanged = true
 		}
 		return
 	}
 	s.files[path] = f
-}
-
-// detectRenames turns exact add/delete twins into staged renames, like git
-// reports them.
-func (s *snapshot) detectRenames(added, deleted []string, headMap map[string]treeEntry) {
-	byHash := make(map[plumbing.Hash][]string, len(deleted))
-	for _, p := range deleted {
-		he := headMap[p]
-		byHash[he.hash] = append(byHash[he.hash], p)
-	}
-	for _, addPath := range added {
-		f := s.files[addPath]
-		if f == nil || f.indexHash.IsZero() {
-			continue
-		}
-		cands := byHash[f.indexHash]
-		if len(cands) == 0 {
-			continue
-		}
-		oldPath := cands[0]
-		byHash[f.indexHash] = cands[1:]
-
-		f.stagedKind = diff.Renamed
-		f.oldPath = oldPath
-		f.headHash = headMap[oldPath].hash
-		delete(s.files, oldPath)
-	}
-}
-
-// walkWorktree compares the index against the filesystem. Ignored directories
-// are pruned before descending and unreadable paths are skipped, so a stray
-// data directory can neither slow the walk nor abort it.
-func (rc *repoContext) walkWorktree(snap *snapshot, indexMap map[string]*index.Entry, idxMod time.Time) {
-	root := rc.worktree.Filesystem.Root()
-
-	trackedDirs := make(map[string]bool, len(indexMap))
-	for p := range indexMap {
-		dir := filepath.ToSlash(filepath.Dir(p))
-		for dir != "." && dir != "/" && dir != "" && !trackedDirs[dir] {
-			trackedDirs[dir] = true
-			dir = filepath.ToSlash(filepath.Dir(dir))
-		}
-	}
-
-	matcher := rc.ignoreMatcher()
-
-	seen := make(map[string]bool, len(indexMap))
-
-	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			// Unreadable entries are skipped, never fatal.
-			if d != nil && d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, p)
-		if relErr != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		if rel == "." {
-			return nil
-		}
-		// A linked worktree or a submodule checkout holds .git as a file, and
-		// nested repositories show up the same way: never a tracked path.
-		if d.Name() == ".git" {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			if !trackedDirs[rel] && matcher.Match(strings.Split(rel, "/"), true) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		entry, tracked := indexMap[rel]
-		if !tracked && matcher.Match(strings.Split(rel, "/"), false) {
-			return nil
-		}
-		if !tracked {
-			snap.add(rel, &snapFile{path: rel, untracked: true, unstagedKind: diff.Added})
-			return nil
-		}
-
-		seen[rel] = true
-		info, statErr := d.Info()
-		if statErr != nil {
-			return nil
-		}
-		if info.IsDir() {
-			// Gitlink/submodule: not diffable as text.
-			return nil
-		}
-
-		if h, changed, modeChanged := rc.worktreeChanged(p, info, entry, idxMod); changed {
-			f := &snapFile{
-				path: rel, unstagedKind: diff.Modified,
-				indexHash: entry.Hash, modeChanged: modeChanged,
-			}
-			f.workHash = h
-			snap.add(rel, f)
-		}
-		return nil
-	})
-
-	// Deleted: tracked paths the walk never saw.
-	for p, entry := range indexMap {
-		if seen[p] || !entry.Mode.IsFile() {
-			continue
-		}
-		snap.add(p, &snapFile{
-			path: p, unstagedKind: diff.Deleted,
-			indexHash: entry.Hash, headHash: entry.Hash,
-		})
-	}
-}
-
-// worktreeChanged reports whether a tracked file differs from its index entry,
-// hashing only when the metadata cannot prove it clean.
-func (rc *repoContext) worktreeChanged(full string, info os.FileInfo, entry *index.Entry, idxMod time.Time) (hash plumbing.Hash, changed, modeChanged bool) {
-	if info.Mode()&os.ModeSymlink != 0 {
-		target, err := os.Readlink(full)
-		if err != nil {
-			return plumbing.ZeroHash, false, false
-		}
-		h := hashString(target)
-		return h, h != entry.Hash, false
-	}
-	if !info.Mode().IsRegular() {
-		return plumbing.ZeroHash, false, false
-	}
-
-	exec := info.Mode().Perm()&0o100 != 0
-	modeChanged = exec != (entry.Mode == filemode.Executable)
-
-	// Racy-git: a file whose mtime is at or after the index write may have been
-	// changed within the same timestamp tick, so it is verified by hashing.
-	// An unknown index mtime means "assume racy" rather than trust the stat.
-	racy := idxMod.IsZero() || !info.ModTime().Before(idxMod)
-	metaClean := info.Size() == int64(entry.Size) &&
-		info.ModTime().Equal(entry.ModifiedAt) &&
-		!modeChanged && !racy
-	if metaClean {
-		return plumbing.ZeroHash, false, false
-	}
-
-	h, err := hashWorktreeFile(full)
-	if err != nil {
-		return plumbing.ZeroHash, false, false
-	}
-	if h == entry.Hash && !modeChanged {
-		// Content is unchanged; a stat refresh would make the next walk cheap,
-		// but we never write the index, so just report clean.
-		return plumbing.ZeroHash, false, false
-	}
-	return h, true, modeChanged
 }
 
 // fileFor returns the diff inputs for one path.
@@ -400,12 +275,12 @@ func (rc *repoContext) diffFile(f *snapFile, staged bool, opts Options) (*diff.F
 		return nil, fmt.Errorf("no change for %q", f.path)
 	}
 
-	oldHash, newHash := f.indexHash, plumbing.ZeroHash
+	oldOID, newOID := f.indexOID, ""
 	if staged {
-		oldHash, newHash = f.headHash, f.indexHash
+		oldOID, newOID = f.headOID, f.indexOID
 	}
 
-	key := fmt.Sprintf("%s|%s|%d|%t|%s|%t|%d", oldHash, newHash, opts.Context,
+	key := fmt.Sprintf("%s|%s|%d|%t|%s|%t|%d", oldOID, newOID, opts.Context,
 		opts.IgnoreWhitespace, f.path, staged, kind)
 	if cached, ok := rc.diffs.get(key); ok {
 		return cached, nil
@@ -414,14 +289,14 @@ func (rc *repoContext) diffFile(f *snapFile, staged bool, opts Options) (*diff.F
 	var oldText, newText string
 	var err error
 	if staged {
-		if oldText, err = rc.blobContent(f.headHash); err != nil {
+		if oldText, err = rc.blob(oldOID); err != nil {
 			return nil, err
 		}
-		if newText, err = rc.blobContent(f.indexHash); err != nil {
+		if newText, err = rc.blob(newOID); err != nil {
 			return nil, err
 		}
 	} else {
-		if oldText, err = rc.blobContent(f.indexHash); err != nil {
+		if oldText, err = rc.blob(oldOID); err != nil {
 			return nil, err
 		}
 		if kind == diff.Deleted {
@@ -464,9 +339,6 @@ func (rc *repoContext) statusFiles(staged bool, opts Options) ([]*diff.File, err
 		if !staged && (f.untracked || f.unstagedKind == 0) {
 			continue
 		}
-		if staged && !f.staged {
-			continue
-		}
 		file, err := rc.diffFile(f, staged, opts)
 		if err != nil {
 			continue
@@ -485,27 +357,6 @@ func (rc *repoContext) stagedFiles(opts Options) ([]*diff.File, error) {
 	return rc.statusFiles(true, opts)
 }
 
-// indexLocked returns the decoded index, decoding it again whenever the file
-// on disk changed. Commits, resets and stash operations run outside twig, so a
-// cached decode must never outlive the file it came from. The caller holds
-// rc.mu.
-func (rc *repoContext) indexLocked() (*index.Index, time.Time, error) {
-	// Stat before decoding: if the index is rewritten while we read it, the
-	// next refresh sees a different mtime and decodes again.
-	mod := rc.indexModTime()
-	if rc.index != nil && mod.Equal(rc.indexMod) {
-		return rc.index, rc.indexMod, nil
-	}
-
-	idx, err := rc.repo.Storer.Index()
-	if err != nil {
-		return nil, time.Time{}, err
-	}
-	rc.index = idx
-	rc.indexMod = mod
-	return idx, rc.indexMod, nil
-}
-
 func letterFor(kind diff.ChangeKind) string {
 	switch kind {
 	case diff.Added:
@@ -521,4 +372,135 @@ func letterFor(kind diff.ChangeKind) string {
 	}
 }
 
-var _ = errors.Is
+// ---------------------------------------------------------------- commits
+
+// rawChange is one diff-tree entry: two modes, two blob ids, a status letter
+// and up to two paths.
+type rawChange struct {
+	fromMode, toMode string
+	fromOID, toOID   string
+	status           string
+	path, oldPath    string
+}
+
+// parseRaw splits NUL-delimited diff-tree output into entries. Each entry is
+// one token of five space-separated fields, terminated by a NUL that is
+// immediately followed by the path (and, for renames and copies, a second
+// token with the original path). The first token of a single-commit run is
+// the commit id itself, which carries no colon and is skipped.
+func parseRaw(out string) []rawChange {
+	var changes []rawChange
+	tokens := strings.Split(out, "\x00")
+	for i := 0; i < len(tokens); i++ {
+		tok := tokens[i]
+		if !strings.HasPrefix(tok, ":") {
+			continue
+		}
+		f := strings.SplitN(tok, " ", 5)
+		if len(f) < 5 || i+1 >= len(tokens) {
+			continue
+		}
+		c := rawChange{
+			fromMode: strings.TrimPrefix(f[0], ":"),
+			toMode:   f[1],
+			fromOID:  f[2],
+			toOID:    f[3],
+			status:   f[4],
+			path:     tokens[i+1],
+		}
+		i++
+		if strings.HasPrefix(c.status, "R") || strings.HasPrefix(c.status, "C") {
+			if i+1 < len(tokens) {
+				c.oldPath = c.path
+				c.path = tokens[i+1]
+				i++
+			}
+		}
+		changes = append(changes, c)
+	}
+	return changes
+}
+
+// patchFiles turns raw diff-tree output into diff files. A file whose
+// content is missing locally (a shallow or blobless partial clone) becomes a
+// one-line band instead of failing the whole view: the listing is still
+// true, and the reason is visible where the diff would be.
+func (rc *repoContext) patchFiles(out string, opts Options) ([]*diff.File, error) {
+	var files []*diff.File
+	for _, c := range parseRaw(out) {
+		if c.path == "" {
+			continue
+		}
+		if c.fromMode == submoduleMode || c.toMode == submoduleMode {
+			files = append(files, diff.Unavailable(c.path, "submodule"))
+			continue
+		}
+
+		kind := diff.Modified
+		oldPath := c.path
+		switch {
+		case isZeroOID(c.fromOID):
+			kind = diff.Added
+		case isZeroOID(c.toOID):
+			kind = diff.Deleted
+		case c.oldPath != "" && c.oldPath != c.path:
+			kind = diff.Renamed
+			oldPath = c.oldPath
+		}
+
+		oldText, err := rc.blob(c.fromOID)
+		if err != nil {
+			files = append(files, unavailableBlob(c.path, err))
+			continue
+		}
+		newText, err := rc.blob(c.toOID)
+		if err != nil {
+			files = append(files, unavailableBlob(c.path, err))
+			continue
+		}
+
+		f := diff.Generate(c.path, kind, oldText, newText, generateOptions(opts))
+		f.OldPath = oldPath
+		f.NewPath = c.path
+		if c.fromMode != c.toMode && len(f.Hunks) == 0 {
+			f.Lines = append(f.Lines, diff.Line{
+				Kind: diff.NoNewline,
+				Text: "file mode changed",
+			})
+		}
+		files = append(files, f)
+	}
+
+	sortFiles(files)
+	return files, nil
+}
+
+// unavailableBlob is the stand-in for a file whose content is not in the
+// local object database: a shallow or partial (blobless) clone, or a deleted
+// object. One path must not take the whole view down.
+func unavailableBlob(path string, err error) *diff.File {
+	if isMissingObject(err) {
+		return diff.Unavailable(path, "content not present locally")
+	}
+	return diff.Unavailable(path, err.Error())
+}
+
+// isMissingObject reports whether a cat-file failure means the blob is not
+// in the local object database, as opposed to a repository-level problem.
+func isMissingObject(err error) bool {
+	msg := err.Error()
+	for _, marker := range []string{
+		"bad file",
+		"bad object",
+		"not a valid object",
+		"unable to read",
+		"missing blob",
+		"does not exist",
+		"could not be read",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
