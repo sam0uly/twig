@@ -272,6 +272,11 @@ func (m model) footerView() string {
 	info := statusbar.Info{
 		Message: m.message,
 	}
+	// a push goes over the network and can take seconds: the spinner is the
+	// only thing on screen that says it is still working
+	if m.pushing {
+		info.Message = m.spinner.View() + " pushing…"
+	}
 	// the footer says when refreshing has fallen back to polling, so a slow
 	// update is never a mystery
 	info.Watch = m.refreshMode()

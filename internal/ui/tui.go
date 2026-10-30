@@ -147,6 +147,9 @@ type model struct {
 	// spinnerTicking records whether the spinner chain is running, so it is
 	// started once per load and stops when the load lands.
 	spinnerTicking bool
+	// pushing marks a push in flight: it talks to the network, so the footer
+	// shows the spinner until it returns.
+	pushing bool
 
 	// watcher reports filesystem activity around the repository. watchOff
 	// records that there is no watcher to have, so it is never tried twice,
@@ -273,9 +276,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		nm.welcomeTicking = true
 		cmd = tea.Batch(cmd, welcomeTick())
 	}
-	// The spinner is the only animation that runs before content exists: it
-	// starts with the first load and its chain ends when that load lands.
-	if nm.loading() && !nm.spinnerTicking {
+	// The spinner runs only while there is work in front of the user: the
+	// first load, and a push. Its chain ends when that work lands.
+	if (nm.loading() || nm.pushing) && !nm.spinnerTicking {
 		nm.spinnerTicking = true
 		cmd = tea.Batch(cmd, nm.spinner.Tick)
 	}
@@ -651,6 +654,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.requestStatus(false), loadLogCmd(m.cfg.LogLimit), setMessageCmd(m.message))
 
 	case pushedMsg:
+		m.pushing = false
 		if msg.err != nil {
 			m.message = msg.err.Error()
 		} else {
@@ -845,7 +849,7 @@ func (m model) updateChildren(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// The spinner runs only while the first diff is on its way. Every frame
 	// repaints the whole view, so an idle twig keeps the chain stopped.
-	if m.loading() || !isSpinnerTick(msg) {
+	if m.loading() || m.pushing || !isSpinnerTick(msg) {
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
 	} else {
@@ -1202,7 +1206,7 @@ func (m model) updateFocus(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Commit):
 			return m.startCompose()
 		case key.Matches(msg, m.keys.Push):
-			return m, pushCmd()
+			return m.startPush()
 		case key.Matches(msg, m.keys.Stage):
 			return m.toggleStage(true)
 		case key.Matches(msg, m.keys.Unstage):
@@ -1261,7 +1265,7 @@ func (m model) updateFocus(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Commit):
 			return m.startCompose()
 		case key.Matches(msg, m.keys.Push):
-			return m, pushCmd()
+			return m.startPush()
 		}
 		// Keys belong only to the main pane; the sidebar must not scroll.
 		return m.forwardMain(msg)
@@ -1881,6 +1885,18 @@ func commitCmd(message string) tea.Cmd {
 		hash, err := git.CommitChanges(message)
 		return committedMsg{hash: hash, err: err}
 	}
+}
+
+// startPush runs the push in the background and marks the footer busy. A push
+// goes over the network, so it can take a while, and a silent pause would read
+// as a hang.
+func (m model) startPush() (tea.Model, tea.Cmd) {
+	if m.pushing {
+		return m, nil
+	}
+	m.pushing = true
+	m.message = ""
+	return m, pushCmd()
 }
 
 func pushCmd() tea.Cmd {
