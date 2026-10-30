@@ -54,6 +54,14 @@ var (
 // that moves between repositories (tests do) gets a fresh one.
 func open() (*repoContext, error) {
 	cwd, _ := os.Getwd()
+	// git answers with physical paths, while the process cwd can be a logical
+	// one reached through a symlink (macOS /var -> /private/var, or any
+	// symlinked checkout). Resolving it here keeps every path this session
+	// produces in one spelling, so a watch set cannot hold the same directory
+	// twice under two names.
+	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = resolved
+	}
 
 	globalMu.Lock()
 	defer globalMu.Unlock()
@@ -191,7 +199,7 @@ func (rc *repoContext) worktreeContent(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	data, err := readString(f, info.Size())
 	if err != nil {

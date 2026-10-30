@@ -659,23 +659,30 @@ func TestWatchTargetsCoverARealSave(t *testing.T) {
 	h.commitAll("initial")
 	h.write("a.txt", "one\ntwo\n")
 
+	// t.TempDir can hand back a logical path while git answers with the
+	// physical one, so compare in the same spelling
+	root, err := filepath.EvalSymlinks(h.dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
 	paths := []string{"a.txt"}
 	dirs := WatchDirs(paths)
 	files := WatchFiles(paths)
 
-	if !hasPath(dirs, h.dir) {
-		t.Fatalf("WatchDirs = %v, want the work tree root", dirs)
+	if !hasPath(dirs, root) {
+		t.Fatalf("WatchDirs = %v, want the work tree root %s", dirs, root)
 	}
-	if !hasPath(dirs, filepath.Join(h.dir, ".git")) {
+	if !hasPath(dirs, filepath.Join(root, ".git")) {
 		t.Fatalf("WatchDirs = %v, want the git directory", dirs)
 	}
-	if !hasPath(files, filepath.Join(h.dir, "a.txt")) {
+	if !hasPath(files, filepath.Join(root, "a.txt")) {
 		t.Fatalf("WatchFiles = %v, want the changed file", files)
 	}
-	if !hasPath(dirs, filepath.Join(h.dir, ".git", "refs", "heads")) {
+	if !hasPath(dirs, filepath.Join(root, ".git", "refs", "heads")) {
 		t.Fatalf("WatchDirs = %v, want the refs directory", dirs)
 	}
-	if !hasPath(files, filepath.Join(h.dir, ".git", "index")) {
+	if !hasPath(files, filepath.Join(root, ".git", "index")) {
 		t.Fatalf("WatchFiles = %v, want the index", files)
 	}
 
@@ -701,4 +708,44 @@ func hasPath(list []string, path string) bool {
 		}
 	}
 	return false
+}
+
+// TestWatchTargetsUseOneSpellingUnderSymlinks covers a checkout reached through
+// a symlink, which is every macOS temporary directory (/var -> /private/var)
+// and any symlinked checkout anywhere. git answers with the physical path while
+// the process cwd is the logical one, so the same directory used to enter the
+// watch set twice under two names.
+func TestWatchTargetsUseOneSpellingUnderSymlinks(t *testing.T) {
+	h := newRepoHarness(t)
+	h.write("a.txt", "one\n")
+	h.commitAll("initial")
+	h.write("a.txt", "one\ntwo\n")
+
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(h.dir, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	t.Chdir(link)
+
+	dirs := WatchDirs([]string{"a.txt"})
+	files := WatchFiles([]string{"a.txt"})
+
+	assertUnique := func(label string, paths []string) {
+		t.Helper()
+		seen := make(map[string]bool, len(paths))
+		for _, path := range paths {
+			// a missing git file has no physical form to compare, so its own
+			// spelling is what must not repeat
+			key := path
+			if real, err := filepath.EvalSymlinks(path); err == nil {
+				key = real
+			}
+			if seen[key] {
+				t.Fatalf("%s = %v, %q appears twice", label, paths, key)
+			}
+			seen[key] = true
+		}
+	}
+	assertUnique("WatchDirs", dirs)
+	assertUnique("WatchFiles", files)
 }
