@@ -13,10 +13,18 @@ import (
 // has no event backend.
 func newWatcher(t *testing.T, dirs ...string) *Watcher {
 	t.Helper()
+	return newWatcherOpts(t, Options{Dirs: dirs})
+}
+
+// newWatcherOpts is the same with the full target set, which is what a test
+// needs when it writes to an existing file: on a platform that watches vnodes,
+// a directory watch sees entries change but not a file's contents.
+func newWatcherOpts(t *testing.T, opts Options) *Watcher {
+	t.Helper()
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
 		t.Skip("no event backend on this platform")
 	}
-	w, err := New(Options{Dirs: dirs})
+	w, err := New(opts)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -55,7 +63,13 @@ func TestWatcherReportsChange(t *testing.T) {
 func TestWatcherReportsModify(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "a.txt", "one\n")
-	w := newWatcher(t, dir)
+	// the file is part of the set as well as its directory: inotify reports a
+	// child's content write through the directory watch, kqueue only through
+	// the file's own vnode
+	w := newWatcherOpts(t, Options{
+		Dirs:  []string{dir},
+		Files: []string{filepath.Join(dir, "a.txt")},
+	})
 
 	write(t, dir, "a.txt", "one\ntwo\n")
 	if !awaitEvent(t, w, 3*time.Second) {

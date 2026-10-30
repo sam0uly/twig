@@ -23,6 +23,11 @@ func newRepoHarness(t *testing.T) *repoHarness {
 	h := &repoHarness{t: t, dir: t.TempDir()}
 	t.Chdir(h.dir)
 	h.git("init", "--initial-branch=main")
+	// the repository carries its own identity: product code commits through
+	// git without setting GIT_AUTHOR_*, so a runner with no global config
+	// would otherwise fail the tests that exercise it
+	h.git("config", "user.name", "Test")
+	h.git("config", "user.email", "test@example.com")
 	return h
 }
 
@@ -100,6 +105,8 @@ func newTestRepo(t *testing.T) {
 	}
 
 	run("init", "--initial-branch=main")
+	run("config", "user.name", "Test")
+	run("config", "user.email", "test@example.com")
 	mustWrite("a.txt", "one\ntwo\n")
 	mustWrite("b.txt", "hello\n")
 	run("add", ".")
