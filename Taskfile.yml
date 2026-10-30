@@ -42,10 +42,9 @@ tasks:
       - go run . log
 
   install:
-    desc: installing twig binary
-    interactive: true
+    desc: build twig and install it on the Go binary path
     cmds:
-      - go install .
+      - go install -trimpath -ldflags '{{.LDFLAGS}}' .
 
   debug:
     desc: run twig with debug logging to debug.log
@@ -96,19 +95,53 @@ tasks:
       - go mod tidy
 
   build:all:
-    desc: cross-compile release binaries
+    desc: cross-compile every release target
     cmds:
-      - env GOOS=linux   GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '{{.LDFLAGS}}' -o dist/{{.BINARY}}-linux-amd64 .
-      - env GOOS=linux   GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags '{{.LDFLAGS}}' -o dist/{{.BINARY}}-linux-arm64 .
-      - env GOOS=darwin  GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '{{.LDFLAGS}}' -o dist/{{.BINARY}}-darwin-amd64 .
-      - env GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags '{{.LDFLAGS}}' -o dist/{{.BINARY}}-darwin-arm64 .
-      - env GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '{{.LDFLAGS}}' -o dist/{{.BINARY}}-windows-amd64.exe .
-      - task: checksums
+      - goreleaser build --snapshot --clean
 
-  checksums:
-    desc: write sha256 checksums for the dist binaries
+  release:
+    desc: Create and push a new tag following semver
+    vars:
+      NEXT:
+        sh: |-
+          if [ -z "$(git tag --list 'v*')" ]; then
+            echo v0.1.0
+          else
+            svu next --always || go run github.com/caarlos0/svu/v3@latest next --always
+          fi
+    prompt: "This will release {{.NEXT}}. Continue?"
+    preconditions:
+      - sh: '[ $(git symbolic-ref --short HEAD) = "main" ]'
+        msg: Not on main branch
+      - sh: "[ $(git status --porcelain=2 | wc -l) = 0 ]"
+        msg: "Git is dirty"
+      - sh: "git config --get user.signingkey >/dev/null"
+        msg: "No tag signing key configured (git config user.signingkey)"
+      - sh: 'gh run list --workflow ci.yml --commit $(git rev-parse HEAD) --status success --json conclusion -q ".[0].conclusion" | grep -q success'
+        msg: "ci has not passed for this commit, or gh is not authenticated"
+      - sh: 'gh run list --workflow snapshot.yml --commit $(git rev-parse HEAD) --status success --json conclusion -q ".[0].conclusion" | grep -q success'
+        msg: "the goreleaser snapshot has not passed for this commit"
     cmds:
-      - cmd: sha256sum dist/* > dist/checksums.txt
+      - task: fetch-tags
+      - git commit --allow-empty -m "{{.NEXT}}"
+      - git tag --annotate --sign -m "{{.NEXT}}" {{.NEXT}} {{.CLI_ARGS}}
+      - echo "Pushing {{.NEXT}}..."
+      - git push origin main --follow-tags
+
+  fetch-tags:
+    desc: Refresh local tags from origin
+    cmds:
+      - git fetch --tags --force
+
+  release:local:
+    desc: Publish a release from this machine (needs goreleaser and GITHUB_TOKEN)
+    cmds:
+      - goreleaser release --clean
+
+  release:check:
+    desc: validate the goreleaser configuration
+    cmds:
+      - goreleaser check
 
   clean:
     desc: remove build artifacts
