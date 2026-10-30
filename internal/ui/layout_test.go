@@ -1391,3 +1391,77 @@ func TestWrapAndSplitTurnEachOtherOff(t *testing.T) {
 		t.Fatal("split view left wrap on")
 	}
 }
+
+// TestSidebarConfigIsHonouredAndSaved covers the two visibility settings: they
+// decide what the window opens with, the keys flip them from there, and a flip
+// is written back so the choice survives a restart.
+func TestSidebarConfigIsHonouredAndSaved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "twig.json")
+
+	cfg := config.Default()
+	cfg.ShowLeftSidebar = true
+	cfg.ShowRightSidebar = true
+
+	m := newModel(Options{Config: cfg, ConfigPath: path}, "main", "twig")
+	m.width, m.height = 120, 24
+	m.loaded = true
+	m.files.SetTab(filelist.TabCommits)
+	m.setSize()
+
+	if !m.showLeft || m.sideRect.Dx() == 0 {
+		t.Fatal("the left sidebar was configured visible but is not")
+	}
+	if !m.showRight || m.commitFilesRct.Dx() == 0 {
+		t.Fatal("the right sidebar was configured visible but is not")
+	}
+	assertGeometry(t, m, "both sidebars from config")
+
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'H', Text: "H"})
+	m = next.(model)
+	if m.showLeft {
+		t.Fatal("H did not hide the left sidebar")
+	}
+	saved, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("the toggle did not write a config: %v", err)
+	}
+	if saved.ShowLeftSidebar {
+		t.Fatal("the hidden left sidebar was not saved")
+	}
+	if !saved.ShowRightSidebar {
+		t.Fatal("hiding one sidebar disturbed the other")
+	}
+
+	// A reload from disk follows the file, including the side that was just
+	// hidden by hand.
+	next, _ = m.Update(statusLoadedMsg{fingerprint: "x"})
+	m = next.(model)
+	if m.showLeft {
+		t.Fatal("a reload brought back the hidden sidebar")
+	}
+}
+
+// TestSidebarReloadFollowsTheFile covers the other direction: editing the
+// config on disk has to move the panes without a restart.
+func TestSidebarReloadFollowsTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "twig.json")
+	cfg := config.Default()
+	m := newModel(Options{Config: cfg, ConfigPath: path}, "main", "twig")
+	m.width, m.height = 120, 24
+	m.loaded = true
+	m.setSize()
+
+	if m.showLeft {
+		t.Fatal("the left sidebar starts hidden by default")
+	}
+	if err := config.Save(path, config.Default()); err != nil {
+		t.Fatal(err)
+	}
+	cfg.ShowLeftSidebar = true
+	if cmd := m.applyConfig(cfg); cmd != nil {
+		t.Fatal("showing a sidebar should not need a reload of the content")
+	}
+	if !m.showLeft || m.sideRect.Dx() == 0 {
+		t.Fatal("a config reload did not show the left sidebar")
+	}
+}

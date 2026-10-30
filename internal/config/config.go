@@ -22,6 +22,10 @@ type Config struct {
 	LineNumbers bool `json:"line-numbers"`
 	// SidebarWidth is the width of the file list sidebar in cells.
 	SidebarWidth int `json:"sidebar-width"`
+	// ShowLeftSidebar starts with the files pane visible.
+	ShowLeftSidebar bool `json:"show-left-sidebar"`
+	// ShowRightSidebar starts with the commit files pane visible.
+	ShowRightSidebar bool `json:"show-right-sidebar"`
 	// SmoothScroll animates large scroll jumps.
 	SmoothScroll bool `json:"smooth-scroll"`
 	// Watch refreshes the view when the repository changes on disk.
@@ -43,6 +47,8 @@ func Default() Config {
 		Wrap:             false,
 		LineNumbers:      true,
 		SidebarWidth:     32,
+		ShowLeftSidebar:  false,
+		ShowRightSidebar: false,
 		SmoothScroll:     true,
 		Watch:            true,
 		WatchDebounce:    120,

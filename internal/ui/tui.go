@@ -213,10 +213,10 @@ func newModel(opts Options, branch, project string) model {
 		prefetchAt: -1,
 		allAnchor:  -1,
 		allRestore: -1,
-		// Both sidebars start hidden: the diff gets the whole window, and
-		// H/L bring a sidebar in when it is wanted.
-		showLeft:  false,
-		showRight: false,
+		// The sidebars follow the config, and H/L flip them from there: the
+		// diff gets the whole window unless one was asked for.
+		showLeft:  opts.Config.ShowLeftSidebar,
+		showRight: opts.Config.ShowRightSidebar,
 		cfg:       opts.Config,
 		cfgPath:   opts.ConfigPath,
 		cfgStamp:  configStamp(opts.ConfigPath),
@@ -1050,7 +1050,9 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.focus = focusMain
 		}
 		m.setSize()
+		m.cfg.ShowLeftSidebar = m.showLeft
 		m.message = "left sidebar " + onOff(m.showLeft)
+		m.saveSetting()
 		return m, setMessageCmd(m.message)
 	case key.Matches(msg, m.keys.ToggleRight):
 		m.showRight = !m.showRight
@@ -1058,7 +1060,9 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.focus = focusMain
 		}
 		m.setSize()
+		m.cfg.ShowRightSidebar = m.showRight
 		m.message = "right sidebar " + onOff(m.showRight)
+		m.saveSetting()
 		return m, setMessageCmd(m.message)
 	case key.Matches(msg, m.keys.ToggleTree):
 		m.files.ToggleTree()
@@ -1931,7 +1935,22 @@ func (m *model) applyConfig(cfg config.Config) tea.Cmd {
 	cfg.SplitView = cfg.SplitView && !cfg.Wrap
 	m.view.SetWrap(cfg.Wrap)
 	m.view.SetSplit(cfg.SplitView)
-	if cfg.SidebarWidth != old.SidebarWidth || cfg.LogLimit != old.LogLimit {
+	// The sidebars are also toggled by hand, so they only move when the file
+	// on disk actually says something different from what is on screen.
+	if cfg.ShowLeftSidebar != old.ShowLeftSidebar {
+		m.showLeft = cfg.ShowLeftSidebar
+		if !m.showLeft && m.focus == focusSidebar {
+			m.focus = focusMain
+		}
+	}
+	if cfg.ShowRightSidebar != old.ShowRightSidebar {
+		m.showRight = cfg.ShowRightSidebar
+		if !m.showRight && m.focus == focusCommitFiles {
+			m.focus = focusMain
+		}
+	}
+	if cfg.SidebarWidth != old.SidebarWidth || cfg.LogLimit != old.LogLimit ||
+		cfg.ShowLeftSidebar != old.ShowLeftSidebar || cfg.ShowRightSidebar != old.ShowRightSidebar {
 		m.setSize()
 	}
 	if cfg.Context != old.Context || cfg.IgnoreWhitespace != old.IgnoreWhitespace {

@@ -66,7 +66,7 @@ lookaround). `esc` clears a search or a filter.
 | `g` / `G`                            | top / bottom                                              |
 | `t`                                  | toggle tree / flat file listing                           |
 | `a`                                  | toggle all-changes view (every file in one scroll)        |
-| `H` / `L`                            | show or hide the left / right sidebar (both start hidden) |
+| `H` / `L`                            | show or hide the left / right sidebar (hidden unless configured) |
 | `/`                                  | filter files (in the list) or search the diff             |
 | `n` / `N`                            | next / previous search match                              |
 | `s` / `u`                            | stage / unstage the selected file                         |
@@ -95,6 +95,8 @@ Twig reads `twig.json` from `$XDG_CONFIG_HOME/twig` or `~/.config/twig`, and
   "watch": true,
   "watch-debounce": 120,
   "sidebar-width": 32,
+  "show-left-sidebar": false,
+  "show-right-sidebar": false,
   "smooth-scroll": true,
   "log-limit": 200,
   "split-view": false
@@ -107,6 +109,10 @@ themselves, because a directory there only reports entry changes. A periodic
 status pass covers anything an event did not explain, and a refresh that finds
 the same state does not touch the screen, so it never steals the selection or the
 scroll position. Set it to `false` to refresh only with `r`.
+
+`show-left-sidebar` and `show-right-sidebar` decide what the window opens with;
+`H` and `L` flip them during a session and write the choice back, so the next
+start matches what you were looking at.
 
 `watch-debounce` is how long the filesystem must be quiet before a change counts,
 in milliseconds. The default of 120 sits above the window editors use to turn a
