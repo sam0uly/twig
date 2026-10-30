@@ -1,60 +1,48 @@
 name: release
-
 on:
   push:
-    tags: ["v*"]
-
+    tags: ["v*.*.*"]
 permissions:
-  contents: write
-
+  contents: read
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
 jobs:
-  release:
-    name: build and publish release binaries
+  goreleaser:
+    name: goreleaser
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-
-      - name: build
+          cache: true
+      - name: run the test suite before publishing
+        run: go test -count=1 ./...
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
         env:
-          VERSION: ${{ github.ref_name }}
-          COMMIT: ${{ github.sha }}
-        run: |
-          LDFLAGS="-s -w -X samouly.fun/twig/internal/version.Version=${VERSION#v} -X samouly.fun/twig/internal/version.Commit=${COMMIT}"
-          mkdir -p dist
-          targets=(
-            "linux/amd64 twig-linux-amd64"
-            "linux/arm64 twig-linux-arm64"
-            "darwin/amd64 twig-darwin-amd64"
-            "darwin/arm64 twig-darwin-arm64"
-            "windows/amd64 twig-windows-amd64.exe"
-          )
-          for target in "${targets[@]}"; do
-            os=${target%% *}
-            out=${target##* }
-            GOOS=${os%/*} GOARCH=${os#*/} CGO_ENABLED=0 \
-              go build -trimpath -ldflags "$LDFLAGS" -o "dist/$out" .
-          done
-
-      - name: checksums
-        run: (cd dist && sha256sum * > checksums.txt)
-
-      - name: verify the version lands in the binary
-        run: |
-          # -X on a miss fails silently, so smoke test it before publishing
-          dist/twig-linux-amd64 --version | grep -F "${GITHUB_REF_NAME#v}"
-
-      - name: upload artifacts
-        uses: actions/upload-artifact@v4
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: verify the tag landed in the binary
+        run: |-
+          bin=$(find dist -type f -name twig -path "*linux_amd64*" | head -1)
+          echo "binary: $bin"
+          "$bin" --version | tee version.txt
+          grep -F "${GITHUB_REF_NAME#v}" version.txt
+      - name: attest the release archives
+        uses: actions/attest-build-provenance@v1
         with:
-          name: twig-${{ github.ref_name }}
-          path: dist/
-
-      - name: publish
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt

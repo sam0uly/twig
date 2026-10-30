@@ -1,0 +1,85 @@
+version: 2
+
+project_name: twig
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: twig
+    main: .
+    binary: twig
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s
+      - -w
+      - -X samouly.fun/twig/internal/version.Version={{ .Version }}
+      - -X samouly.fun/twig/internal/version.Commit={{ .Commit }}
+
+archives:
+  - id: twig
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+nfpms:
+  - id: twig
+    package_name: twig
+    formats:
+      - deb
+      - rpm
+      - apk
+    vendor: sam0uly
+    homepage: https://github.com/sam0uly/twig
+    maintainer: Alaa El-Samouly
+    description: |-
+      A terminal diff viewer for git repositories.
+      Reads the repository through the git binary, renders the diff with twig's
+      own engine, and keeps the view live while you edit.
+    license: Apache-2.0
+    bindir: /usr/bin
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^chore"
+      - "^ci"
+      - "^docs"
+      - "^test"
+      - "^style"
+  groups:
+    - title: features
+      regexp: "^.*feat[(\\w)]*:+.*$"
+      order: 0
+    - title: fixes
+      regexp: "^.*fix[(\\w)]*:+.*$"
+      order: 1
+    - title: performance
+      regexp: "^.*perf[(\\w)]*:+.*$"
+      order: 2
+    - title: other
+      order: 999
