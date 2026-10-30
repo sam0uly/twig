@@ -45,33 +45,41 @@ twig log          # browse commits, open any of them
 
 ## Keys
 
-| Key                                  | Action                                              |
-| ------------------------------------ | --------------------------------------------------- |
-| `enter`                              | open diff / jump to file / expand a tree folder     |
-| `esc`                                | back to the sidebar                                 |
-| `tab`                                | next pane                                           |
-| `shift+tab`                          | previous pane                                       |
-| `j` / `k`, `d` / `ctrl+u`, `f` / `b` | scroll the diff                                     |
-| `h` / `l`, `←` / `→`                 | horizontal scroll (when wrap is off)                |
-| `[` / `]`                            | previous / next hunk                                |
-| `J` / `K`                            | next / previous file                                |
-| `g` / `G`                            | top / bottom                                        |
-| `t`                                  | toggle tree / flat file listing                     |
-| `a`                                  | toggle all-changes view (every file in one scroll)  |
-| `H` / `L`                            | hide or show the left / right sidebar               |
-| `/`                                  | filter files (in the list) or search the diff       |
-| `n` / `N`                            | next / previous search match                        |
-| `s` / `u`                            | stage / unstage the selected file                   |
-| `C`                                  | commit the staged changes (ctrl+s to confirm)       |
-| `P`                                  | push to the remote                                  |
-| `y` / `Y`                            | copy the file patch / current hunk to the clipboard |
-| `v`                                  | toggle split / unified diff view                    |
-| `w`                                  | toggle soft wrap                                    |
-| `Z`                                  | toggle ignore-whitespace (reloads the diff)         |
-| `c`                                  | cycle context lines                                 |
-| `r`                                  | refresh                                             |
-| `?`                                  | full help                                           |
-| `q`                                  | quit                                                |
+Both sidebars start hidden: the diff takes the whole window, and `H` or `L`
+brings the file list or the per-commit file list in when you want it.
+
+Search and the sidebar filters run as you type. Search terms are regular
+expressions when they contain metacharacters (Go's RE2: classes, groups,
+alternation, anchors, quantifiers, Unicode classes; no backreferences or
+lookaround). `esc` clears a search or a filter.
+
+| Key                                  | Action                                                    |
+| ------------------------------------ | --------------------------------------------------------- |
+| `enter`                              | open diff / jump to file / expand a tree folder           |
+| `esc`                                | back to the sidebar                                       |
+| `tab`                                | next pane                                                 |
+| `shift+tab`                          | previous pane                                             |
+| `j` / `k`, `d` / `ctrl+u`, `f` / `b` | scroll the diff                                           |
+| `h` / `l`, `←` / `→`                 | horizontal scroll (when wrap is off)                      |
+| `[` / `]`                            | previous / next hunk                                      |
+| `J` / `K`                            | next / previous file                                      |
+| `g` / `G`                            | top / bottom                                              |
+| `t`                                  | toggle tree / flat file listing                           |
+| `a`                                  | toggle all-changes view (every file in one scroll)        |
+| `H` / `L`                            | show or hide the left / right sidebar (both start hidden) |
+| `/`                                  | filter files (in the list) or search the diff             |
+| `n` / `N`                            | next / previous search match                              |
+| `s` / `u`                            | stage / unstage the selected file                         |
+| `C`                                  | commit the staged changes (ctrl+s to confirm)             |
+| `P`                                  | push to the remote                                        |
+| `y` / `Y`                            | copy the file patch / current hunk to the clipboard       |
+| `v`                                  | toggle split / unified diff view                          |
+| `w`                                  | toggle soft wrap                                          |
+| `Z`                                  | toggle ignore-whitespace (reloads the diff)               |
+| `c`                                  | cycle context lines                                       |
+| `r`                                  | refresh                                                   |
+| `?`                                  | full help                                                 |
+| `q`                                  | quit                                                      |
 
 ## Configuration
 
@@ -84,12 +92,33 @@ Twig reads `twig.json` from `$XDG_CONFIG_HOME/twig` or `~/.config/twig`, and
   "ignore-whitespace": false,
   "wrap": false,
   "line-numbers": true,
+  "watch": true,
+  "watch-debounce": 120,
   "sidebar-width": 32,
   "smooth-scroll": true,
   "log-limit": 200,
   "split-view": false
 }
 ```
+
+`watch` keeps the view current while you edit. It watches a small set: the git
+directory, the directories holding the files it lists, and on macOS the files
+themselves, because a directory there only reports entry changes. A periodic
+status pass covers anything an event did not explain, and a refresh that finds
+the same state does not touch the screen, so it never steals the selection or the
+scroll position. Set it to `false` to refresh only with `r`.
+
+`watch-debounce` is how long the filesystem must be quiet before a change counts,
+in milliseconds. The default of 120 sits above the window editors use to turn a
+save into a rename; raising it costs latency, lowering it can report one save
+several times.
+
+Kernel events come from inotify on Linux, kqueue on macOS and
+`ReadDirectoryChangesW` on Windows, so a save lands in about a tenth of a second
+on all three. When events cannot carry the view, either because the platform has
+no backend, a watch limit was reached, or the filesystem is a network mount that
+never reports, twig says `polling` in the footer and switches to a two second
+pass. It also catches up when the terminal regains focus.
 
 ## Development
 
