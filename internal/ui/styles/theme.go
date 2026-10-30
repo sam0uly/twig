@@ -67,6 +67,9 @@ type Styles struct {
 
 	headerTab        lipgloss.Style
 	headerTabActive  lipgloss.Style
+	headerAdds       lipgloss.Style
+	headerDels       lipgloss.Style
+	headerBranch     lipgloss.Style
 	footerKeyFiles   lipgloss.Style
 	footerKeyDiff    lipgloss.Style
 	footerKeyCommits lipgloss.Style
@@ -203,28 +206,41 @@ func New() Styles {
 
 	// Segmented chrome: soft-serve's status bar roles on tone colors.
 	// Header tabs are colored segments on the right side of the bar.
+	// Header segments keep their normal horizontal padding: the bar supplies
+	// the rhythm, the segments just sit in it.
+	// Every top bar segment writes its text in Salt, whatever its background.
 	s.headerTab = lipgloss.NewStyle().
-		Foreground(tone.Squid).Background(tone.Char).Padding(0, 1)
+		Foreground(tone.Salt).Background(tone.Char).Padding(0, 1)
 	s.headerTabActive = lipgloss.NewStyle().
-		Foreground(tone.Pepper).Background(tone.Hazy).Bold(true).Padding(0, 1)
+		Foreground(tone.Salt).Background(tone.Hazy).Bold(true).Padding(0, 1)
+
+	// The diff statistics sit left of the tabs on two palette colors nothing
+	// else uses yet.
+	s.headerAdds = lipgloss.NewStyle().
+		Foreground(tone.Salt).Background(tone.Guac).Bold(true).Padding(0, 1)
+	s.headerDels = lipgloss.NewStyle().
+		Foreground(tone.Salt).Background(tone.Paprika).Bold(true).Padding(0, 1)
+	// The branch and view label is a segment too, on a color of its own.
+	s.headerBranch = lipgloss.NewStyle().
+		Foreground(tone.Salt).Background(tone.Pom).Padding(0, 1)
 
 	s.footerKeyFiles = lipgloss.NewStyle().
-		Bold(true).Foreground(tone.Butter).Background(tone.Grape).Padding(0, 1)
+		Bold(true).Foreground(tone.Salt).Background(tone.Grape).Padding(0, 1)
 	s.footerKeyDiff = lipgloss.NewStyle().
-		Bold(true).Foreground(tone.Pepper).Background(tone.Dolly).Padding(0, 1)
+		Bold(true).Foreground(tone.Salt).Background(tone.Dolly).Padding(0, 1)
 	s.footerKeyCommits = lipgloss.NewStyle().
-		Bold(true).Foreground(tone.Butter).Background(tone.Plum).Padding(0, 1)
+		Bold(true).Foreground(tone.Salt).Background(tone.Plum).Padding(0, 1)
 	s.footerKeyCommit = lipgloss.NewStyle().
-		Bold(true).Foreground(tone.Pepper).Background(tone.Orchid).Padding(0, 1)
+		Bold(true).Foreground(tone.Salt).Background(tone.Orchid).Padding(0, 1)
 
 	s.footerValue = lipgloss.NewStyle().
-		Foreground(tone.Squid).Background(tone.BBQ)
+		Foreground(tone.Salt).Background(tone.BBQ)
 	s.footerInfo = lipgloss.NewStyle().
-		Foreground(tone.Pepper).Background(tone.Hazy).Padding(0, 1)
+		Foreground(tone.Salt).Background(tone.Hazy).Padding(0, 1)
 	s.footerHelp = lipgloss.NewStyle().
-		Foreground(tone.Squid).Background(tone.Char).Padding(0, 1)
+		Foreground(tone.Salt).Background(tone.Char).Padding(0, 1)
 	s.footerMessage = lipgloss.NewStyle().
-		Foreground(tone.Julep).Background(tone.Gator)
+		Foreground(tone.Salt).Background(tone.Gator)
 
 	// Pane borders.
 	s.BorderFocused = tone.Hazy
@@ -324,6 +340,15 @@ func (s Styles) HeaderTab() lipgloss.Style { return s.headerTab }
 
 // HeaderTabActive renders the active header bar tab.
 func (s Styles) HeaderTabActive() lipgloss.Style { return s.headerTabActive }
+
+// HeaderAdds renders the additions pill in the header bar.
+func (s Styles) HeaderAdds() lipgloss.Style { return s.headerAdds }
+
+// HeaderDels renders the deletions pill in the header bar.
+func (s Styles) HeaderDels() lipgloss.Style { return s.headerDels }
+
+// HeaderBranch renders the branch and view label segment.
+func (s Styles) HeaderBranch() lipgloss.Style { return s.headerBranch }
 
 // FooterKeyFiles renders the FILES key pill.
 func (s Styles) FooterKeyFiles() lipgloss.Style { return s.footerKeyFiles }

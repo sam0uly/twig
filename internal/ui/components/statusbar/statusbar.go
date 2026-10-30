@@ -40,6 +40,9 @@ type Info struct {
 	Value string
 	// Info is the informational pill, e.g. scroll percent or position.
 	Info string
+	// Watch is the refresh-mode pill, shown only when kernel events are not
+	// carrying the view, so "slow" is never silent.
+	Watch string
 	// Message replaces the value segment when set.
 	Message string
 }
@@ -64,8 +67,12 @@ func HeaderView(st styles.Styles, width int, info HeaderInfo) string {
 
 	right := info.Right
 	if tabs != "" {
-		// Tab segments live on the right; info.Right trails them.
-		right = tabs + "  " + right
+		// Tab segments end the bar; info.Right trails them when set.
+		if right != "" {
+			right = tabs + "  " + right
+		} else {
+			right = tabs
+		}
 	}
 
 	used := lipgloss.Width(left) + lipgloss.Width(right)
@@ -116,7 +123,14 @@ func (m Model) FooterView(info Info) string {
 		infoSeg = st.FooterInfo().Render(" " + info.Info + " ")
 	}
 
-	maxValue := w - lipgloss.Width(key) - lipgloss.Width(infoSeg) - lipgloss.Width(help)
+	// the refresh-mode pill only exists when kernel events are not carrying
+	// the view, so the slow path is visible rather than silent
+	var watchSeg string
+	if info.Watch != "" {
+		watchSeg = st.FooterInfo().Render(" " + info.Watch + " ")
+	}
+
+	maxValue := w - lipgloss.Width(key) - lipgloss.Width(watchSeg) - lipgloss.Width(infoSeg) - lipgloss.Width(help)
 	var value string
 	if info.Message != "" {
 		msg := ansi.Truncate(" "+info.Message+" ", max(0, maxValue), "…")
@@ -129,7 +143,7 @@ func (m Model) FooterView(info Info) string {
 	}
 
 	return lipgloss.NewStyle().Width(w).MaxWidth(w).
-		Render(lipgloss.JoinHorizontal(lipgloss.Top, key, value, infoSeg, help))
+		Render(lipgloss.JoinHorizontal(lipgloss.Top, key, value, watchSeg, infoSeg, help))
 }
 
 // FormatPercent renders a 0..1 fraction as a padded percentage.

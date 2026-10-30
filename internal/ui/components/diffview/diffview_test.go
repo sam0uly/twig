@@ -1,9 +1,12 @@
 package diffview
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
@@ -253,7 +256,8 @@ func TestExtendFileKeepsPositionAndSearch(t *testing.T) {
 
 	doc := diff.Aggregate([]*diff.File{tall("a.go")})
 	m := New(false, styles.New())
-	m.SetSize(80, 10)
+	// Shorter than the document, so there is somewhere to scroll to.
+	m.SetSize(80, 8)
 	m.SetFile(doc)
 	if _, cmd := m.Search("line"); cmd != nil {
 		m.ApplySearchResults(cmd().(SearchResultsMsg))
@@ -363,5 +367,234 @@ func TestSearchNonASCIIStillComplete(t *testing.T) {
 	}
 	if !m.ApplySearchResults(msg) {
 		t.Fatal("fresh results should apply")
+	}
+}
+
+// TestNotesWrapInsteadOfClipping checks a long metadata line (a commit body)
+// takes as many rows as it needs, so nothing is cut at the pane edge.
+func TestNotesWrapInsteadOfClipping(t *testing.T) {
+	m := New(false, styles.New())
+	m.SetSize(40, 10)
+	m.SetFile(diff.Generate("a.txt", diff.Modified, "one\n", "two\n", diff.GenerateOptions{}))
+
+	long := strings.Repeat("word ", 20)
+	m.SetNotes([]string{long})
+
+	rows := m.rows
+	if len(rows) < 2 {
+		t.Fatalf("long note took %d rows, want it wrapped", len(rows))
+	}
+	for i, r := range rows[:len(rows)-1] {
+		if w := ansi.StringWidth(r.text); w > m.vpWidth() {
+			t.Fatalf("row %d is %d wide, over the %d viewport", i, w, m.vpWidth())
+		}
+	}
+	// The wrapped text is all still there.
+	var got strings.Builder
+	for _, r := range rows[:len(rows)-1] {
+		got.WriteString(stripANSI(r.text))
+		got.WriteString(" ")
+	}
+	for _, word := range strings.Fields(long) {
+		if !strings.Contains(got.String(), word) {
+			t.Fatalf("wrapped notes lost %q", word)
+		}
+	}
+}
+
+// TestSmoothScrollKeysAccumulate pins the scroll contract: line steps land
+// immediately so the view keeps up with the keyboard, page jumps animate, and
+// a second jump during the animation extends the target instead of restarting.
+func TestSmoothScrollKeysAccumulate(t *testing.T) {
+	var long strings.Builder
+	for i := 0; i < 400; i++ {
+		long.WriteString("line\n")
+	}
+	m := New(true, styles.New())
+	m.SetSize(40, 10)
+	m.SetFile(diff.Generate("a.txt", diff.Modified, "", long.String(), diff.GenerateOptions{}))
+
+	// A line step is instant: no animation, offset already moved.
+	next, cmd := m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	nm := next
+	if nm.anim || cmd != nil {
+		t.Fatalf("a line step started an animation (anim=%t)", nm.anim)
+	}
+	if got := nm.vp.YOffset(); got != 1 {
+		t.Fatalf("line step offset = %d, want 1", got)
+	}
+
+	next, _ = nm.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if got := next.vp.YOffset(); got != 2 {
+		t.Fatalf("second line step offset = %d, want 2", got)
+	}
+
+	// A page jump animates, and a second one during the animation adds to the
+	// target rather than starting over.
+	page := tea.KeyPressMsg{Code: tea.KeyPgDown}
+	next, cmd = next.Update(page)
+	nm = next
+	if !nm.anim || cmd == nil {
+		t.Fatalf("page jump should animate (anim=%t)", nm.anim)
+	}
+	first := nm.target
+	if first <= 2 {
+		t.Fatalf("page jump target = %v, want past the current offset", first)
+	}
+	next, _ = nm.Update(page)
+	if next.target <= first {
+		t.Fatalf("second page jump target = %v, want more than %v", next.target, first)
+	}
+
+	// Turning smooth off makes the next jump instant too.
+	next.SetSmooth(false)
+	next, cmd = next.Update(page)
+	if next.anim || cmd != nil {
+		t.Fatal("smooth off still animates")
+	}
+}
+
+// TestSmoothScrollSettlesQuickly pins the feel: a single line step lands within
+// a few frames, a long jump arrives well under half a second, and no animation
+// frame ever moves further than the target.
+func TestSmoothScrollSettlesQuickly(t *testing.T) {
+	var long strings.Builder
+	for i := 0; i < 400; i++ {
+		long.WriteString("line\n")
+	}
+	m := New(true, styles.New())
+	m.SetSize(60, 10)
+	m.SetFile(diff.Generate("a.txt", diff.Modified, "", long.String(), diff.GenerateOptions{}))
+
+	settle := func(base Model, frames int) (Model, int) {
+		cur := base
+		start := time.Now()
+		for i := 1; i <= frames; i++ {
+			at := start.Add(time.Duration(i) * frameInterval)
+			next, _ := cur.Update(scrollFrameMsg{seq: cur.animSeq, at: at})
+			cur = next
+			if !cur.anim {
+				return cur, i
+			}
+		}
+		return cur, frames
+	}
+
+	// One line is under the animation threshold: it lands immediately.
+	if cmd := m.ScrollTo(1); cmd != nil {
+		t.Fatal("a one line step should not animate")
+	}
+	if got := m.vp.YOffset(); got != 1 {
+		t.Fatalf("one line offset = %d, want 1", got)
+	}
+
+	// A long jump: 60 rows must arrive in under 30 frames (500ms).
+	m2 := New(true, styles.New())
+	m2.SetSize(60, 10)
+	m2.SetFile(diff.Generate("a.txt", diff.Modified, "", long.String(), diff.GenerateOptions{}))
+	if cmd := m2.ScrollTo(60); cmd == nil {
+		t.Fatal("ScrollTo should start a long animation")
+	}
+	nm2, frames := settle(m2, 30)
+	if got := nm2.vp.YOffset(); got != 60 {
+		t.Fatalf("after %d frames offset = %d, want 60", frames, got)
+	}
+	if frames >= 30 {
+		t.Fatalf("a 60 row jump took %d frames", frames)
+	}
+
+	// Wall-clock independence: one coarse 100ms step lands like several 16ms
+	// frames would.
+	m3 := New(true, styles.New())
+	m3.SetSize(60, 10)
+	m3.SetFile(diff.Generate("a.txt", diff.Modified, "", long.String(), diff.GenerateOptions{}))
+	m3.ScrollTo(40)
+	start := time.Now()
+	next, _ := m3.Update(scrollFrameMsg{seq: m3.animSeq, at: start})
+	coarse := next
+	next, _ = coarse.Update(scrollFrameMsg{seq: coarse.animSeq, at: start.Add(100 * time.Millisecond)})
+	if next.vp.YOffset() < 40 {
+		// Either it arrived or it made most of the trip; it must not crawl.
+		if next.vp.YOffset() < 20 {
+			t.Fatalf("100ms of animation only moved to %d/40", next.vp.YOffset())
+		}
+	}
+}
+
+// TestGutterGrowsWithLineNumbers checks the number columns widen with the
+// document instead of pushing a row past the pane and wrapping it.
+func TestGutterGrowsWithLineNumbers(t *testing.T) {
+	var long strings.Builder
+	for i := 0; i < 120_000; i++ {
+		long.WriteString("line\n")
+	}
+	m := New(false, styles.New())
+	m.SetSize(100, 20)
+	m.SetFile(diff.Generate("big.txt", diff.Modified, "", long.String(), diff.GenerateOptions{}))
+
+	if got := m.gut.numCells(); got != 6 {
+		t.Fatalf("number column = %d cells, want 6 for six-digit lines", got)
+	}
+	for i, l := range strings.Split(m.View(), "\n") {
+		if w := ansi.StringWidth(l); w != 100 {
+			t.Fatalf("row %d width = %d, want 100", i, w)
+		}
+	}
+}
+
+// TestAggregateHasNoBareTotalsHeader checks a commit document does not print a
+// lone "+N -M" line above its first hunk: those totals now live in the notes.
+func TestAggregateHasNoBareTotalsHeader(t *testing.T) {
+	files := []*diff.File{
+		diff.Generate("a.go", diff.Modified, "one\n", "two\n", diff.GenerateOptions{Context: 3}),
+		diff.Generate("b.go", diff.Modified, "x\n", "y\n", diff.GenerateOptions{Context: 3}),
+	}
+	agg := diff.Aggregate(files)
+	m := New(false, styles.New())
+	m.SetSize(80, 20)
+	m.SetFile(agg)
+	m.SetNotes([]string{"hash sam", "subject", "", " 2 files changed   +2  -2"})
+
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "── a.go") {
+		t.Fatalf("file bands missing:\n%s", view)
+	}
+	for _, row := range strings.Split(view, "\n") {
+		trimmed := strings.TrimSpace(row)
+		fields := strings.Fields(trimmed)
+		if len(fields) != 2 || !strings.HasPrefix(fields[0], "+") || !strings.HasPrefix(fields[1], "-") {
+			continue
+		}
+		if trimmed == fields[0]+" "+fields[1] && len(fields[0]) > 1 && len(fields[1]) > 1 {
+			t.Fatalf("bare totals row above the diff:\n%s", view)
+		}
+	}
+}
+
+// TestAnchorSurvivesReplace covers the refresh path: the same position has to
+// survive content being replaced, which is what keeps a save from scrolling
+// the reader back to the top of a long diff.
+func TestAnchorSurvivesReplace(t *testing.T) {
+	// Every line differs, so the diff is the whole file rather than a short
+	// hunk at the end.
+	var before, after, more strings.Builder
+	for i := range 120 {
+		fmt.Fprintf(&before, "line %d\n", i)
+		fmt.Fprintf(&after, "changed %d\n", i)
+		fmt.Fprintf(&more, "changed %d\n", i)
+	}
+	more.WriteString("added\n")
+
+	m := New(false, styles.New())
+	m.SetSize(80, 20)
+	m.SetFile(diff.Generate("a.go", diff.Modified, before.String(), after.String(), diff.GenerateOptions{Context: 3}))
+	m.JumpToLine(40)
+	if got := m.Anchor(); got != 40 {
+		t.Fatalf("anchor after jump = %d, want 40", got)
+	}
+
+	m.SetFileAt(diff.Generate("a.go", diff.Modified, before.String(), more.String(), diff.GenerateOptions{Context: 3}), m.Anchor())
+	if got := m.Anchor(); got != 40 {
+		t.Fatalf("anchor after replace = %d, want 40", got)
 	}
 }

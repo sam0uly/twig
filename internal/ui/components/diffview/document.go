@@ -140,6 +140,8 @@ type blockDoc struct {
 	lines  int
 	widest int   // widest rendered line
 	preW   int   // widest row above the document
+	gutter int   // width of the stacked-row gutter, set by the model
+	numW   int   // width of one split column's number gutter
 	order  []int // materialised blocks, least recently used first
 	loads  int   // materialisations, exposed for tests
 }
@@ -217,8 +219,7 @@ func (d *blockDoc) appendBlock(b *docBlock) {
 	if b.sep != nil {
 		b.widest = ansi.StringWidth(b.sep.Text)
 	}
-	b.rows[modeUnified], b.rows[modeSplit], b.hunks[modeUnified], b.hunks[modeSplit], b.widest =
-		blockMetrics(b, d.scanLines(b))
+	b.rows[modeUnified], b.rows[modeSplit], b.hunks[modeUnified], b.hunks[modeSplit], b.widest = blockMetrics(b, d.scanLines(b))
 	d.widest = max(d.widest, b.widest)
 
 	d.blocks = append(d.blocks, *b)
@@ -537,6 +538,21 @@ func (d *blockDoc) lineRange(yoff, height int) (int, int) {
 	return d.blocks[from].lineStart, end
 }
 
+// lineCount is the document's total line count.
+func (d *blockDoc) lineCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lines
+}
+
+// setGutter records the gutter widths the model is using: the whole gutter for
+// stacked rows and one side's number column for split columns.
+func (d *blockDoc) setGutter(cells, numW int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.gutter, d.numW = cells, numW
+}
+
 // width reports the document's content width, mirroring Model.rowWidth.
 func (d *blockDoc) width(vpWidth int, split, numbers bool) int {
 	d.mu.Lock()
@@ -545,7 +561,7 @@ func (d *blockDoc) width(vpWidth int, split, numbers bool) int {
 		colW := vpWidth / 2
 		gut := 0
 		if numbers {
-			gut = numGutter
+			gut = d.numW
 		}
 		contentW := max(1, colW-gut)
 		w := max(d.preW, vpWidth)
@@ -556,7 +572,7 @@ func (d *blockDoc) width(vpWidth int, split, numbers bool) int {
 	}
 	gut := 0
 	if numbers {
-		gut = gutterWidth
+		gut = d.gutter
 	}
 	return max(d.preW, gut+d.widest)
 }
@@ -572,9 +588,9 @@ func (d *blockDoc) layout(i int) (int, []int) {
 	return d.rowOffset() + d.idx[d.mode].prefix(i), d.blocks[i].hunks[d.mode]
 }
 
-// rowForLine maps a document line onto the row that paints it, so a search hit
-// can be scrolled to. Split mode collapses pairs, so the row is clamped inside
-// the block.
+// rowForLine maps a document line onto the row that paints it, so a scroll
+// target survives a rebuild. Split mode collapses pairs, so the row is clamped
+// inside the block.
 func (d *blockDoc) rowForLine(line int) int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -595,6 +611,27 @@ func (d *blockDoc) rowForLine(line int) int {
 	rows := b.rows[d.mode]
 	local = min(local, max(0, rows-1))
 	return d.rowOffset() + d.idx[d.mode].prefix(i) + local
+}
+
+// lineAtRow is the inverse of rowForLine: the line painted by a row, which is
+// what keeps a reader in place when the document is rebuilt under them.
+func (d *blockDoc) lineAtRow(row int) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	row = max(0, row-d.rowOffset())
+	if len(d.blocks) == 0 {
+		return 0
+	}
+	if d.src != nil && row < len(d.pre) {
+		return row
+	}
+	i, offset := d.idx[d.mode].find(row)
+	if i < 0 || i >= len(d.blocks) {
+		return 0
+	}
+	b := &d.blocks[i]
+	return b.lineStart + min(offset, max(0, b.lineCount-1))
 }
 
 // patchAt renders the raw patch of the global hunk idx. File blocks keep the

@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -29,8 +30,17 @@ import (
 
 const (
 	frameInterval = time.Second / 60
-	gutterWidth   = 10
-	numGutter     = 5
+	// baseSpringFreq is how stiff the scroll spring is for a short step, in
+	// radians per second. It rises with the distance still to travel, so a
+	// line step glides gently while a page jump gets there quickly.
+	baseSpringFreq = 26.0
+	// maxSpringFreq caps that rise, keeping long jumps fast without turning
+	// them into a cut.
+	maxSpringFreq = 60.0
+	// smallStepRows is the distance a scroll input may move before it is worth
+	// animating. A line or a wheel tick lands immediately: gliding them makes
+	// the view feel behind the keyboard.
+	smallStepRows = 3
 	// scrollbarSize is the space reserved on the right and at the bottom of
 	// the pane for the scrollbars, in cells.
 	scrollbarSize = 1
@@ -54,6 +64,13 @@ type gutterState struct {
 	notes int
 	show  bool
 	split bool
+	// header is 1 when the file header row is rendered above the diff, 0 for
+	// an aggregate document (a commit), where the path is empty.
+	header int
+	// numW is the cells reserved per side for a line number. It grows with
+	// the digits of the longest line, so seven-digit numbers cannot push the
+	// row wider than the gutter and wrap the pane.
+	numW int
 	// lineFor resolves a document row to its diff line for the virtual
 	// multi-file view, where rows no longer map onto one file's lines.
 	lineFor func(row int) (diff.Line, bool)
@@ -101,11 +118,16 @@ type Model struct {
 	gut   *gutterState
 	cache *rowCache
 
-	notes    []string // metadata lines above the diff
-	rows     []contentRow
-	indexed  int      // rows already folded into hunks, bands and width
-	laid     int      // document lines already laid out as rows
-	rendered []string // ANSI-rendered content lines
+	notes []string // metadata lines above the diff
+	// noteRows is those lines wrapped to the viewport width, with notePlain
+	// their searchable text. A long commit description takes as many rows as
+	// it needs instead of being clipped.
+	noteRows  []string
+	notePlain []string
+	rows      []contentRow
+	indexed   int      // rows already folded into hunks, bands and width
+	laid      int      // document lines already laid out as rows
+	rendered  []string // ANSI-rendered content lines
 	// blank is the row placeholder buffer handed to the viewport. It is
 	// reused across rebuilds: a three-million row document must not allocate
 	// sixteen megabytes every time the window resizes.
@@ -140,21 +162,32 @@ type Model struct {
 	target  float64
 	anim    bool
 	animSeq int
+	// lastFrame is when the previous animation frame ran, so the spring can
+	// advance by wall-clock time instead of a fixed assumption.
+	lastFrame time.Time
 
-	split           bool
-	wrap            bool
+	split bool
+	wrap  bool
+	// rx is the compiled regular expression when the search term looks like
+	// one, so patterns work without a separate mode.
+	rx              *regexp.Regexp
 	width, height   int
 	showLineNumbers bool
 }
 
 // scrollFrameMsg drives smooth scroll animation frames. The sequence number
 // makes stale frames from a superseded animation harmless: exactly one chain
-// of ticks can be alive at a time.
-type scrollFrameMsg struct{ seq int }
+// of ticks can be alive at a time. The timestamp lets the spring advance by
+// the real elapsed time, so a slow frame stretches the delay but not the
+// motion.
+type scrollFrameMsg struct {
+	seq int
+	at  time.Time
+}
 
 // New builds a diff view.
 func New(smooth bool, st styles.Styles) Model {
-	gut := &gutterState{show: true}
+	gut := &gutterState{show: true, numW: 4}
 
 	vp := viewport.New()
 	vp.MouseWheelEnabled = true
@@ -176,7 +209,7 @@ func New(smooth bool, st styles.Styles) Model {
 		gut:             gut,
 		cache:           &rowCache{rows: make(map[int]string)},
 		smooth:          smooth,
-		spring:          harmonica.NewSpring(1.0/60, 5.0, 0.85),
+		spring:          harmonica.NewSpring(frameInterval.Seconds(), baseSpringFreq, 1.0),
 		showLineNumbers: true,
 		hunkCur:         -1,
 	}
@@ -319,7 +352,7 @@ func (m Model) lineForRow(i int) (diff.Line, bool) {
 	if m.file == nil {
 		return diff.Line{}, false
 	}
-	idx := i - 1 - len(m.notes)
+	idx := i - m.gut.header - len(m.noteRows)
 	if idx < 0 {
 		return diff.Line{}, false
 	}
@@ -360,11 +393,13 @@ func (m *Model) SetLines(f *diff.File) {
 
 // preRows are the rows above the diff: the notes, then the file header.
 func (m Model) preRows(f *diff.File) []contentRow {
-	rows := make([]contentRow, 0, len(m.notes)+1)
-	for _, n := range m.notes {
+	rows := make([]contentRow, 0, len(m.noteRows)+1)
+	for _, n := range m.noteRows {
 		rows = append(rows, contentRow{pre: true, text: n})
 	}
-	if f != nil {
+	// An aggregate document has no path: its totals already live in the notes,
+	// so a header row would only repeat them as a bare "+N -M" line.
+	if f != nil && f.Path() != "" {
 		rows = append(rows, contentRow{pre: true, text: m.renderHeader(f)})
 	}
 	return rows
@@ -373,11 +408,9 @@ func (m Model) preRows(f *diff.File) []contentRow {
 // preText is the searchable text of those rows, matching what a flat document
 // would have put in plain.
 func (m Model) preText(f *diff.File) []string {
-	out := make([]string, 0, len(m.notes)+1)
-	for _, n := range m.notes {
-		out = append(out, stripANSI(n))
-	}
-	if f != nil {
+	out := make([]string, 0, len(m.notePlain)+1)
+	out = append(out, m.notePlain...)
+	if f != nil && f.Path() != "" {
 		out = append(out, f.Path())
 	}
 	return out
@@ -386,7 +419,8 @@ func (m Model) preText(f *diff.File) []string {
 // SetNotes replaces the metadata lines rendered above the diff.
 func (m *Model) SetNotes(lines []string) {
 	m.notes = lines
-	m.gut.notes = len(lines)
+	m.refreshNoteRows()
+	m.gut.notes = len(m.noteRows)
 	m.setContent()
 }
 
@@ -476,7 +510,12 @@ func (m *Model) AppendBlocks(files []*diff.File) {
 	if m.doc == nil || len(files) == 0 {
 		return
 	}
-	m.doc.add(files, len(m.notes)+1)
+	m.refreshNoteRows()
+	pre := len(m.noteRows)
+	if m.hasFileHeader() {
+		pre++
+	}
+	m.doc.add(files, pre)
 	m.doc.setMode(m.split)
 	m.rebuildNav()
 	m.rebuildDoc()
@@ -505,6 +544,8 @@ func (m *Model) rebuildNav() {
 // and band lists, the content width and the row count.
 func (m *Model) rebuildDoc() {
 	m.cache.reset()
+	m.updateGutterWidth()
+	m.doc.setGutter(m.gut.cells(), m.gut.numCells()+1)
 	m.contentWidth = m.doc.width(m.vpWidth(), m.split, m.showLineNumbers)
 	m.pushContent()
 }
@@ -519,21 +560,56 @@ func (m Model) DocBlocks() (blocks, materialised int) {
 }
 
 // Update processes animation frames and forwards everything else to the
-// viewport.
+// viewport. With smooth scrolling on, a discrete step (a scroll key or a wheel
+// tick) moves the animation target instead of the viewport, so every way of
+// moving through a diff glides and repeated presses accumulate instead of
+// restarting from wherever the spring happened to be.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	if frame, ok := msg.(scrollFrameMsg); ok {
 		if frame.seq != m.animSeq {
 			return m, nil
 		}
-		return m, m.updateScroll()
-	}
-	if _, ok := msg.(tea.KeyPressMsg); ok && m.anim {
-		m.cancelAnim()
+		return m, m.updateScroll(frame.at)
 	}
 
+	scroll := isScrollInput(msg)
+	before := m.vp.YOffset()
 	var cmd tea.Cmd
 	m.vp, cmd = m.vp.Update(msg)
-	return m, cmd
+	after := m.vp.YOffset()
+
+	if !m.smooth || !scroll || after == before {
+		return m, cmd
+	}
+
+	step := float64(after - before)
+	if m.anim {
+		// Retarget the running animation: the target collects the steps while
+		// the viewport keeps following the spring. The step is undone on the
+		// viewport so the frame does not jump ahead of the spring.
+		m.target = m.clampTarget(m.target + step)
+		m.vp.SetYOffset(before)
+		return m, cmd
+	}
+	if math.Abs(step) < smallStepRows {
+		// Arrow keys and wheel ticks land now instead of gliding; the
+		// viewport already moved, so there is nothing to do.
+		return m, cmd
+	}
+
+	// Start the animation from the offset the step began at.
+	m.vp.SetYOffset(before)
+	return m, tea.Batch(cmd, m.ScrollTo(max(0, min(after, m.maxScroll()))))
+}
+
+// clampTarget keeps an animation target inside the scrollable range.
+func (m Model) clampTarget(target float64) float64 {
+	return math.Max(0, math.Min(target, float64(m.maxScroll())))
+}
+
+// maxScroll is the highest viewport offset that still shows content.
+func (m Model) maxScroll() int {
+	return max(0, m.nrows()-m.vpHeight())
 }
 
 // View renders the visible window with its scrollbars. Painting is
@@ -560,6 +636,8 @@ func (m Model) View() string {
 	}
 
 	if m.hscroll() {
+		// The bar closes the diff. When the search line is showing the app
+		// sizes this pane one row shorter, so the bar lands right above it.
 		lines = append(lines, m.hbar())
 	}
 	return strings.Join(lines, "\n")
@@ -639,6 +717,7 @@ type SearchResultsMsg struct {
 // finishes the scan.
 func (m *Model) Search(term string) (int, tea.Cmd) {
 	m.term = term
+	m.rx = searchRegexp(term)
 	m.searchSeq++
 	m.matches = nil
 	m.matchIdx = -1
@@ -659,6 +738,9 @@ func (m *Model) Search(term string) (int, tea.Cmd) {
 
 // scanWindow finds the matches of term in document lines [from, to).
 func (m Model) scanWindow(term string, from, to int) []Match {
+	if m.rx != nil {
+		return scanRegex(m.nlines(), m.lineAt, m.rx, from, to, m.lineBase())
+	}
 	if got, ok := m.sourceMatches(term, from, to); ok {
 		return got
 	}
@@ -673,6 +755,13 @@ func (m Model) scanAllCmd(term string) tea.Cmd {
 		return nil
 	}
 	seq := m.searchSeq
+	if m.rx != nil {
+		rx := m.rx
+		count, text, base := m.nlines(), m.lineAt, m.lineBase()
+		return func() tea.Msg {
+			return SearchResultsMsg{Seq: seq, Term: term, Matches: scanRegex(count, text, rx, 0, count, base)}
+		}
+	}
 	if m.doc != nil && m.doc.src != nil && m.doc.src.Paged() {
 		src, pre, preTxt, base := m.doc.src, len(m.doc.pre), m.doc.preTxt, m.lineBase()
 		count, text, folded := m.nlines(), m.lineAt, m.foldedFor()
@@ -855,6 +944,36 @@ func scanLines(count int, text func(int) string, folded []string, term string, f
 	return out
 }
 
+// searchRegexp compiles term as a case-insensitive pattern when it contains
+// anything that reads as a regular expression. A plain word stays a plain
+// substring search, which is what the fast paths are built for. A pattern that
+// does not compile falls back to the literal search instead of failing.
+func searchRegexp(term string) *regexp.Regexp {
+	if !strings.ContainsAny(term, `\.+*?()[]{}^$|`) {
+		return nil
+	}
+	rx, err := regexp.Compile("(?i)" + term)
+	if err != nil {
+		return nil
+	}
+	return rx
+}
+
+// scanRegex finds every match of rx in document lines [from, to).
+func scanRegex(count int, text func(int) string, rx *regexp.Regexp, from, to, lineBase int) []Match {
+	from = max(0, from)
+	to = min(to, count)
+	var out []Match
+	for i := from; i < to; i++ {
+		for _, loc := range rx.FindAllStringIndex(text(i), -1) {
+			if loc[1] > loc[0] {
+				out = append(out, Match{Line: lineBase + i, Start: loc[0], End: loc[1]})
+			}
+		}
+	}
+	return out
+}
+
 // foldInto appends the ASCII-lowercased form of s to dst.
 func foldInto(dst []byte, s string) []byte {
 	for i := 0; i < len(s); i++ {
@@ -994,7 +1113,7 @@ func (m Model) rowForLine(flat int) int {
 // ScrollTo scrolls smoothly (or directly) to the given rendered-line offset.
 // The returned command drives the animation when smooth scrolling is on.
 func (m *Model) ScrollTo(line int) tea.Cmd {
-	line = max(0, line)
+	line = max(0, min(line, m.maxScroll()))
 	if !m.smooth {
 		m.vp.SetYOffset(line)
 		return nil
@@ -1002,7 +1121,14 @@ func (m *Model) ScrollTo(line int) tea.Cmd {
 	m.pos = float64(m.vp.YOffset())
 	m.vel = 0
 	m.target = float64(line)
+	if math.Abs(m.target-m.pos) < smallStepRows {
+		// Too short to be worth animating: land on it right away.
+		m.cancelAnim()
+		m.vp.SetYOffset(line)
+		return nil
+	}
 	m.anim = true
+	m.lastFrame = time.Time{}
 	m.animSeq++
 	return tickScroll(m.animSeq)
 }
@@ -1013,6 +1139,29 @@ func (m *Model) ScrollTo(line int) tea.Cmd {
 func (m *Model) JumpTo(line int) {
 	m.cancelAnim()
 	m.vp.SetYOffset(max(0, line))
+}
+
+// Anchor returns where the reader is: the flat line at the top of the
+// viewport. A refresh that replaces the content with SetFileAt puts them back
+// there, so saving a file does not throw away their place in a long diff. A
+// flat document has no line index, so plain rows serve, and JumpToLine hands
+// the value straight back.
+func (m Model) Anchor() int {
+	if m.doc != nil {
+		return m.doc.lineAtRow(m.vp.YOffset()) + m.lineBase()
+	}
+	return m.vp.YOffset()
+}
+
+// SetFileAt shows f with the viewport on flat line, without animating.
+func (m *Model) SetFileAt(f *diff.File, line int) {
+	m.SetFile(f)
+	m.JumpToLine(line)
+}
+
+// JumpToLine puts the viewport on the row that paints flat line, immediately.
+func (m *Model) JumpToLine(line int) {
+	m.JumpTo(m.rowForLine(max(0, line)))
 }
 
 // CancelScroll stops any running scroll animation.
@@ -1035,26 +1184,45 @@ func (m *Model) GotoBottom() tea.Cmd {
 func (m *Model) cancelAnim() {
 	m.anim = false
 	m.vel = 0
+	m.lastFrame = time.Time{}
 	m.animSeq++
 }
 
-func (m *Model) updateScroll() tea.Cmd {
+func (m *Model) updateScroll(now time.Time) tea.Cmd {
 	if !m.anim {
 		return nil
 	}
+
+	// Advance by the time that actually elapsed, so a slow frame delays the
+	// motion instead of stretching it. A long gap (the app was suspended)
+	// is capped: catching up should not fling the view.
+	dt := now.Sub(m.lastFrame)
+	if m.lastFrame.IsZero() || dt <= 0 {
+		dt = frameInterval
+	}
+	dt = max(frameInterval/4, min(dt, 50*time.Millisecond))
+	m.lastFrame = now
+
+	m.target = max(0, min(m.target, float64(m.maxScroll())))
+	// Stiffness grows with the distance left, so a one-line step stays soft
+	// and a long jump does not crawl. Rebuilt per frame because the spring
+	// bakes its timestep into its coefficients.
+	freq := baseSpringFreq + math.Min(math.Abs(m.target-m.pos)*0.6, maxSpringFreq-baseSpringFreq)
+	m.spring = harmonica.NewSpring(dt.Seconds(), freq, 1.0)
 	m.pos, m.vel = m.spring.Update(m.pos, m.vel, m.target)
-	m.vp.SetYOffset(int(math.Round(m.pos)))
-	if math.Abs(m.target-m.pos) < 0.5 {
+
+	if math.Abs(m.target-m.pos) < 0.02 && math.Abs(m.vel) < 0.5 {
 		m.pos, m.vel, m.anim = m.target, 0, false
-		m.vp.SetYOffset(int(m.target))
+		m.vp.SetYOffset(int(math.Round(m.target)))
 		return nil
 	}
+	m.vp.SetYOffset(int(math.Round(m.pos)))
 	return tickScroll(m.animSeq)
 }
 
 func tickScroll(seq int) tea.Cmd {
-	return tea.Tick(frameInterval, func(time.Time) tea.Msg {
-		return scrollFrameMsg{seq: seq}
+	return tea.Tick(frameInterval, func(at time.Time) tea.Msg {
+		return scrollFrameMsg{seq: seq, at: at}
 	})
 }
 
@@ -1152,14 +1320,16 @@ func (m *Model) buildRows() {
 	m.indexed = 0
 	m.laid = 0
 
-	for _, n := range m.notes {
+	for _, n := range m.noteRows {
 		m.rows = append(m.rows, contentRow{pre: true, text: n})
-		m.plain = append(m.plain, stripANSI(n))
 	}
+	m.plain = append(m.plain, m.notePlain...)
 
-	if m.file != nil {
+	if m.file != nil && m.file.Path() != "" {
 		m.rows = append(m.rows, contentRow{pre: true, text: m.renderHeader(m.file)})
 		m.plain = append(m.plain, m.file.Path())
+	}
+	if m.file != nil {
 		m.appendRows(0)
 	}
 }
@@ -1248,6 +1418,7 @@ func splitRows(lines []diff.Line, base int) []contentRow {
 // setContent lays out the rows for the current mode and refreshes the
 // viewport index.
 func (m *Model) setContent() {
+	m.refreshNoteRows()
 	if m.doc != nil {
 		m.rebuild()
 		return
@@ -1261,6 +1432,12 @@ func (m *Model) setContent() {
 // height depends on the text; otherwise the viewport only needs the count and
 // rows are styled lazily in View.
 func (m *Model) rebuild() {
+	m.refreshNoteRows()
+	m.gut.header = 0
+	if m.hasFileHeader() {
+		m.gut.header = 1
+	}
+	m.updateGutterWidth()
 	if m.doc != nil {
 		m.doc.setMode(m.split)
 		if m.doc.single() {
@@ -1371,7 +1548,7 @@ func (m Model) rowWidth(r contentRow) int {
 		colW := m.vpWidth() / 2
 		gut := 0
 		if m.showLineNumbers {
-			gut = numGutter
+			gut = m.gut.numW + 1
 		}
 		contentW := max(1, colW-gut)
 		widest := 0
@@ -1392,7 +1569,7 @@ func (m Model) rowWidth(r contentRow) int {
 	}
 	gut := 0
 	if m.showLineNumbers {
-		gut = gutterWidth
+		gut = m.gut.cells()
 	}
 	return gut + ansi.StringWidth(r.line.Text)
 }
@@ -1431,7 +1608,7 @@ func (m Model) visibleLines(w, h int) []string {
 func (m Model) paintRow(i, w int) string {
 	gutW := 0
 	if m.showLineNumbers && !m.split {
-		gutW = gutterWidth
+		gutW = m.gut.cells()
 	}
 	contentW := max(0, w-gutW)
 	x := m.vp.XOffset()
@@ -1633,12 +1810,12 @@ func (m Model) renderSide(l diff.Line, flatIdx int, present bool, colW int, oldS
 	var gut int
 	var num string
 	if m.showLineNumbers {
-		gut = numGutter
+		gut = m.gut.numW + 1
 		n := l.New
 		if oldSide {
 			n = l.Old
 		}
-		num = fmt.Sprintf("%4s ", lineNum(n))
+		num = fmt.Sprintf("%*s ", m.gut.numW, lineNum(n))
 	}
 
 	contentW := max(1, colW-gut)
@@ -1649,7 +1826,7 @@ func (m Model) renderSide(l diff.Line, flatIdx int, present bool, colW int, oldS
 	text = ansi.Cut(text, x, x+contentW)
 	line := num + text
 	if pad := colW - ansi.StringWidth(line); pad > 0 {
-		if base.GetBackground() != nil {
+		if hasBackground(base) {
 			line += base.Render(strings.Repeat(" ", pad))
 		} else {
 			line += strings.Repeat(" ", pad)
@@ -1667,10 +1844,18 @@ func (m Model) fillSide(colW int) string {
 	}
 	gut := 0
 	if m.showLineNumbers {
-		gut = numGutter
+		gut = m.gut.numW + 1
 	}
 	contentW := max(0, colW-gut)
 	return strings.Repeat(" ", gut) + m.styles.DiffFill().Render(strings.Repeat("╱", contentW))
+}
+
+// hasBackground reports whether a style paints a background. lipgloss v2
+// signals "none" with NoColor rather than a nil interface, so a nil check
+// never fires.
+func hasBackground(st lipgloss.Style) bool {
+	_, none := st.GetBackground().(lipgloss.NoColor)
+	return !none
 }
 
 // padLine extends a rendered line to the full content width with its line
@@ -1681,12 +1866,12 @@ func (m Model) padLine(out string, base lipgloss.Style) string {
 	if m.vp.SoftWrap || m.vpWidth() == 0 {
 		return out
 	}
-	if base.GetBackground() == nil {
+	if !hasBackground(base) {
 		return out
 	}
 	target := m.vpWidth()
 	if m.showLineNumbers && !m.split {
-		target -= gutterWidth
+		target -= m.gut.cells()
 	}
 	pad := target - lipgloss.Width(out)
 	if pad <= 0 {
@@ -1752,12 +1937,34 @@ func boundarySet(lo, hi int, words []diff.Span, matches []Match) []int {
 
 // gutterText renders the left line-number gutter. The state is read through
 // a shared pointer so the callback always sees the current file and mode.
+// updateGutterWidth sizes the number columns from the document's tallest line
+// number, so the gutter never overflows into the content.
+// hasFileHeader reports whether the file header row is part of the layout.
+func (m Model) hasFileHeader() bool { return m.file != nil && m.file.Path() != "" }
+
+func (m *Model) updateGutterWidth() {
+	lines := m.nlines()
+	if m.doc != nil {
+		// A virtual document only materialises part of its rows, so the
+		// number columns must follow its full length.
+		lines = max(lines, m.doc.lineCount())
+	}
+	digits := len(itoa(max(1, lines)))
+	m.gut.numW = max(4, digits)
+}
+
+// numCells is the width of one number column, never below four digits.
+func (g *gutterState) numCells() int { return max(4, g.numW) }
+
+// cells is the total width of the two number columns and their gaps.
+func (g *gutterState) cells() int { return 2*g.numCells() + 2 }
+
 func gutterText(g *gutterState, info viewport.GutterContext) string {
 	if g.split {
 		return ""
 	}
 	if info.Soft {
-		return strings.Repeat(" ", gutterWidth)
+		return strings.Repeat(" ", g.cells())
 	}
 	if !g.show {
 		return ""
@@ -1765,30 +1972,38 @@ func gutterText(g *gutterState, info viewport.GutterContext) string {
 	if g.lineFor != nil {
 		l, ok := g.lineFor(info.Index)
 		if !ok {
-			return blankGutter()
+			return blankGutterFor(g)
 		}
 		if l.Kind == diff.HunkHeader {
-			return "  ·    ·  "
+			label := "  ·    ·  "
+			if pad := g.cells() - len(label); pad > 0 {
+				return label + strings.Repeat(" ", pad)
+			}
+			return label
 		}
-		return fmt.Sprintf("%4s %4s ", lineNum(l.Old), lineNum(l.New))
+		w := g.numCells()
+		return fmt.Sprintf("%*s %*s ", w, lineNum(l.Old), w, lineNum(l.New))
 	}
 	if g.file == nil {
-		return blankGutter()
+		return blankGutterFor(g)
 	}
 	// Index 0 onward is the notes block and file header; diff lines follow.
-	idx := info.Index - 1 - g.notes
+	idx := info.Index - g.header - g.notes
 	if info.Index < 0 || idx < 0 {
-		return blankGutter()
+		return blankGutterFor(g)
 	}
 	l, ok := g.file.LineAt(idx)
 	if !ok {
-		return blankGutter()
+		return blankGutterFor(g)
 	}
 	if l.Kind == diff.HunkHeader {
-		// Exactly gutterWidth cells so hunk headers align with numbered rows.
-		return "  ·    ·  "
+		label := "  ·    ·  "
+		if pad := g.cells() - len(label); pad > 0 {
+			return label + strings.Repeat(" ", pad)
+		}
+		return label
 	}
-	return fmt.Sprintf("%4s %4s ", lineNum(l.Old), lineNum(l.New))
+	return fmt.Sprintf("%*s %*s ", g.numW, lineNum(l.Old), g.numW, lineNum(l.New))
 }
 
 // lineNum formats a line number, leaving absent sides (0) blank.
@@ -1799,9 +2014,9 @@ func lineNum(n int) string {
 	return strconv.Itoa(n)
 }
 
-func blankGutter() string {
-	return strings.Repeat(" ", gutterWidth)
-}
+func itoa(n int) string { return strconv.Itoa(n) }
+
+func blankGutterFor(g *gutterState) string { return strings.Repeat(" ", g.cells()) }
 
 // findAllFold returns byte offsets of all case-insensitive occurrences of
 // sub in s.
@@ -1853,4 +2068,57 @@ func lowerByte(c byte) byte {
 // from pre-styled metadata lines.
 func stripANSI(s string) string {
 	return ansi.Strip(s)
+}
+
+// SetSmooth turns animated scrolling on or off at runtime, cancelling any
+// animation in flight when it is turned off.
+func (m *Model) SetSmooth(smooth bool) {
+	m.smooth = smooth
+	if !smooth {
+		m.cancelAnim()
+	}
+}
+
+// Smooth reports whether animated scrolling is on.
+func (m Model) Smooth() bool { return m.smooth }
+
+// isScrollInput reports whether the message is a discrete scroll step that
+// should glide when smooth scrolling is on: a key or a wheel tick.
+func isScrollInput(msg tea.Msg) bool {
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.MouseWheelMsg:
+		return true
+	}
+	return false
+}
+
+// refreshNoteRows wraps the metadata notes to the viewport width, keeping the
+// styled rows and their plain text index-aligned with the document rows. A
+// note that fits stays a single row, so short headers cost nothing.
+func (m *Model) refreshNoteRows() {
+	// With soft wrap on the viewport wraps every row itself. Pre-wrapping here
+	// too would wrap the same text twice and mangle the line.
+	if m.wrap && !m.split {
+		m.noteRows = m.noteRows[:0]
+		m.notePlain = m.notePlain[:0]
+		for _, n := range m.notes {
+			m.noteRows = append(m.noteRows, n)
+			m.notePlain = append(m.notePlain, stripANSI(n))
+		}
+		return
+	}
+	w := max(1, m.vpWidth())
+	m.noteRows = m.noteRows[:0]
+	m.notePlain = m.notePlain[:0]
+	for _, n := range m.notes {
+		if ansi.StringWidth(stripANSI(n)) <= w {
+			m.noteRows = append(m.noteRows, n)
+			m.notePlain = append(m.notePlain, stripANSI(n))
+			continue
+		}
+		for _, line := range strings.Split(ansi.Wrap(n, w, " "), "\n") {
+			m.noteRows = append(m.noteRows, line)
+			m.notePlain = append(m.notePlain, stripANSI(line))
+		}
+	}
 }

@@ -3,9 +3,11 @@
 package searchbar
 
 import (
+	"strings"
+
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"samouly.fun/twig/internal/ui/styles"
 )
@@ -38,12 +40,15 @@ func (m *Model) Activate() tea.Cmd {
 	return m.input.Focus()
 }
 
-// Deactivate blurs and clears the input.
+// Deactivate blurs the input but keeps its text, so reopening the search
+// picks the last query back up.
 func (m *Model) Deactivate() {
 	m.active = false
 	m.input.Blur()
-	m.input.SetValue("")
 }
+
+// Clear empties the query.
+func (m *Model) Clear() { m.input.SetValue("") }
 
 // SetStyles updates the theme.
 func (m *Model) SetStyles(st styles.Styles) { m.styles = st }
@@ -66,9 +71,23 @@ func (m Model) View(width int, matchMsg string) string {
 	if width < 1 {
 		return ""
 	}
-	bar := m.styles.Subtle().Render("  ") + m.input.View()
+	count := ""
 	if matchMsg != "" {
-		bar += " " + m.styles.GreenFg(matchMsg)
+		// The count shares the muted tone of the rest of the line, so a live
+		// search reads as one quiet strip instead of a green callout.
+		count = " " + m.styles.SemiDimGreenFg(matchMsg)
 	}
-	return lipgloss.NewStyle().Width(width).MaxWidth(width).Render(bar)
+
+	// Reserve the count's cells out of the input so both always fit on the
+	// one row the pane gives the bar.
+	in := m.input
+	// One extra cell for the input's cursor, which the textinput draws
+	// without counting in its width.
+	in.SetWidth(max(4, width-4-ansi.StringWidth(count)))
+
+	bar := ansi.Truncate(m.styles.Subtle().Render("  ")+in.View()+count, width, "…")
+	if pad := width - ansi.StringWidth(bar); pad > 0 {
+		bar += strings.Repeat(" ", pad)
+	}
+	return bar
 }
