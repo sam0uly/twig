@@ -275,7 +275,7 @@ func (m model) footerView() string {
 	// a push goes over the network and can take seconds: the spinner is the
 	// only thing on screen that says it is still working
 	if m.pushing {
-		info.Message = m.spinner.View() + " pushing…"
+		info.Message = m.pushNotice()
 	}
 	// the footer says when refreshing has fallen back to polling, so a slow
 	// update is never a mystery
@@ -306,6 +306,14 @@ func (m model) footerView() string {
 	}
 
 	return m.status.FooterView(info)
+}
+
+// pushNotice is the footer text shown while a push runs. The spinner is
+// stripped of its own colour on purpose: the footer paints the whole message
+// segment with one background, and a reset embedded in the middle would end
+// that background at the spinner instead of at the end of the segment.
+func (m model) pushNotice() string {
+	return ansi.Strip(m.spinner.View()) + " pushing…"
 }
 
 // viewModeLabel is appended to the footer info pill so the active diff

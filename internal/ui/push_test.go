@@ -45,3 +45,21 @@ func TestPushShowsASpinnerUntilItReturns(t *testing.T) {
 		t.Fatalf("the footer still shows the push:\n%s", ansi.Strip(done.render()))
 	}
 }
+
+// TestPushNoticeHasNoStylingOfItsOwn covers the footer highlight: the message
+// segment is painted with one background, so a colour reset inside the text
+// would end that background at the spinner and leave the rest of the line bare.
+func TestPushNoticeHasNoStylingOfItsOwn(t *testing.T) {
+	m := testModel(120, 24)
+	notice := m.pushNotice()
+
+	if strings.Contains(notice, "\x1b") {
+		t.Fatalf("the notice carries escape sequences: %q", notice)
+	}
+	if !strings.Contains(notice, "pushing") {
+		t.Fatalf("notice = %q, want the label", notice)
+	}
+	if ansi.StringWidth(notice) <= ansi.StringWidth(" pushing…") {
+		t.Fatalf("notice = %q, want the spinner glyph in front", ansi.Strip(notice))
+	}
+}
