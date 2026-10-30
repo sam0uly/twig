@@ -1508,3 +1508,40 @@ func TestCommitRowClickSelectsTheCommit(t *testing.T) {
 		t.Fatalf("an empty row moved the commit cursor to %+v", after)
 	}
 }
+
+// TestCommitFileRowAvoidsExtraPadding covers the per-commit sidebar: the
+// focused row used to carry an extra space between the selector and the name,
+// so selecting a file pushed its text one cell away from the border and one
+// cell past the pane.
+func TestCommitFileRowAvoidsExtraPadding(t *testing.T) {
+	m := testModel(120, 30)
+	m.files.SetCommitFiles([]*diff.File{
+		diff.Generate("a.go", diff.Modified, "one\n", "two\n", diff.GenerateOptions{Context: 3}),
+		diff.Generate("b.go", diff.Modified, "one\n", "two\n", diff.GenerateOptions{Context: 3}),
+	})
+	m.files.SetCommitFilesSize(30, 10)
+
+	// the cell column the first row's name starts at, with and without the
+	// cursor on it
+	nameColumn := func(view string) int {
+		t.Helper()
+		line := strings.Split(ansi.Strip(view), "\n")[0]
+		at := strings.Index(line, "a.go")
+		if at < 0 {
+			t.Fatalf("no file row in:\n%s", ansi.Strip(view))
+		}
+		return ansi.StringWidth(line[:at])
+	}
+
+	m.files.SelectCommitFile(0)
+	focused := nameColumn(m.files.CommitFilesView())
+	m.files.SelectCommitFile(1)
+	plain := nameColumn(m.files.CommitFilesView())
+
+	if focused != plain {
+		t.Fatalf("the focused row starts at cell %d, the plain one at %d", focused, plain)
+	}
+	if focused != 2 {
+		t.Fatalf("the name starts at cell %d, want 2: one selector cell and a space", focused)
+	}
+}

@@ -984,10 +984,12 @@ func (d glowDelegate) Render(w io.Writer, m list.Model, index int, value list.It
 		}
 		pad := max(0, rowWidth-lipgloss.Width(path)-lipgloss.Width(stats)-3)
 		if index == m.Index() {
+			// the selector cell replaces the two leading spaces of a plain
+			// row, so the name starts in the same column either way
 			_, _ = fmt.Fprintf(
 				w, "%s %s%s%s",
 				lipgloss.NewStyle().Foreground(st.SelectorFg()).Render(verticalLine),
-				lipgloss.NewStyle().Foreground(st.TitleActiveFg()).Bold(true).Render(" "+path),
+				lipgloss.NewStyle().Foreground(st.TitleActiveFg()).Bold(true).Render(path),
 				strings.Repeat(" ", pad),
 				lipgloss.NewStyle().Foreground(st.DescActiveFg()).Render(" "+stats),
 			)
