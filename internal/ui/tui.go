@@ -925,6 +925,17 @@ func (m model) updateClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 
 	if m.showLeft && inRect(msg.X, msg.Y, m.sideRect) {
 		row := msg.Y - m.sideRect.Min.Y - 1 // skip the border
+		// the commits tab lists commits where the files tab lists files, and
+		// clicking either one follows the selection into the main pane
+		if m.files.Tab() == filelist.TabCommits {
+			idx, ok := m.files.CommitAtRow(row)
+			if !ok {
+				return m, nil
+			}
+			m.files.SelectCommit(idx)
+			m.focus = focusSidebar
+			return m.followSelection(nil)
+		}
 		idx, ok := m.files.FileAtRow(row)
 		if !ok {
 			return m, nil

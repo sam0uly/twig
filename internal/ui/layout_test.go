@@ -1465,3 +1465,46 @@ func TestSidebarReloadFollowsTheFile(t *testing.T) {
 		t.Fatal("a config reload did not show the left sidebar")
 	}
 }
+
+// TestCommitRowClickSelectsTheCommit covers the commits tab's sidebar: a click
+// on a commit, on either of its two lines, moves the cursor there and loads
+// that commit, the way a click on a file does on the files tab.
+func TestCommitRowClickSelectsTheCommit(t *testing.T) {
+	m := testModel(120, 30)
+	m.showLeft = true
+	m.setSize()
+	m.files.SetTab(filelist.TabCommits)
+	m.files.SetCommits([]git.Commit{
+		{Hash: "aaaa1111", Short: "aaaa1111", Subject: "first"},
+		{Hash: "bbbb2222", Short: "bbbb2222", Subject: "second"},
+		{Hash: "cccc3333", Short: "cccc3333", Subject: "third"},
+	})
+	m.setSize()
+
+	// rows are two lines each: the second commit owns rows 2 and 3
+	for _, row := range []int{2, 3} {
+		click := tea.MouseClickMsg{X: m.sideRect.Min.X + 2, Y: m.sideRect.Min.Y + 1 + row}
+		next, _ := m.Update(click)
+		got := next.(model)
+		if got.focus != focusSidebar {
+			t.Fatalf("row %d: focus = %v, want the sidebar", row, got.focus)
+		}
+		c, ok := (&got.files).SelectedCommit()
+		if !ok || c.Hash != "bbbb2222" {
+			t.Fatalf("row %d: selected commit = %+v, want the second", row, c)
+		}
+		if got.commitSeq == 0 {
+			t.Fatalf("row %d: the clicked commit was not loaded", row)
+		}
+	}
+
+	// a click inside the sidebar but past the last row changes nothing
+	before, _ := (&m.files).SelectedCommit()
+	click := tea.MouseClickMsg{X: m.sideRect.Min.X + 2, Y: m.sideRect.Min.Y + 1 + 40}
+	next, _ := m.Update(click)
+	afterModel := next.(model)
+	after, _ := (&afterModel.files).SelectedCommit()
+	if after.Hash != before.Hash {
+		t.Fatalf("an empty row moved the commit cursor to %+v", after)
+	}
+}

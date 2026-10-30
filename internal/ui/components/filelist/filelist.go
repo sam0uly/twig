@@ -437,6 +437,29 @@ func (m Model) CommitFileAt(row int) (int, bool) {
 	return itemAtRow(m.commitFiles, row)
 }
 
+// CommitAtRow maps a row inside the commits sidebar body to a commit index. A
+// commit row is a subject line and a metadata line, so a click on either one
+// selects that commit.
+func (m Model) CommitAtRow(row int) (int, bool) {
+	const perItem = 2
+	per := m.commits.Paginator.PerPage
+	if per <= 0 || row < 0 || row >= per*perItem {
+		return 0, false
+	}
+	idx := m.commits.Paginator.Page*per + row/perItem
+	if idx < 0 || idx >= len(visible(m.commits)) {
+		return 0, false
+	}
+	return idx, true
+}
+
+// SelectCommit moves the commit cursor to the given index.
+func (m *Model) SelectCommit(idx int) {
+	if idx >= 0 && idx < len(visible(m.commits)) {
+		m.commits.Select(idx)
+	}
+}
+
 // itemAtRow converts a click row into an item index, accounting for the list
 // pagination that scrolls it.
 func itemAtRow(l list.Model, row int) (int, bool) {
