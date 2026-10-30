@@ -97,6 +97,37 @@ func welcomeArt(width, frame int) []string {
 	return rows
 }
 
+// welcomeRowStyles is the palette one row of the mock graph is drawn with.
+type welcomeRowStyles struct {
+	line, branch   lipgloss.Style
+	dot, branchDot lipgloss.Style
+	hash, subject  lipgloss.Style
+}
+
+// welcomeRowStylesFor picks the palette for one row. Rows share one palette:
+// a hash identifies a commit and a subject describes it, so neither changes
+// weight on the newest row. What marks that row is its dot, which pulses
+// inside the accent family rather than flashing white, which read as a
+// different kind of dot.
+func welcomeRowStylesFor(newest bool, frame int) welcomeRowStyles {
+	palette := welcomeRowStyles{
+		line:      lipgloss.NewStyle().Foreground(tone.Charple),
+		branch:    lipgloss.NewStyle().Foreground(tone.Pickle),
+		dot:       lipgloss.NewStyle().Foreground(tone.Blush).Bold(true),
+		branchDot: lipgloss.NewStyle().Foreground(tone.Julep).Bold(true),
+		hash:      lipgloss.NewStyle().Foreground(tone.Squid),
+		subject:   lipgloss.NewStyle().Foreground(tone.Steep),
+	}
+	if !newest {
+		return palette
+	}
+	if (frame/6)%2 == 1 {
+		palette.dot = lipgloss.NewStyle().Foreground(tone.Dolly).Bold(true)
+		palette.branchDot = palette.dot
+	}
+	return palette
+}
+
 // welcomeGraphRow draws one row of the mock graph: the lane glyphs, a hash
 // and a subject. The cycle forks a branch at one row, carries commits on it
 // for a while, then merges it back into the main line.
@@ -108,25 +139,10 @@ func welcomeGraphRow(row, width int, newest bool, frame int) string {
 	merge := pos == 7
 	branchLive := pos > 2 && pos < 7
 
-	var (
-		line      = lipgloss.NewStyle().Foreground(tone.Charple)
-		branch    = lipgloss.NewStyle().Foreground(tone.Pickle)
-		dot       = lipgloss.NewStyle().Foreground(tone.Blush).Bold(true)
-		branchDot = lipgloss.NewStyle().Foreground(tone.Julep).Bold(true)
-		hashStyle = lipgloss.NewStyle().Foreground(tone.Squid)
-		subjStyle = lipgloss.NewStyle().Foreground(tone.Steep)
-	)
-
-	if newest {
-		dot = lipgloss.NewStyle().Foreground(tone.Butter).Bold(true)
-		branchDot = dot
-		hashStyle = lipgloss.NewStyle().Foreground(tone.Smoke)
-		subjStyle = lipgloss.NewStyle().Foreground(tone.Oyster).Bold(true)
-		if (frame/6)%2 == 1 {
-			dot = lipgloss.NewStyle().Foreground(tone.Dolly).Bold(true)
-			branchDot = dot
-		}
-	}
+	palette := welcomeRowStylesFor(newest, frame)
+	line, branch := palette.line, palette.branch
+	dot, branchDot := palette.dot, palette.branchDot
+	hashStyle, subjStyle := palette.hash, palette.subject
 
 	var g strings.Builder
 	switch {
