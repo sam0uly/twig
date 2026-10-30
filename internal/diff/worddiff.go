@@ -187,7 +187,6 @@ func changeBlocks(part []Line) []block {
 }
 
 // isChangeRow reports whether a row is part of a change rather than context.
-func isChangeRow(k LineKind) bool { return k == Deletion || k == Addition }
 
 // annotateHunk pairs the changed rows of one hunk.
 func annotateHunk(part []Line, deadline time.Time) {

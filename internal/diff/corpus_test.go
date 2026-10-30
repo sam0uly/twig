@@ -171,7 +171,8 @@ func checkPairingShape(t *testing.T, path string, f *File) {
 			in := make(interner, 16)
 			score := bagSimilarity(
 				wordBag(h.Lines[p[0]].Text[1:], in),
-				wordBag(h.Lines[p[1]].Text[1:], in))
+				wordBag(h.Lines[p[1]].Text[1:], in),
+			)
 			if score < homologyFloor {
 				t.Fatalf("%s: paired rows below the floor (%.2f): %q / %q",
 					path, score, h.Lines[p[0]].Text, h.Lines[p[1]].Text)

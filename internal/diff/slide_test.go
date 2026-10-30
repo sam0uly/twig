@@ -156,7 +156,8 @@ func TestWordDiffSkipsLongLines(t *testing.T) {
 func TestWordDiffBudgeted(t *testing.T) {
 	var lines []Line
 	for i := 0; i < 400; i++ {
-		lines = append(lines,
+		lines = append(
+			lines,
 			Line{Kind: Deletion, Text: "-func handler() error { return nil }"},
 			Line{Kind: Addition, Text: "+func handler() error { return err }"},
 		)

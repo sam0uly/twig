@@ -40,9 +40,11 @@ func goldenCases() []goldenCase {
 		{"comment-text", "a.go", "x := 1 // one\n", "x := 1 // two\n"},
 		{"comment-added", "a.go", "x := 1\n", "x := 1 // note\n"},
 		{"prose-rewrite", "README.md", proseOld, proseNew},
-		{"multiline-rewrite", "a.go",
+		{
+			"multiline-rewrite", "a.go",
 			"func f() {\n\ta()\n\tb()\n\tc()\n}\n",
-			"func f() {\n\tc()\n\tb()\n\ta()\n}\n"},
+			"func f() {\n\tc()\n\tb()\n\ta()\n}\n",
+		},
 		{"crlf", "a.go", "x := 1\r\ny := 2\r\n", "x := 9\r\ny := 2\r\n"},
 		{"cjk", "a.go", "s := \"日本語\"\n", "s := \"日本後\"\n"},
 		{"json", "a.json", "{\"a\": 1, \"b\": \"x y\"}\n", "{\"a\": 2, \"b\": \"x  y\"}\n"},

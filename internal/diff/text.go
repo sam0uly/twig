@@ -150,26 +150,3 @@ func (t text) lineAt(off int) int {
 }
 
 // textIDs interns the lines of two ranges into dense integer ids.
-func textIDs(old text, alo, ahi int, new text, blo, bhi int, ignoreWS bool) ([]int32, []int32) {
-	ids := make(map[string]int32, (ahi-alo)+(bhi-blo))
-	get := func(s string) int32 {
-		if ignoreWS {
-			s = normalizeWS(s)
-		}
-		if id, ok := ids[s]; ok {
-			return id
-		}
-		id := int32(len(ids))
-		ids[s] = id
-		return id
-	}
-	x := make([]int32, ahi-alo)
-	for i := range x {
-		x[i] = get(old.line(alo + i))
-	}
-	y := make([]int32, bhi-blo)
-	for i := range y {
-		y[i] = get(new.line(blo + i))
-	}
-	return x, y
-}
