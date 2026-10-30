@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"image/color"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -16,6 +18,7 @@ import (
 	"samouly.fun/twig/internal/git"
 	"samouly.fun/twig/internal/ui/components/diffview"
 	"samouly.fun/twig/internal/ui/components/filelist"
+	"samouly.fun/twig/internal/ui/styles"
 )
 
 func testModel(width, height int) model {
@@ -51,6 +54,7 @@ func TestLayoutFilesTab(t *testing.T) {
 
 func TestLayoutCommitsTab(t *testing.T) {
 	m := testModel(120, 24)
+	m.showRight = true
 	m.files.SetTab(1)
 	m.setSize()
 
@@ -216,6 +220,9 @@ func TestArrowKeysScrollTheDiff(t *testing.T) {
 		strings.Repeat("wide line of text that overflows the pane\n", 3),
 		strings.Repeat("wide line of text that overflows the pane!\n", 3),
 		diff.GenerateOptions{Context: 3})
+	m.showLeft = true
+	m.showRight = true
+	m.setSize()
 	m.view.SetFile(f)
 	m.focus = focusMain
 
@@ -292,14 +299,14 @@ func TestWelcomeContent(t *testing.T) {
 	view := ansi.Strip(m.welcomeView())
 	t.Logf("welcome screen:\n%s", view)
 
-	for _, want := range []string{"twig", "working tree clean", "─", "✦", "files", "commits"} {
+	for _, want := range []string{"twig", "working tree clean", "git log", "●", "files", "commits"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("welcome screen missing %q:\n%s", want, view)
 		}
 	}
 
-	m.welcomeFrame = welcomeGrowFrames + 5
-	t.Logf("mature twig:\n%s", ansi.Strip(m.welcomeView()))
+	m.welcomeFrame = welcomeRevealFrames + 5
+	t.Logf("scrolled graph:\n%s", ansi.Strip(m.welcomeView()))
 }
 
 func TestCommitModalOverDimmedPage(t *testing.T) {
@@ -448,27 +455,43 @@ func TestSidebarToggles(t *testing.T) {
 	m.view.SetFile(diff.Generate("a.go", diff.Modified, "a\n", "b\n", diff.GenerateOptions{Context: 3}))
 	m.files.SetFiles(nil, []git.FileStatus{{Path: "a.go", Letter: "M"}})
 
+	// Both sidebars start hidden; the toggles bring them in and out.
+	if m.showLeft || m.sideRect.Dx() != 0 {
+		t.Fatalf("left sidebar starts visible (width %d)", m.sideRect.Dx())
+	}
+
 	left := tea.KeyPressMsg{Code: 'H', Text: "H"}
 	next, _ := m.Update(left)
 	m = next.(model)
-	if m.showLeft {
-		t.Fatal("H did not hide the left sidebar")
+	if !m.showLeft || m.sideRect.Dx() == 0 {
+		t.Fatal("H did not show the left sidebar")
 	}
-	if m.sideRect.Dx() != 0 {
-		t.Fatalf("hidden left sidebar still has width %d", m.sideRect.Dx())
+	assertGeometry(t, m, "left shown")
+
+	next, _ = m.Update(left)
+	m = next.(model)
+	if m.showLeft || m.sideRect.Dx() != 0 {
+		t.Fatalf("second H did not hide the left sidebar (width %d)", m.sideRect.Dx())
 	}
 	assertGeometry(t, m, "left hidden")
 
 	m.files.SetTab(1)
 	m.setSize()
+	if m.showRight || m.commitFilesRct.Dx() != 0 {
+		t.Fatalf("right sidebar starts visible (width %d)", m.commitFilesRct.Dx())
+	}
 	right := tea.KeyPressMsg{Code: 'L', Text: "L"}
 	next, _ = m.Update(right)
 	m = next.(model)
-	if m.showRight {
-		t.Fatal("L did not hide the right sidebar")
+	if m.commitFilesRct.Dx() == 0 {
+		t.Fatal("L did not show the right sidebar")
 	}
+	assertGeometry(t, m, "right shown")
+
+	next, _ = m.Update(right)
+	m = next.(model)
 	if m.commitFilesRct.Dx() != 0 {
-		t.Fatalf("hidden right sidebar still has width %d", m.commitFilesRct.Dx())
+		t.Fatalf("second L did not hide the right sidebar (width %d)", m.commitFilesRct.Dx())
 	}
 	assertGeometry(t, m, "right hidden")
 }
@@ -499,6 +522,7 @@ func TestHelpHasNoBackgroundBar(t *testing.T) {
 
 func TestClickCommitFileSelectsAndJumps(t *testing.T) {
 	m := testModel(120, 24)
+	m.showRight = true
 	m.files.SetTab(1)
 	m.setSize()
 
@@ -531,6 +555,7 @@ func TestClickFileSelectsInSidebar(t *testing.T) {
 		{Path: "b.go", Letter: "M"},
 		{Path: "c.go", Letter: "M"},
 	})
+	m.showLeft = true
 	m.setSize()
 
 	// Row 0 is the section header, row 1 the first file, row 2 the second.
@@ -602,6 +627,10 @@ func TestEnterLoadsTheSelectedFile(t *testing.T) {
 		{Path: "b.go", Letter: "M"},
 		{Path: "c.go", Letter: "M"},
 	})
+	// The sidebar owns enter, so it has focus for this one.
+	m.showLeft = true
+	m.setSize()
+	m.focus = focusSidebar
 	// Move the cursor without going through the list update path, exactly
 	// like a mouse wheel or a programmatic selection would. Item 0 is the
 	// section header, so index 3 is the third file.
@@ -884,5 +913,481 @@ func TestAllChangesStreamsChunks(t *testing.T) {
 	m = next.(model)
 	if got := m.view.YOffset(); got != before {
 		t.Fatalf("stale chunk moved the view from %d to %d", before, got)
+	}
+}
+
+// TestWelcomeTicksResumeAfterTabSwitch pins the splash animation coming back
+// to life: leaving it for another tab ends the tick chain, and any later
+// message that lands on the splash starts a fresh one.
+func TestWelcomeTicksResumeAfterTabSwitch(t *testing.T) {
+	m := testModel(100, 30)
+	if !m.showWelcome() {
+		t.Fatal("welcome should start visible")
+	}
+
+	next, cmd := m.Update(welcomeTickMsg{})
+	if cmd == nil {
+		t.Fatal("welcome tick should schedule the next frame")
+	}
+	m = next.(model)
+
+	// Something to browse: the splash hides and the chain stops.
+	m.files.SetFiles(nil, []git.FileStatus{{Path: "a.go", Letter: "M"}})
+	next, cmd = m.Update(welcomeTickMsg{})
+	if cmd != nil {
+		t.Fatal("welcome tick should stop while hidden")
+	}
+	m = next.(model)
+	if m.welcomeTicking {
+		t.Fatal("tick chain still marked in flight while hidden")
+	}
+
+	// Back to an empty list: the status load is what reveals the splash
+	// again, and landing on it restarts the animation.
+	next, cmd = m.Update(statusLoadedMsg{})
+	nm := next.(model)
+	if !nm.showWelcome() {
+		t.Fatalf("empty status should show the splash (total %d)", nm.files.Total())
+	}
+	if cmd == nil {
+		t.Fatal("landing on the splash should restart the animation")
+	}
+	if !nm.welcomeTicking {
+		t.Fatal("restarted animation did not mark the tick chain in flight")
+	}
+	if nm.welcomeFrame != m.welcomeFrame {
+		t.Fatal("restarting the animation should not skip frames")
+	}
+}
+
+// TestHelpColumnsSeparateChrome checks the sidebars, help and quit keys get a
+// column of their own on both tabs instead of trailing the navigation keys.
+func TestHelpColumnsSeparateChrome(t *testing.T) {
+	for _, tab := range []int{filelist.TabFiles, filelist.TabCommits} {
+		m := testModel(120, 30)
+		m.files.SetTab(tab)
+		cols := m.helpColumns()
+
+		last := cols[len(cols)-1]
+		var got []string
+		for _, e := range last {
+			got = append(got, e.val)
+		}
+		want := []string{"sidebars", "hide help", "quit"}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("tab %d chrome column = %v, want %v", tab, got, want)
+		}
+
+		for i, c := range cols[:len(cols)-1] {
+			for _, e := range c {
+				switch e.val {
+				case "sidebars", "hide help", "quit":
+					t.Fatalf("tab %d column %d still holds %q", tab, i, e.val)
+				}
+			}
+		}
+	}
+}
+
+// TestWelcomeStaysOnTheFilesTab pins the splash to the files tab: an empty
+// commits list must not bring the animation back.
+func TestWelcomeStaysOnTheFilesTab(t *testing.T) {
+	m := testModel(100, 30)
+	if !m.showWelcome() {
+		t.Fatal("welcome should start visible on the files tab")
+	}
+
+	m.files.SetTab(filelist.TabCommits)
+	if m.showWelcome() {
+		t.Fatal("welcome should not show on the commits tab")
+	}
+	next, cmd := m.Update(welcomeTickMsg{})
+	if cmd != nil {
+		t.Fatal("welcome tick should stop once the commits tab is active")
+	}
+	if next.(model).welcomeFrame != m.welcomeFrame {
+		t.Fatal("welcome frame advanced while the commits tab was active")
+	}
+
+	m.files.SetTab(filelist.TabFiles)
+	if !m.showWelcome() {
+		t.Fatal("welcome should come back with the files tab")
+	}
+}
+
+// TestCommitNotesCarryTheBody checks the selected commit's body shows in the
+// diff pane under the subject.
+func TestCommitNotesCarryTheBody(t *testing.T) {
+	m := testModel(100, 30)
+	const full = "0c1510f8d448000000000000000000000000000000"
+	notes := strings.Join(commitNotes(m.styles, git.Commit{
+		Hash:        full,
+		Short:       "0c1510f",
+		Author:      "sam",
+		When:        "Oct 29, 2026",
+		Subject:     "subject here",
+		Description: "the body line\nand a second one",
+	}, nil), "\n")
+
+	// The metadata line carries the whole hash, and the body keeps every line.
+	for _, want := range []string{full, "sam", "subject here", "the body line", "and a second one"} {
+		if !strings.Contains(notes, want) {
+			t.Fatalf("commit notes missing %q:\n%s", want, notes)
+		}
+	}
+	if strings.HasPrefix(ansi.Strip(notes), " ") {
+		t.Fatalf("commit notes start with a margin:\n%s", notes)
+	}
+
+	// A bodyless commit leaves no empty note behind.
+	bare := strings.Join(commitNotes(m.styles, git.Commit{Hash: full, Subject: "no body"}, nil), "\n")
+	if strings.Count(bare, "\n") != 2 {
+		t.Fatalf("bodyless notes have stray lines:\n%s", bare)
+	}
+}
+
+// TestLogoPillSpansTwoColors checks the logo gradient starts on Hazy and ends
+// on Salmon, with the two tones as its only stops.
+func TestLogoPillSpansTwoColors(t *testing.T) {
+	if len(logoStops) != 2 {
+		t.Fatalf("logo uses %d colors, want 2", len(logoStops))
+	}
+	cols := blendStops(8, logoStops)
+	if len(cols) != 8 {
+		t.Fatalf("blend produced %d colors", len(cols))
+	}
+	for _, tc := range []struct {
+		name string
+		got  color.Color
+		want color.Color
+	}{
+		{"first", cols[0], tone.Hazy},
+		{"last", cols[len(cols)-1], tone.Salmon},
+	} {
+		gr, gg, gb, _ := tc.got.RGBA()
+		wr, wg, wb, _ := tc.want.RGBA()
+		if gr != wr || gg != wg || gb != wb {
+			t.Fatalf("%s stop = %v, want %v", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+// TestSmoothScrollTogglesAndPersists checks the global smooth-scroll key both
+// flips the animation and writes the choice to the config file.
+func TestSmoothScrollTogglesAndPersists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "twig.json")
+	seeded := config.Default()
+	seeded.SmoothScroll = false
+	if err := config.Save(path, seeded); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	m := testModel(100, 30)
+	m.cfg.SmoothScroll = false
+	m.view.SetSmooth(false)
+	m.cfgPath = path
+	m.cfgStamp = configStamp(path)
+	m.focus = focusMain
+
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	nm := next.(model)
+	if !nm.cfg.SmoothScroll {
+		t.Fatal("m did not enable smooth scrolling")
+	}
+	if !nm.view.Smooth() {
+		t.Fatal("the diff pane did not get the new setting")
+	}
+
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !got.SmoothScroll {
+		t.Fatal("the toggle was not written to the config file")
+	}
+}
+
+// TestConfigReloadsOnExternalEdit checks an edit made outside twig lands in the
+// running app on the next config tick.
+func TestConfigReloadsOnExternalEdit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "twig.json")
+	if err := config.Save(path, config.Default()); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	m := testModel(100, 30)
+	m.cfgPath = path
+	m.cfgStamp = configStamp(path)
+
+	edited := config.Default()
+	edited.Wrap = true
+	edited.Context = 8
+	if err := config.Save(path, edited); err != nil {
+		t.Fatalf("edit config: %v", err)
+	}
+	// A same-size rewrite can share the mtime tick, so age the stamp.
+	m.cfgStamp = "stale"
+
+	next, cmd := m.Update(configTickMsg{})
+	nm := next.(model)
+	if !nm.cfg.Wrap || nm.cfg.Context != 8 {
+		t.Fatalf("config not reloaded: wrap=%v context=%d", nm.cfg.Wrap, nm.cfg.Context)
+	}
+	if cmd == nil {
+		t.Fatal("the watcher should keep ticking")
+	}
+	if nm.message != "config reloaded" {
+		t.Fatalf("message = %q", nm.message)
+	}
+}
+
+// TestConfigWatchStopsWithoutAFile checks an empty config path does not keep a
+// tick chain alive.
+func TestConfigWatchStopsWithoutAFile(t *testing.T) {
+	m := testModel(100, 30)
+	next, cmd := m.Update(configTickMsg{})
+	if cmd != nil {
+		t.Fatal("no config path should not keep the watcher running")
+	}
+	if next.(model).configTicking {
+		t.Fatal("watcher marked in flight without a config path")
+	}
+}
+
+// TestHeaderCountsFlankTheBranchSegment pins the bar layout: the branch and
+// view label is its own segment, additions sit on its left, deletions on its
+// right, and the tabs close the line.
+func TestHeaderCountsFlankTheBranchSegment(t *testing.T) {
+	m := testModel(100, 24)
+	m.d = &diff.Diff{Additions: 12, Deletions: 3}
+
+	line := ansi.Strip(m.headerView())
+	adds := strings.Index(line, "+12")
+	branch := strings.Index(line, "main · worktree")
+	dels := strings.Index(line, "-3")
+	tabs := strings.Index(line, "2 Commits")
+	for name, idx := range map[string]int{"+12": adds, "branch": branch, "-3": dels, "tabs": tabs} {
+		if idx < 0 {
+			t.Fatalf("header missing %s:\n%q", name, line)
+		}
+	}
+	if !(adds < branch && branch < dels && dels < tabs) {
+		t.Fatalf("header order is wrong: +12=%d branch=%d -3=%d tabs=%d\n%q",
+			adds, branch, dels, tabs, line)
+	}
+	if trailing := len(line) - len(strings.TrimRight(line, " ")); trailing > 1 {
+		t.Fatalf("header has %d trailing spaces, want only the pill padding:\n%q", trailing, line)
+	}
+}
+
+// TestTopBarSegmentsUseSalt checks every bar segment writes its text in Salt,
+// whatever background it sits on.
+func TestTopBarSegmentsUseSalt(t *testing.T) {
+	st := styles.New()
+	for name, style := range map[string]lipgloss.Style{
+		"tab":         st.HeaderTab(),
+		"active tab":  st.HeaderTabActive(),
+		"adds":        st.HeaderAdds(),
+		"dels":        st.HeaderDels(),
+		"files key":   st.FooterKeyFiles(),
+		"diff key":    st.FooterKeyDiff(),
+		"commits key": st.FooterKeyCommits(),
+		"commit key":  st.FooterKeyCommit(),
+		"value":       st.FooterValue(),
+		"info":        st.FooterInfo(),
+		"help":        st.FooterHelp(),
+		"message":     st.FooterMessage(),
+	} {
+		got := style.GetForeground()
+		gr, gg, gb, _ := got.RGBA()
+		wr, wg, wb, _ := tone.Salt.RGBA()
+		if gr != wr || gg != wg || gb != wb {
+			t.Fatalf("%s foreground = %v, want Salt", name, got)
+		}
+	}
+}
+
+// TestRightSidebarFilterDoesNotTouchTheLeft pins the sidebar separation: with
+// the commits list filtered, typing in the per-commit sidebar filters that
+// sidebar, not the commits list.
+func TestRightSidebarFilterDoesNotTouchTheLeft(t *testing.T) {
+	m := testModel(120, 24)
+	m.showLeft = true
+	m.showRight = true
+	m.files.SetTab(filelist.TabCommits)
+	m.setSize()
+	m.files.SetCommits([]git.Commit{
+		{Hash: "aaa", Short: "aaa1111", Subject: "first", Author: "sam", When: "Oct 01, 26"},
+		{Hash: "bbb", Short: "bbb2222", Subject: "second", Author: "sam", When: "Oct 02, 26"},
+	})
+
+	files := []*diff.File{
+		diff.Generate("alpha.go", diff.Modified, "a\n", "b\n", diff.GenerateOptions{Context: 3}),
+		diff.Generate("beta.go", diff.Modified, "a\n", "b\n", diff.GenerateOptions{Context: 3}),
+	}
+	m.applyCommit(git.Commit{Hash: "h", Short: "abc1234"}, diff.Aggregate(files), files)
+	m.focus = focusCommitFiles
+
+	next, _ := m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	m = next.(model)
+	if !m.files.CommitFilesFiltering() {
+		t.Fatal("/ did not start the commit-file filter")
+	}
+	next, _ = m.Update(tea.KeyPressMsg{Code: 'b', Text: "b"})
+	m = next.(model)
+
+	if !m.files.CommitFilesFiltering() {
+		t.Fatal("commit files list is not filtering")
+	}
+	if got := m.files.FilterStateDebug(); got != 0 { // list.Unfiltered
+		t.Fatalf("commits list filter state = %v, want unfiltered", got)
+	}
+}
+
+// TestTypingAfterClickingTheRightSidebarStaysThere reproduces the reported
+// flow: the commits list is mid-filter, the user clicks a commit file, types,
+// and the keystrokes must land in the per-commit sidebar.
+func TestTypingAfterClickingTheRightSidebarStaysThere(t *testing.T) {
+	m := testModel(120, 24)
+	m.showLeft = true
+	m.showRight = true
+	m.files.SetTab(filelist.TabCommits)
+	m.setSize()
+	m.files.SetCommits([]git.Commit{
+		{Hash: "aaa", Short: "aaa1111", Subject: "first commit", Author: "sam", When: "Oct 01, 26"},
+		{Hash: "bbb", Short: "bbb2222", Subject: "second commit", Author: "sam", When: "Oct 02, 26"},
+	})
+	files := []*diff.File{
+		diff.Generate("alpha.go", diff.Modified, "a\n", "b\n", diff.GenerateOptions{Context: 3}),
+		diff.Generate("beta.go", diff.Modified, "a\n", "b\n", diff.GenerateOptions{Context: 3}),
+	}
+	m.applyCommit(git.Commit{Hash: "h", Short: "abc1234"}, diff.Aggregate(files), files)
+	m.setSize()
+
+	// Left sidebar: open its filter and type something, without applying it.
+	m.focus = focusSidebar
+	next, _ := m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	m = next.(model)
+	next, _ = m.Update(tea.KeyPressMsg{Code: 's', Text: "s"})
+	m = next.(model)
+	if !m.files.FilterActive() {
+		t.Fatal("commits filter did not open")
+	}
+
+	// Click a commit file in the right sidebar.
+	next, _ = m.Update(tea.MouseClickMsg{
+		X: m.commitFilesRct.Min.X + 2,
+		Y: m.commitFilesRct.Min.Y + 2,
+	})
+	m = next.(model)
+	if m.focus != focusCommitFiles {
+		t.Fatalf("click did not focus the commit sidebar (focus %v)", m.focus)
+	}
+
+	// Type: it must reach the per-commit sidebar, and only it.
+	for _, r := range "/b" {
+		next, _ = m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+		m = next.(model)
+	}
+	if got := m.files.CommitFilesFilterText(); got != "b" {
+		t.Fatalf("commit files filter = %q, want the typed %q", got, "b")
+	}
+	if !m.files.CommitFilesFiltering() {
+		t.Fatal("commit files list is not filtering")
+	}
+	if got := m.files.FilterStateDebug(); got != 1 { // still Filtering, not reset
+		t.Fatalf("commits list filter state = %v, want it left alone", got)
+	}
+}
+
+// TestDeleteKeyStaysInTheSearchInput pins the delete key: it edits the query
+// instead of acting as "back" and closing the search.
+func TestDeleteKeyStaysInTheSearchInput(t *testing.T) {
+	m := testModel(100, 30)
+	m.focus = focusMain
+	next, _ := m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	m = next.(model)
+	if !m.search.Active() {
+		t.Fatal("search did not open")
+	}
+	for _, r := range "abc" {
+		next, _ = m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+		m = next.(model)
+	}
+	// Backspace once, then delete forward.
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	m = next.(model)
+	if !m.search.Active() || m.search.Value() != "ab" {
+		t.Fatalf("backspace left search active=%t value=%q", m.search.Active(), m.search.Value())
+	}
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDelete})
+	m = next.(model)
+	if !m.search.Active() {
+		t.Fatal("delete closed the search")
+	}
+}
+
+// TestCommitNotesListTheChangedFiles checks the commit pane names the files it
+// touched, with their line counts, above the diff.
+func TestCommitNotesListTheChangedFiles(t *testing.T) {
+	m := testModel(120, 30)
+	files := []*diff.File{
+		diff.Generate("a.go", diff.Modified, "a\n", "b\n", diff.GenerateOptions{}),
+		diff.Generate("dir/b.go", diff.Added, "", "x\ny\n", diff.GenerateOptions{}),
+	}
+	notes := ansi.Strip(strings.Join(commitNotes(m.styles, git.Commit{
+		Hash: "abc", Subject: "change things",
+	}, files), "\n"))
+
+	for _, want := range []string{"2 files changed", "a.go", "+1", "-1", "dir/b.go", "+2", "-0"} {
+		if !strings.Contains(notes, want) {
+			t.Fatalf("commit notes missing %q:\n%s", want, notes)
+		}
+	}
+
+	// Unknown counts (a lazily loaded commit) leave the line bare.
+	skeleta := []*diff.File{{NewPath: "late.go", Additions: -1, Deletions: -1}}
+	notes = ansi.Strip(strings.Join(commitNotes(m.styles, git.Commit{Subject: "lazy"}, skeleta), "\n"))
+	if !strings.Contains(notes, "late.go") || strings.Contains(notes, "+-1") {
+		t.Fatalf("lazy file line = %q", notes)
+	}
+}
+
+// TestWrapAndSplitTurnEachOtherOff pins the layout invariant: wrap needs the
+// full width, so enabling either one disables the other instead of leaving a
+// split view that quietly refuses to wrap.
+func TestWrapAndSplitTurnEachOtherOff(t *testing.T) {
+	m := testModel(120, 30)
+	m.focus = focusMain
+
+	split := tea.KeyPressMsg{Code: 'v', Text: "v"}
+	wrap := tea.KeyPressMsg{Code: 'w', Text: "w"}
+
+	next, _ := m.Update(split)
+	m = next.(model)
+	if !m.view.Split() {
+		t.Fatal("v did not enable the split view")
+	}
+	next, _ = m.Update(wrap)
+	m = next.(model)
+	if m.view.Split() {
+		t.Fatal("wrap left the split view on")
+	}
+	if m.cfg.SplitView {
+		t.Fatal("config still claims split view")
+	}
+	if !m.cfg.Wrap {
+		t.Fatal("wrap is not on")
+	}
+
+	next, _ = m.Update(split)
+	m = next.(model)
+	if !m.view.Split() {
+		t.Fatal("v did not re-enable the split view")
+	}
+	if m.cfg.Wrap {
+		t.Fatal("split view left wrap on")
 	}
 }

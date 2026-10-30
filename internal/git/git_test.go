@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"samouly.fun/twig/internal/watch"
 )
 
 // repoHarness drives a scratch repository through the real git binary, which
@@ -27,7 +30,8 @@ func newRepoHarness(t *testing.T) *repoHarness {
 func (h *repoHarness) git(args ...string) {
 	h.t.Helper()
 	cmd := exec.Command("git", args...)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(
+		os.Environ(),
 		"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.com",
 	)
@@ -40,7 +44,8 @@ func (h *repoHarness) git(args ...string) {
 func (h *repoHarness) gitOutput(args ...string) string {
 	h.t.Helper()
 	cmd := exec.Command("git", args...)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(
+		os.Environ(),
 		"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.com",
 	)
@@ -234,10 +239,11 @@ func TestSourceDescribe(t *testing.T) {
 func TestStatusFileDiffAndCommit(t *testing.T) {
 	newTestRepo(t)
 
-	staged, unstaged, err := Status()
+	wt, err := WorkingTree()
 	if err != nil {
-		t.Fatalf("Status: %v", err)
+		t.Fatalf("WorkingTree: %v", err)
 	}
+	staged, unstaged := wt.Staged, wt.Unstaged
 	if len(staged) != 1 || staged[0].Path != "b.txt" || staged[0].Letter != "M" {
 		t.Errorf("staged = %+v, want b.txt M", staged)
 	}
@@ -273,10 +279,11 @@ func TestStatusFileDiffAndCommit(t *testing.T) {
 		t.Errorf("hash = %q, want 40 chars", hash)
 	}
 
-	staged, _, err = Status()
+	wt, err = WorkingTree()
 	if err != nil {
-		t.Fatalf("Status after commit: %v", err)
+		t.Fatalf("WorkingTree after commit: %v", err)
 	}
+	staged = wt.Staged
 	if len(staged) != 0 {
 		t.Errorf("staged after commit = %+v, want empty", staged)
 	}
@@ -324,10 +331,11 @@ func TestSnapshotKinds(t *testing.T) {
 	write("untracked.txt", "hello\n")
 	write("noise.log", "ignored\n")
 
-	staged, unstaged, err := Status()
+	wt, err := WorkingTree()
 	if err != nil {
-		t.Fatalf("Status: %v", err)
+		t.Fatalf("WorkingTree: %v", err)
 	}
+	staged, unstaged := wt.Staged, wt.Unstaged
 
 	if len(staged) != 1 || staged[0].Path != "new.txt" || staged[0].Letter != "R" {
 		t.Errorf("staged = %+v, want new.txt R", staged)
@@ -374,10 +382,11 @@ func TestSnapshotKinds(t *testing.T) {
 	}
 
 	// Renewed snapshots must not drift: a second call sees the same state.
-	staged2, unstaged2, err := Status()
+	wt, err = WorkingTree()
 	if err != nil {
-		t.Fatalf("second Status: %v", err)
+		t.Fatalf("second WorkingTree: %v", err)
 	}
+	staged2, unstaged2 := wt.Staged, wt.Unstaged
 	if len(staged2) != len(staged) || len(unstaged2) != len(unstaged) {
 		t.Errorf("second status = %d/%d, want %d/%d",
 			len(staged2), len(unstaged2), len(staged), len(unstaged))
@@ -395,10 +404,11 @@ func TestStatusIgnoresDirectories(t *testing.T) {
 	h.write("docs/guide/deep/more.md", "# more\n")
 	h.commitAll("initial")
 
-	staged, unstaged, err := Status()
+	wt, err := WorkingTree()
 	if err != nil {
-		t.Fatalf("Status: %v", err)
+		t.Fatalf("WorkingTree: %v", err)
 	}
+	staged, unstaged := wt.Staged, wt.Unstaged
 	if len(staged) != 0 {
 		t.Fatalf("staged = %+v, want none: directories are not tracked files", staged)
 	}
@@ -407,10 +417,11 @@ func TestStatusIgnoresDirectories(t *testing.T) {
 	}
 
 	// Nothing may point at a tree object either: every listed file must diff.
-	staged, _, err = Status()
+	wt, err = WorkingTree()
 	if err != nil {
-		t.Fatalf("second Status: %v", err)
+		t.Fatalf("second WorkingTree: %v", err)
 	}
+	staged = wt.Staged
 	if len(staged) != 0 {
 		t.Fatalf("second staged = %+v, want none", staged)
 	}
@@ -425,18 +436,20 @@ func TestStatusPicksUpExternalIndexChange(t *testing.T) {
 	h.commitAll("initial")
 
 	// Open the session and snapshot a clean tree first.
-	if staged, unstaged, err := Status(); err != nil || len(staged) != 0 || len(unstaged) != 0 {
-		t.Fatalf("initial status = %+v / %+v (%v), want clean", staged, unstaged, err)
+	wt, err := WorkingTree()
+	if err != nil || len(wt.Staged) != 0 || len(wt.Unstaged) != 0 {
+		t.Fatalf("initial status = %+v / %+v (%v), want clean", wt.Staged, wt.Unstaged, err)
 	}
 
 	// Stage from another process, exactly like a second terminal would.
 	h.write("a.txt", "one\ntwo\n")
 	h.git("add", "a.txt")
 
-	staged, unstaged, err := Status()
+	wt, err = WorkingTree()
 	if err != nil {
-		t.Fatalf("Status: %v", err)
+		t.Fatalf("WorkingTree: %v", err)
 	}
+	staged, unstaged := wt.Staged, wt.Unstaged
 	if len(staged) != 1 || staged[0].Path != "a.txt" || staged[0].Letter != "M" {
 		t.Fatalf("staged = %+v, want a.txt M", staged)
 	}
@@ -465,10 +478,11 @@ func TestNestedGitFileIsNotUntracked(t *testing.T) {
 	h.write("vendor/pkg/.git", "gitdir: ../../.git/modules/pkg\n")
 	h.write("vendor/pkg/main.go", "package pkg\n")
 
-	_, unstaged, err := Status()
+	wt, err := WorkingTree()
 	if err != nil {
-		t.Fatalf("Status: %v", err)
+		t.Fatalf("WorkingTree: %v", err)
 	}
+	unstaged := wt.Unstaged
 	paths := make(map[string]FileStatus, len(unstaged))
 	for _, f := range unstaged {
 		paths[f.Path] = f
@@ -491,10 +505,11 @@ func TestModeOnlyChangeIsListed(t *testing.T) {
 		t.Fatalf("chmod: %v", err)
 	}
 
-	_, unstaged, err := Status()
+	wt, err := WorkingTree()
 	if err != nil {
-		t.Fatalf("Status: %v", err)
+		t.Fatalf("WorkingTree: %v", err)
 	}
+	unstaged := wt.Unstaged
 	if len(unstaged) != 1 || unstaged[0].Path != "run.sh" || unstaged[0].Letter != "M" {
 		t.Fatalf("unstaged = %+v, want run.sh M", unstaged)
 	}
@@ -509,4 +524,184 @@ func TestModeOnlyChangeIsListed(t *testing.T) {
 	if len(f.Lines) != 1 || !strings.Contains(strings.ToLower(f.Lines[0].Text), "mode") {
 		t.Fatalf("lines = %+v, want a single mode notice", f.Lines)
 	}
+}
+
+// TestLogCarriesTheCommitDescription checks that the body of a commit reaches
+// the viewer as its description, since the commits page shows it under the
+// subject.
+func TestLogCarriesTheCommitDescription(t *testing.T) {
+	h := newRepoHarness(t)
+	h.write("a.txt", "one\n")
+	h.commitAll("subject line")
+	h.write("a.txt", "two\n")
+	h.git("add", "a.txt")
+	h.git("commit", "-m", "add a body", "-m", "why it matters\n\nmore detail")
+
+	commits, err := Log(10)
+	if err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+	if len(commits) != 2 {
+		t.Fatalf("commits = %d, want 2", len(commits))
+	}
+	if commits[0].Subject != "add a body" {
+		t.Fatalf("subject = %q", commits[0].Subject)
+	}
+	if want := "why it matters\n\nmore detail"; commits[0].Description != want {
+		t.Fatalf("description = %q, want the whole body %q", commits[0].Description, want)
+	}
+	// A commit without a body has no description instead of a stray newline.
+	if commits[1].Description != "" {
+		t.Fatalf("bodyless description = %q, want empty", commits[1].Description)
+	}
+}
+
+// TestLogDatesAreFormatted checks the date is rendered, not printed as the raw
+// format string: a literal "Jan 2, 2006" would mean the format was never
+// interpreted.
+func TestLogDatesAreFormatted(t *testing.T) {
+	h := newRepoHarness(t)
+	h.write("a.txt", "one\n")
+	h.commitAll("dated")
+
+	commits, err := Log(1)
+	if err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+	if len(commits) != 1 {
+		t.Fatalf("commits = %d, want 1", len(commits))
+	}
+	when := commits[0].When
+	if strings.Contains(when, "Jan 2") {
+		t.Fatalf("date = %q, the format string leaked through", when)
+	}
+	if !strings.Contains(when, ", ") || len(when) < 8 {
+		t.Fatalf("date = %q, want a formatted month day, year", when)
+	}
+}
+
+// TestDiffFollowsWorktreeEdits covers two saves of one file in a single
+// session. The index never moves between them, so the worktree side has to be
+// part of the cache key: otherwise the second save keeps showing the diff of
+// the first, which is exactly what a watcher-driven refresh would display.
+func TestDiffFollowsWorktreeEdits(t *testing.T) {
+	h := newRepoHarness(t)
+	h.write("a.txt", "one\ntwo\nthree\n")
+	h.commitAll("initial")
+
+	h.write("a.txt", "one\nTWO\nthree\n")
+	first, err := FileDiff("a.txt", false, Options{Context: 3})
+	if err != nil {
+		t.Fatalf("FileDiff: %v", err)
+	}
+	if first.Additions != 1 || first.Deletions != 1 {
+		t.Fatalf("first stats = %d/%d, want 1/1", first.Additions, first.Deletions)
+	}
+
+	h.write("a.txt", "one\nTWO\nthree\nfour\nfive\n")
+	second, err := FileDiff("a.txt", false, Options{Context: 3})
+	if err != nil {
+		t.Fatalf("second FileDiff: %v", err)
+	}
+	// The diff is against the index, not against the previous save: two lines
+	// added on top of the first edit's one-in one-out.
+	if second.Additions != 3 || second.Deletions != 1 {
+		t.Fatalf("second stats = %d/%d, want 3/1", second.Additions, second.Deletions)
+	}
+}
+
+// TestFingerprintTracksWorktree checks the value the view uses to decide
+// whether a refresh found anything new.
+func TestFingerprintTracksWorktree(t *testing.T) {
+	h := newRepoHarness(t)
+	h.write("a.txt", "one\n")
+	h.commitAll("initial")
+
+	clean, err := WorkingTree()
+	if err != nil {
+		t.Fatalf("WorkingTree: %v", err)
+	}
+	if clean.Fingerprint == "" {
+		t.Fatal("fingerprint is empty")
+	}
+
+	again, err := WorkingTree()
+	if err != nil {
+		t.Fatalf("WorkingTree: %v", err)
+	}
+	if again.Fingerprint != clean.Fingerprint {
+		t.Fatalf("fingerprint moved on an unchanged tree: %q then %q", clean.Fingerprint, again.Fingerprint)
+	}
+
+	h.write("a.txt", "one\ntwo\n")
+	edited, err := WorkingTree()
+	if err != nil {
+		t.Fatalf("WorkingTree after edit: %v", err)
+	}
+	if edited.Fingerprint == clean.Fingerprint {
+		t.Fatal("an edit left the fingerprint unchanged")
+	}
+
+	h.git("add", "a.txt")
+	staged, err := WorkingTree()
+	if err != nil {
+		t.Fatalf("WorkingTree after add: %v", err)
+	}
+	if staged.Fingerprint == edited.Fingerprint {
+		t.Fatal("staging left the fingerprint unchanged")
+	}
+}
+
+// TestWatchTargetsCoverARealSave is the end-to-end check: the set the UI asks
+// for has to contain the directories and files a real save touches, and a
+// watcher built from it has to report that save. It is the only test that ties
+// the repository to the kernel.
+func TestWatchTargetsCoverARealSave(t *testing.T) {
+	h := newRepoHarness(t)
+	h.write("a.txt", "one\n")
+	h.commitAll("initial")
+	h.write("a.txt", "one\ntwo\n")
+
+	paths := []string{"a.txt"}
+	dirs := WatchDirs(paths)
+	files := WatchFiles(paths)
+
+	if !hasPath(dirs, h.dir) {
+		t.Fatalf("WatchDirs = %v, want the work tree root", dirs)
+	}
+	if !hasPath(dirs, filepath.Join(h.dir, ".git")) {
+		t.Fatalf("WatchDirs = %v, want the git directory", dirs)
+	}
+	if !hasPath(files, filepath.Join(h.dir, "a.txt")) {
+		t.Fatalf("WatchFiles = %v, want the changed file", files)
+	}
+	if !hasPath(dirs, filepath.Join(h.dir, ".git", "refs", "heads")) {
+		t.Fatalf("WatchDirs = %v, want the refs directory", dirs)
+	}
+	if !hasPath(files, filepath.Join(h.dir, ".git", "index")) {
+		t.Fatalf("WatchFiles = %v, want the index", files)
+	}
+
+	w, err := watch.New(watch.Options{Dirs: dirs, Files: files, Quiet: 20 * time.Millisecond})
+	if err != nil {
+		t.Skipf("no watcher on this platform: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	h.write("a.txt", "one\ntwo\nthree\n")
+	select {
+	case <-w.Events():
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no event for a save in %s (dirs %v, files %v)", h.dir, dirs, files)
+	}
+}
+
+// hasPath reports whether list contains path.
+func hasPath(list []string, path string) bool {
+	for _, have := range list {
+		if have == path {
+			return true
+		}
+	}
+	return false
 }

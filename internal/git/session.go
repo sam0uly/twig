@@ -25,6 +25,9 @@ type repoContext struct {
 	cwd    string
 	root   string
 	gitDir string
+	// common is the git directory shared by every worktree, so a linked
+	// worktree can still watch the refs and logs the main repository uses.
+	common string
 
 	// snapshot is read without taking mu, so a repaint that re-materialises a
 	// block never waits for a status run that is already in flight.
@@ -67,11 +70,16 @@ func open() (*repoContext, error) {
 	if err != nil {
 		gitDir = ""
 	}
+	common, err := runGit(cwd, "rev-parse", "--git-common-dir")
+	if err != nil {
+		common = ""
+	}
 
 	rc := &repoContext{
 		cwd:    cwd,
 		root:   strings.TrimSpace(root),
 		gitDir: strings.TrimSpace(gitDir),
+		common: absDir(cwd, strings.TrimSpace(common)),
 		blobs:  newBlobCache(256 << 20),
 		work:   newWorkCache(64 << 20),
 		diffs:  newDiffCache(diffCacheBytes),
@@ -106,7 +114,8 @@ func (rc *repoContext) git(args ...string) (string, error) {
 func runGit(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(
+		os.Environ(),
 		"LC_ALL=C",
 		"GIT_OPTIONAL_LOCKS=0",
 		"GIT_TERMINAL_PROMPT=0",
@@ -367,4 +376,20 @@ func (c *diffCache) put(key string, f *diff.File) {
 			delete(c.m, old)
 		}
 	}
+}
+
+// commonDir is the git directory shared by every worktree of this repository,
+// which is where a linked worktree's refs and logs actually live.
+func (rc *repoContext) commonDir() string { return rc.common }
+
+// absDir resolves a path git reported relative to cwd into an absolute one,
+// leaving an already absolute path alone.
+func absDir(cwd, path string) string {
+	if path == "" {
+		return ""
+	}
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(cwd, path)
 }

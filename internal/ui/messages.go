@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"time"
+
 	"samouly.fun/twig/internal/diff"
 	"samouly.fun/twig/internal/git"
 	"samouly.fun/twig/internal/ui/components/filelist"
@@ -10,7 +12,16 @@ import (
 type statusLoadedMsg struct {
 	staged   []git.FileStatus
 	unstaged []git.FileStatus
-	err      error
+	// fingerprint identifies the state this status came from, so a refresh
+	// that found nothing new does not repaint.
+	fingerprint string
+	// cost is how long the status took, which sets the poll interval.
+	cost time.Duration
+	// polled records that the periodic pass asked for this run rather than a
+	// filesystem event, which is how a watcher that stopped delivering is
+	// caught.
+	polled bool
+	err    error
 }
 
 // fileLoadedMsg carries the diff of a single file for the pager.

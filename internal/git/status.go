@@ -32,20 +32,36 @@ func (f FileStatus) DisplayPath() string {
 	return f.Path
 }
 
-// Status returns the changed files of the working tree, unstaged files
-// first-class with untracked files included, plus the staged set. It forces a
-// fresh snapshot: everything else in the session reuses that one result.
-func Status() ([]FileStatus, []FileStatus, error) {
+// Status is one coherent view of the working tree.
+type Status struct {
+	// Staged and Unstaged are the two columns of the files page, unstaged
+	// first-class with untracked files included.
+	Staged   []FileStatus
+	Unstaged []FileStatus
+	// Fingerprint identifies the whole view: the index and HEAD stamps plus
+	// the stat signature of every changed path. Two refreshes that produce
+	// the same fingerprint found nothing new, so the second can be dropped
+	// without repainting or reloading anything.
+	Fingerprint string
+}
+
+// WorkingTree returns the changed files of the working tree. It forces a fresh
+// snapshot: everything else in the session reuses that one result.
+func WorkingTree() (Status, error) {
 	rc, err := open()
 	if err != nil {
-		return nil, nil, err
+		return Status{}, err
 	}
 
 	snap, err := rc.snapshotFor(true)
 	if err != nil {
-		return nil, nil, err
+		return Status{}, err
 	}
-	return snap.staged, snap.unstaged, nil
+	return Status{
+		Staged:      snap.staged,
+		Unstaged:    snap.unstaged,
+		Fingerprint: snap.fp,
+	}, nil
 }
 
 func sortStatus(s []FileStatus) {
@@ -252,14 +268,14 @@ func (rc *repoContext) fileDiff(path string, staged bool, opts Options) (*diff.F
 	return rc.diffFile(f, staged, opts)
 }
 
-// CommitMessageTooShort is returned when a commit message is empty.
-var CommitMessageTooShort = errors.New("commit message is empty")
+// ErrCommitMessageTooShort is returned when a commit message is empty.
+var ErrCommitMessageTooShort = errors.New("commit message is empty")
 
 // CommitChanges commits the staged changes with the given message and
 // returns the new commit hash.
 func CommitChanges(message string) (string, error) {
 	if message == "" {
-		return "", CommitMessageTooShort
+		return "", ErrCommitMessageTooShort
 	}
 	rc, err := open()
 	if err != nil {

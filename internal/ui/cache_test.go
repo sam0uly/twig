@@ -114,6 +114,7 @@ func TestCommitEntryCountsOnlyTheDocument(t *testing.T) {
 // nothing reloaded.
 func TestCachedCommitRenders(t *testing.T) {
 	m := testModel(120, 24)
+	m.showRight = true
 	m.files.SetTab(1)
 	m.setSize()
 

@@ -2,10 +2,13 @@ package ui
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -22,6 +25,7 @@ import (
 	"samouly.fun/twig/internal/ui/components/searchbar"
 	"samouly.fun/twig/internal/ui/components/statusbar"
 	"samouly.fun/twig/internal/ui/styles"
+	"samouly.fun/twig/internal/watch"
 )
 
 const (
@@ -33,7 +37,10 @@ const (
 
 // Options configures the TUI.
 type Options struct {
-	Config        config.Config
+	Config config.Config
+	// ConfigPath is the file twig read its config from and writes toggles
+	// back to. It is also watched for edits made outside the app.
+	ConfigPath    string
 	Source        git.Source
 	ShowLogPicker bool
 }
@@ -64,16 +71,27 @@ func Run(ctx context.Context, opts Options) error {
 	m := newModel(opts, "", "")
 
 	p := tea.NewProgram(m, tea.WithContext(ctx))
-	_, err := p.Run()
+	final, err := p.Run()
+	// Release the inotify descriptor and the goroutines parked on it. The
+	// process is about to exit, but a host that runs twig in-process (tests,
+	// an embedded caller) must not accumulate them.
+	if m, ok := final.(model); ok {
+		m.stopWatch()
+	}
 	return err
 }
 
 // model is the root tea.Model.
 type model struct {
 	cfg     config.Config
-	src     git.Source
-	branch  string
-	project string
+	cfgPath string
+	// cfgStamp fingerprints the config file, so an edit made outside twig is
+	// picked up without restarting it.
+	cfgStamp      string
+	configTicking bool
+	src           git.Source
+	branch        string
+	project       string
 
 	width, height int
 	styles        styles.Styles
@@ -87,11 +105,17 @@ type model struct {
 		path   string
 		staged bool
 	}
-	message string
-	err     error
-	state   state
-	help    bool
-	focus   focus
+	// reloadPending marks a refresh that has to re-read the file already on
+	// screen, whose path did not move but whose content may have.
+	reloadPending bool
+	message       string
+	// searchApplied keeps the query on screen (muted) after the input closes,
+	// the same way a sidebar filter persists.
+	searchApplied bool
+	err           error
+	state         state
+	help          bool
+	focus         focus
 
 	// showLeft and showRight control the sidebar panes.
 	showLeft  bool
@@ -110,9 +134,46 @@ type model struct {
 	// allAdds and allDels total the document's stats; the document itself
 	// keeps only a window of rows, so it cannot be asked for them later.
 	allAdds, allDels int
+	// allAnchor is where the reader was when a refresh replaced the document,
+	// and allRestore carries it to the end of the streamed rebuild. Both are
+	// -1 when there is nothing to restore.
+	allAnchor, allRestore int
 
 	// welcomeFrame drives the welcome screen animation.
 	welcomeFrame int
+	// welcomeTicking records whether a welcome tick is in flight, so leaving
+	// and re-entering the splash never stacks two chains.
+	welcomeTicking bool
+	// spinnerTicking records whether the spinner chain is running, so it is
+	// started once per load and stops when the load lands.
+	spinnerTicking bool
+
+	// watcher reports filesystem activity around the repository. watchOff
+	// records that there is no watcher to have, so it is never tried twice,
+	// and watchStarting covers the command that is still creating one.
+	watcher       *watch.Watcher
+	watchOff      bool
+	watchStarting bool
+	// watchPaths are the changed paths the current watch set was built from.
+	watchPaths []string
+	// watchHealth is what the watcher is actually doing: live events, a partial
+	// set, or nothing. The footer shows it and the poll interval follows it.
+	watchHealth watch.Health
+	// watchSuspect marks a watcher that is installed but keeps missing changes
+	// the poll finds, which is how a network mount or a broken backend looks.
+	watchSuspect bool
+	// watchLastEvent is when the watcher last reported activity, used to tell
+	// a real event from a change only the poll noticed.
+	watchLastEvent time.Time
+	// statusPending marks a status run in flight, so a tick or an event
+	// cannot stack a second one behind it.
+	statusPending bool
+	// repoFingerprint is the working tree state last painted. A refresh that
+	// produces the same fingerprint is dropped without touching the view.
+	repoFingerprint string
+	// statusCost is how long the last status run took, which sets how often
+	// the poll backstop runs.
+	statusCost time.Duration
 
 	// commit is the commit inspected on the commits tab.
 	commit git.Commit
@@ -150,22 +211,28 @@ func newModel(opts Options, branch, project string) model {
 	m := model{
 		cache:      newDiffCache(cacheBytes),
 		prefetchAt: -1,
-		showLeft:   true,
-		showRight:  true,
-		cfg:        opts.Config,
-		src:        opts.Source,
-		branch:     branch,
-		project:    project,
-		styles:     st,
-		keys:       DefaultKeyMap(),
-		state:      stateShowList,
-		focus:      focusSidebar,
-		files:      filelist.New(0, 0, st),
-		view:       diffview.New(opts.Config.SmoothScroll, st),
-		status:     statusbar.New(st),
-		search:     searchbar.New(st),
-		compose:    composer.New(st),
-		spinner:    spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(st.SpinnerStyle())),
+		allAnchor:  -1,
+		allRestore: -1,
+		// Both sidebars start hidden: the diff gets the whole window, and
+		// H/L bring a sidebar in when it is wanted.
+		showLeft:  false,
+		showRight: false,
+		cfg:       opts.Config,
+		cfgPath:   opts.ConfigPath,
+		cfgStamp:  configStamp(opts.ConfigPath),
+		src:       opts.Source,
+		branch:    branch,
+		project:   project,
+		styles:    st,
+		keys:      DefaultKeyMap(),
+		state:     stateShowList,
+		focus:     focusMain,
+		files:     filelist.New(0, 0, st),
+		view:      diffview.New(opts.Config.SmoothScroll, st),
+		status:    statusbar.New(st),
+		search:    searchbar.New(st),
+		compose:   composer.New(st),
+		spinner:   spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(st.SpinnerStyle())),
 	}
 	m.view.SetWrap(opts.Config.Wrap)
 	m.view.SetLineNumbers(opts.Config.LineNumbers)
@@ -178,12 +245,12 @@ func newModel(opts Options, branch, project string) model {
 
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
-		m.spinner.Tick,
 		tea.RequestBackgroundColor,
 		loadRepoInfoCmd(),
-		loadStatusCmd(),
+		loadStatusCmd(false),
 		loadLogCmd(m.cfg.LogLimit),
-		welcomeTick(),
+		configTick(),
+		m.statusTick(),
 	)
 }
 
@@ -191,8 +258,37 @@ func (m model) diffOptions() git.Options {
 	return git.Options{Context: m.cfg.Context, IgnoreWhitespace: m.cfg.IgnoreWhitespace}
 }
 
-// Update implements tea.Model.
+// Update implements tea.Model. It also keeps the welcome animation alive:
+// leaving the splash for another tab ends the tick chain, and the transition
+// back into it starts a fresh one. A message that lands on an already visible
+// splash is left alone, so its command keeps its identity.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	wasWelcome := m.showWelcome()
+	next, cmd := m.update(msg)
+	nm, ok := next.(model)
+	if !ok {
+		return next, cmd
+	}
+	if !wasWelcome && nm.showWelcome() && !nm.welcomeTicking {
+		nm.welcomeTicking = true
+		cmd = tea.Batch(cmd, welcomeTick())
+	}
+	// The spinner is the only animation that runs before content exists: it
+	// starts with the first load and its chain ends when that load lands.
+	if nm.loading() && !nm.spinnerTicking {
+		nm.spinnerTicking = true
+		cmd = tea.Batch(cmd, nm.spinner.Tick)
+	}
+	return nm, cmd
+}
+
+// isSpinnerTick reports whether msg is a spinner frame.
+func isSpinnerTick(msg tea.Msg) bool {
+	_, ok := msg.(spinner.TickMsg)
+	return ok
+}
+
+func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.err != nil && m.state == stateFatal {
 		if _, ok := msg.(tea.KeyPressMsg); ok {
 			return m, tea.Quit
@@ -211,11 +307,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case statusLoadedMsg:
+		m.statusPending = false
 		if msg.err != nil {
 			m.err = msg.err
 			m.state = stateFatal
 			return m, nil
 		}
+		m.statusCost = msg.cost
+		watchCmd := m.watchCommands(msg.staged, msg.unstaged)
+
+		unchanged := m.loaded && msg.fingerprint != "" && msg.fingerprint == m.repoFingerprint
+		if m.checkWatchTrust(msg.polled, !unchanged) {
+			// The poll keeps finding changes the watcher never reported, so it
+			// is installed but not delivering: say so once and let the faster
+			// poll take over.
+			m.message = "live refresh unavailable, polling"
+			watchCmd = tea.Batch(watchCmd, setMessageCmd(m.message))
+		}
+		if unchanged {
+			// Nothing about the working tree changed, so there is nothing to
+			// rebuild: the selection and scroll position survive a refresh
+			// that found the same state.
+			return m, watchCmd
+		}
+		m.repoFingerprint = msg.fingerprint
 		// The working tree changed: previously generated file diffs are stale.
 		m.cache.Clear()
 		m.loaded = true
@@ -231,14 +346,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.d = nil
 			m.lastLoaded.path, m.lastLoaded.staged = "", false
 		}
+		// The file on screen may be exactly the one that changed, and its
+		// path did not move: reload it instead of trusting the cursor.
+		if m.lastLoaded.path != "" && m.files.Tab() == filelist.TabFiles {
+			m.reloadPending = true
+		}
 		if m.allChanges && m.files.Tab() == filelist.TabFiles {
-			return m.startAllChanges()
+			// The rebuild replaces the whole document, so remember the line
+			// the reader was on and open the new one there.
+			m.allAnchor = m.view.Anchor()
+			next, cmd := m.startAllChanges()
+			return next, tea.Batch(cmd, watchCmd)
 		}
 		next, cmd := m.autoLoadFile()
-		if next.(model).showWelcome() {
-			return next, tea.Batch(cmd, welcomeTick())
-		}
-		return next, cmd
+		return next, tea.Batch(cmd, watchCmd)
 
 	case repoInfoMsg:
 		m.branch, m.project = msg.branch, msg.project
@@ -255,21 +376,65 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// The files tab owns the pane. Opening a commit here would race the
 			// file diff the reader is waiting for, and would bump the sequence
 			// that decides whether that diff is still wanted.
-			if m.showWelcome() {
-				return m, welcomeTick()
-			}
 			return m, nil
 		}
 		if c, ok := m.files.SelectedCommit(); ok {
 			return m.showCommit(c)
 		}
-		if m.showWelcome() {
-			return m, welcomeTick()
-		}
 		return m, nil
+
+	case configTickMsg:
+		return m.watchConfig()
+
+	case watchStartedMsg:
+		m.watchStarting = false
+		if msg.err != nil || msg.w == nil || !m.cfg.Watch {
+			// No watcher is not a failure: the poll backstop covers the
+			// repository without one, so this is only worth remembering. A
+			// watcher that arrived after watching was turned off is closed
+			// rather than parked on.
+			if msg.w != nil {
+				_ = msg.w.Close()
+			}
+			m.watchOff = msg.err != nil
+			return m, nil
+		}
+		m.watcher = msg.w
+		// The set was captured before the watcher existed, and the view may
+		// have moved on since: sync before waiting, or the first events for
+		// newly listed targets are missed.
+		dirs, files := m.watchTargets()
+		m.watcher.Sync(dirs, files)
+		m.watchHealth = m.watcher.Health()
+		return m, waitForChange(m.watcher)
+
+	case watchChangedMsg:
+		if m.watcher == nil {
+			return m, nil
+		}
+		m.watchLastEvent = time.Now()
+		return m, tea.Batch(waitForChange(m.watcher), m.requestStatus(false))
+
+	case statusPollMsg:
+		// The poll chain re-arms here and only here, so exactly one chain is
+		// alive however many status runs it triggers.
+		cmds := []tea.Cmd{m.statusTick()}
+		if m.loaded {
+			cmds = append(cmds, m.requestStatus(true))
+		}
+		return m, tea.Batch(cmds...)
+
+	case tea.FocusMsg:
+		// Back from another window, which is where changes made elsewhere
+		// usually come from: catch up, once.
+		if !m.loaded || !m.cfg.Watch {
+			return m, nil
+		}
+		return m, m.requestStatus(false)
 
 	case welcomeTickMsg:
 		if !m.showWelcome() {
+			m.welcomeTicking = false
 			return m, nil
 		}
 		m.welcomeFrame++
@@ -329,6 +494,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, loadAllChunkCmd(msg.entries, msg.from+len(msg.files), msg.gen, m.diffOptions())
 		}
 		m.allLoading = false
+		if m.allRestore >= 0 {
+			// The document was rebuilt by a refresh rather than by the reader:
+			// put them back on the line they were reading instead of leaving
+			// the pane at the file the sidebar happens to select.
+			m.view.JumpToLine(m.allRestore)
+			m.allRestore = -1
+		}
 		return m, nil
 
 	case prefetchedMsg:
@@ -365,6 +537,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cache.Put(fileCacheKey(msg.path, msg.staged, m.cfg), cacheEntry{file: msg.file})
 		if msg.seq != m.seq && msg.seq != 0 {
 			// The user moved on; the diff is cached for when they come back.
+			return m, nil
+		}
+		if m.lastLoaded.path == msg.path && m.lastLoaded.staged == msg.staged {
+			// A refresh reloaded the file the reader is on. The content-addressed
+			// diff cache hands back the same object when the file did not change,
+			// so nothing moved and the pane is left alone; when it did change,
+			// the diff is redrawn where they were reading.
+			if m.view.File() == msg.file {
+				return m, nil
+			}
+			m.view.SetFileAt(msg.file, m.view.Anchor())
+			m.d = &diff.Diff{Additions: msg.file.Additions, Deletions: msg.file.Deletions}
 			return m, nil
 		}
 		m.view.SetNotes(nil)
@@ -455,7 +639,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.message = "unstaged!"
 		}
-		return m, tea.Batch(loadStatusCmd(), setMessageCmd(m.message))
+		return m, tea.Batch(loadStatusCmd(false), setMessageCmd(m.message))
 
 	case committedMsg:
 		if msg.err != nil {
@@ -464,7 +648,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.state = stateShowList
 		m.message = "committed " + msg.hash
-		return m, tea.Batch(loadStatusCmd(), loadLogCmd(m.cfg.LogLimit), setMessageCmd(m.message))
+		return m, tea.Batch(m.requestStatus(false), loadLogCmd(m.cfg.LogLimit), setMessageCmd(m.message))
 
 	case pushedMsg:
 		if msg.err != nil {
@@ -490,6 +674,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
+
+	case list.FilterMatchesMsg:
+		// The matches belong to the list that asked for them. The commit-file
+		// sidebar is not the visible tab's list, so without this the results
+		// landed in the commits listing and the right pane never narrowed.
+		if m.files.CommitFilesFiltering() {
+			var cmd tea.Cmd
+			m.files, cmd = m.files.UpdateCommitFiles(msg)
+			return m, cmd
+		}
+		var cmd tea.Cmd
+		m.files, cmd = m.files.Update(msg)
+		return m, cmd
 	}
 
 	return m.updateChildren(msg)
@@ -502,15 +699,24 @@ func (m model) autoLoadFile() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	fs, staged := m.files.SelectedFile()
-	if fs.Path == "" || (fs.Path == m.lastLoaded.path && staged == m.lastLoaded.staged && m.lastLoaded.path != "") {
+	if fs.Path == "" {
 		return m, nil
 	}
+	// A refresh re-reads the file on screen even though its path did not
+	// move, because its content may have.
+	if !m.reloadPending && fs.Path == m.lastLoaded.path && staged == m.lastLoaded.staged && m.lastLoaded.path != "" {
+		return m, nil
+	}
+	m.reloadPending = false
 	return m.showFile(fs.Path, staged)
 }
 
 // showFile displays a file diff, reusing the cached copy when available and
 // otherwise loading it right away.
 func (m model) showFile(path string, staged bool) (tea.Model, tea.Cmd) {
+	// The file on screen is the one the reader is about to edit, so its
+	// directory joins the watch set before anything is loaded.
+	m.syncWatch()
 	if e, ok := m.cache.Get(fileCacheKey(path, staged, m.cfg)); ok {
 		m.view.SetNotes(nil)
 		m.view.SetFile(e.file)
@@ -571,7 +777,7 @@ func (m *model) applyCommit(c git.Commit, f *diff.File, files []*diff.File) {
 	m.commitFileList = files
 	m.d = &diff.Diff{Additions: f.Additions, Deletions: f.Deletions}
 	m.files.SetCommitFiles(files)
-	m.view.SetNotes(commitNotes(m.styles, c))
+	m.view.SetNotes(commitNotes(m.styles, c, files))
 	m.view.SetFile(f)
 }
 
@@ -586,7 +792,7 @@ func (m *model) applyCommitLazy(c git.Commit, changes []git.CommitChange) {
 	m.commitFileList = skeleta
 	m.d = &diff.Diff{}
 	m.files.SetCommitFiles(skeleta)
-	m.view.SetNotes(commitNotes(m.styles, c))
+	m.view.SetNotes(commitNotes(m.styles, c, skeleta))
 	m.view.SetDocument(commitBlockLoader(c.Hash, changes, m.diffOptions()))
 }
 
@@ -637,8 +843,14 @@ func (m model) updateChildren(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
 
-	m.spinner, cmd = m.spinner.Update(msg)
-	cmds = append(cmds, cmd)
+	// The spinner runs only while the first diff is on its way. Every frame
+	// repaints the whole view, so an idle twig keeps the chain stopped.
+	if m.loading() || !isSpinnerTick(msg) {
+		m.spinner, cmd = m.spinner.Update(msg)
+		cmds = append(cmds, cmd)
+	} else {
+		m.spinnerTicking = false
+	}
 
 	switch m.state {
 	case stateCompose:
@@ -767,10 +979,36 @@ func inRect(x, y int, r uv.Rectangle) bool {
 }
 
 func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Esc clears a search or a filter; it never moves focus around.
+	if key.Matches(msg, m.keys.Back) {
+		switch {
+		case m.search.Active() || m.searchApplied:
+			m.search.Deactivate()
+			m.search.Clear()
+			m.searchApplied = false
+			m.view.ClearSearch()
+			m.setSize()
+			return m, nil
+		case m.focus == focusCommitFiles && m.files.CommitFilesFiltered():
+			var cmd tea.Cmd
+			m.files, cmd = m.files.UpdateCommitFiles(msg)
+			return m, cmd
+		case m.focus == focusSidebar && m.files.SidebarFiltered():
+			var cmd tea.Cmd
+			m.files, cmd = m.files.Update(msg)
+			return m, cmd
+		}
+	}
+
 	// While the sidebar list is filtering, every key belongs to it.
 	if m.state == stateShowList && m.focus == focusSidebar && m.files.FilterActive() {
 		var cmd tea.Cmd
 		m.files, cmd = m.files.Update(msg)
+		return m, cmd
+	}
+	if m.state == stateShowList && m.focus == focusCommitFiles && m.files.CommitFilesFiltering() {
+		var cmd tea.Cmd
+		m.files, cmd = m.files.UpdateCommitFiles(msg)
 		return m, cmd
 	}
 
@@ -828,12 +1066,34 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, setMessageCmd(m.message)
 	case key.Matches(msg, m.keys.ToggleView):
 		m.view.ToggleSplit()
-		m.message = "view " + viewMode(m.view.Split())
+		m.cfg.SplitView = m.view.Split()
+		// Wrap is a stacked-layout feature: the two columns of a split view
+		// are already narrow, and a wrapped column would need row heights the
+		// layout does not have.
+		if m.cfg.SplitView && m.cfg.Wrap {
+			m.cfg.Wrap = false
+			m.view.SetWrap(false)
+		}
+		m.message = "view " + viewMode(m.cfg.SplitView)
+		m.saveSetting()
 		return m, setMessageCmd(m.message)
 	case key.Matches(msg, m.keys.ToggleWrap):
 		m.cfg.Wrap = !m.cfg.Wrap
+		if m.cfg.Wrap && m.view.Split() {
+			// Wrapping needs the full width, so it takes the view back to the
+			// stacked layout instead of silently doing nothing.
+			m.view.SetSplit(false)
+			m.cfg.SplitView = false
+		}
 		m.view.SetWrap(m.cfg.Wrap)
 		m.message = "wrap " + onOff(m.cfg.Wrap)
+		m.saveSetting()
+		return m, setMessageCmd(m.message)
+	case key.Matches(msg, m.keys.ToggleSmooth):
+		m.cfg.SmoothScroll = !m.cfg.SmoothScroll
+		m.view.SetSmooth(m.cfg.SmoothScroll)
+		m.message = "smooth scroll " + onOff(m.cfg.SmoothScroll)
+		m.saveSetting()
 		return m, setMessageCmd(m.message)
 	case key.Matches(msg, m.keys.AllChanges):
 		return m.toggleAllChanges()
@@ -951,7 +1211,8 @@ func (m model) updateFocus(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case focusMain:
 		switch {
 		case key.Matches(msg, m.keys.Back):
-			m.focus = focusSidebar
+			// Esc belongs to the pane: it clears searches and filters, and
+			// never steals focus.
 			return m, nil
 		case key.Matches(msg, m.keys.Cycle):
 			return m.cycleFocus(false)
@@ -1130,6 +1391,9 @@ func (m model) startAllChanges() (tea.Model, tea.Cmd) {
 	m.allLoading = true
 	m.allPendingJump = false
 	m.allAdds, m.allDels = 0, 0
+	// A refresh keeps the reader in place; a toggle starts at the file the
+	// sidebar selects, which is what the reader just asked for.
+	m.allRestore, m.allAnchor = m.allAnchor, -1
 	m.view.SetNotes(nil)
 	m.view.SetDocument(blockLoader(entries, opts))
 	m.d = &diff.Diff{}
@@ -1206,42 +1470,38 @@ func (m model) updateCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m model) updateSearch(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
-		term := m.search.Value()
+		// Results are already live; enter just leaves the input and keeps the
+		// query on screen, muted, until esc clears it.
 		m.search.Deactivate()
+		m.searchApplied = m.view.SearchTerm() != ""
 		m.setSize()
-		if term == "" {
-			m.view.ClearSearch()
-			return m, nil
-		}
-		n, cmd := m.view.Search(term)
-		switch {
-		case n > 0:
-			m.message = ""
-		case cmd != nil:
-			// The window had no match, but the rest of the document is still
-			// being scanned in the background.
-			m.message = "searching…"
-		default:
-			m.message = "no matches"
-		}
-		var cmds []tea.Cmd
-		if cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-		cmds = append(cmds, setMessageCmd(m.message))
-		return m, tea.Batch(cmds...)
+		return m, nil
 	case "esc":
 		m.search.Deactivate()
+		m.search.Clear()
+		m.searchApplied = false
 		m.view.ClearSearch()
 		m.setSize()
 		return m, nil
 	}
+
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
 	m.search, cmd = m.search.Update(msg)
 	cmds = append(cmds, cmd)
 	m.spinner, cmd = m.spinner.Update(msg)
 	cmds = append(cmds, cmd)
+
+	// Search as the term is typed: the window answers now, the rest of the
+	// document follows from the background scan.
+	if term := m.search.Value(); term == "" {
+		m.view.ClearSearch()
+	} else {
+		_, searchCmd := m.view.Search(term)
+		if searchCmd != nil {
+			cmds = append(cmds, searchCmd)
+		}
+	}
 	return m, tea.Batch(cmds...)
 }
 
@@ -1263,7 +1523,7 @@ func (m model) refresh() (tea.Model, tea.Cmd) {
 	case filelist.TabCommits:
 		return m, loadLogCmd(m.cfg.LogLimit)
 	default:
-		return m, loadStatusCmd()
+		return m, m.requestStatus(false)
 	}
 }
 
@@ -1281,7 +1541,7 @@ func (m model) reloadContent() (tea.Model, tea.Cmd) {
 	}
 	fs, staged := m.files.SelectedFile()
 	if fs.Path == "" {
-		return m, tea.Batch(loadStatusCmd(), setMessageCmd(m.message))
+		return m, tea.Batch(m.requestStatus(false), setMessageCmd(m.message))
 	}
 	m.cache.Delete(fileCacheKey(fs.Path, staged, m.cfg))
 	next, cmd := m.showFile(fs.Path, staged)
@@ -1327,6 +1587,13 @@ func (m *model) setSize() {
 		filesW = 0
 	}
 
+	// The search line (input or applied) takes a row of the main pane, so the
+	// diff renders one row shorter and its scrollbar ends up right above it.
+	searchRows := 0
+	if m.search.Active() || m.searchApplied {
+		searchRows = 1
+	}
+
 	switch m.files.Tab() {
 	case filelist.TabCommits:
 		var commits, main, commitFiles uv.Rectangle
@@ -1338,7 +1605,7 @@ func (m *model) setSize() {
 		m.commitFilesRct = commitFiles
 		m.files.SetSize(max(1, max(0, sidebarW-2)), max(1, commits.Dy()-2))
 		m.files.SetCommitFilesSize(max(1, max(0, filesW-2)), max(1, commitFiles.Dy()-2))
-		m.view.SetSize(max(1, main.Dx()-2), max(1, main.Dy()-2))
+		m.view.SetSize(max(1, main.Dx()-2), max(1, main.Dy()-2-searchRows))
 	default:
 		var side, main uv.Rectangle
 		layout.Horizontal(layout.Len(sidebarW), layout.Fill(1)).
@@ -1348,7 +1615,7 @@ func (m *model) setSize() {
 		m.mainRect = main
 		m.commitFilesRct = uv.Rect(0, 0, 0, 0)
 		m.files.SetSize(max(1, max(0, side.Dx()-2)), max(1, side.Dy()-2))
-		m.view.SetSize(max(1, main.Dx()-2), max(1, main.Dy()-2))
+		m.view.SetSize(max(1, main.Dx()-2), max(1, main.Dy()-2-searchRows))
 	}
 
 	m.status.SetWidth(w)
@@ -1391,21 +1658,104 @@ func itoa(n int) string {
 }
 
 // commitNotes renders the commit metadata block shown above a commit diff.
-func commitNotes(st styles.Styles, c git.Commit) []string {
-	hash := lipgloss.NewStyle().Foreground(st.HashActiveFg()).Bold(true).Render(c.Short)
+func commitNotes(st styles.Styles, c git.Commit, files []*diff.File) []string {
+	// No left margin: the pane's own gutter already separates text from the
+	// border, and a leading space shows up as an indent when wrap is off.
+	hash := lipgloss.NewStyle().Foreground(st.HashActiveFg()).Bold(true).Render(c.Hash)
 	meta := st.Subtle().Render(c.Author + " · " + c.When)
 	title := lipgloss.NewStyle().Foreground(st.TitleActiveFg()).Bold(true).Render(c.Subject)
-	return []string{
-		" " + hash + " " + meta,
-		" " + title,
-		"",
+	lines := []string{
+		hash + " " + meta,
+		title,
 	}
+	// The commit body belongs to the diff pane, under the subject, and is
+	// shown in full: every line the message has, wrapped at the pane width.
+	body := lipgloss.NewStyle().Foreground(st.DescNormalFg())
+	if desc := strings.TrimSpace(c.Description); desc != "" {
+		for _, line := range strings.Split(desc, "\n") {
+			lines = append(lines, body.Render(strings.TrimRight(line, " \t")))
+		}
+	}
+	lines = append(lines, changedFileNotes(st, files)...)
+	return append(lines, "")
 }
 
-func loadStatusCmd() tea.Cmd {
+// commitFileNoteLimit caps the file summary in the notes: a commit with a
+// thousand files already has its per-file bands in the diff below.
+const commitFileNoteLimit = 20
+
+// changedFileNotes renders the commit's changed files with their line counts,
+// so the pane says what changed before the first hunk is scrolled into view.
+// Paths form one column and the two count columns line up to their right; the
+// header carries the totals in the same columns. Counts that are not known yet
+// (a lazily loaded commit) leave their columns off.
+func changedFileNotes(st styles.Styles, files []*diff.File) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	shown := min(len(files), commitFileNoteLimit)
+
+	maxPath, maxAdd, maxDel := 0, 0, 0
+	totalAdd, totalDel, known := 0, 0, 0
+	for _, f := range files {
+		maxPath = max(maxPath, ansi.StringWidth(f.Path()))
+		if f.Additions >= 0 && f.Deletions >= 0 {
+			totalAdd += f.Additions
+			totalDel += f.Deletions
+			known++
+		}
+	}
+	for _, f := range files[:shown] {
+		if f.Additions >= 0 && f.Deletions >= 0 {
+			maxAdd = max(maxAdd, len("+"+itoa(f.Additions)))
+			maxDel = max(maxDel, len("-"+itoa(f.Deletions)))
+		}
+	}
+	if known > 0 {
+		maxAdd = max(maxAdd, len("+"+itoa(totalAdd)))
+		maxDel = max(maxDel, len("-"+itoa(totalDel)))
+	}
+	// The header shares the path column, so it counts towards its width.
+	maxPath = max(maxPath, ansi.StringWidth(plural(len(files), "file")+" changed"))
+
+	// row pads the label into the path column, then right-aligns the counts in
+	// their own columns so every line reads as a table.
+	row := func(plain, styled string, add, del int, counts bool) string {
+		if !counts {
+			return styled
+		}
+		gap := strings.Repeat(" ", max(1, maxPath-ansi.StringWidth(plain)+4))
+		a, d := "+"+itoa(add), "-"+itoa(del)
+		return styled + gap +
+			strings.Repeat(" ", maxAdd-len(a)) + st.GreenFg(a) + "  " +
+			strings.Repeat(" ", maxDel-len(d)) + st.RedFg(d)
+	}
+
+	header := plural(len(files), "file") + " changed"
+	lines := []string{"", row(header, st.Subtle().Render(" "+header), totalAdd, totalDel, known > 0)}
+	pathStyle := lipgloss.NewStyle().Foreground(st.DescNormalFg())
+	for _, f := range files[:shown] {
+		counts := f.Additions >= 0 && f.Deletions >= 0
+		lines = append(lines, row(f.Path(), " "+pathStyle.Render(f.Path()), f.Additions, f.Deletions, counts))
+	}
+	if rest := len(files) - shown; rest > 0 {
+		lines = append(lines, st.Subtle().Render(" … "+itoa(rest)+" more"))
+	}
+	return lines
+}
+
+func loadStatusCmd(polled bool) tea.Cmd {
 	return func() tea.Msg {
-		staged, unstaged, err := git.Status()
-		return statusLoadedMsg{staged: staged, unstaged: unstaged, err: err}
+		start := time.Now()
+		st, err := git.WorkingTree()
+		return statusLoadedMsg{
+			staged:      st.Staged,
+			unstaged:    st.Unstaged,
+			fingerprint: st.Fingerprint,
+			cost:        time.Since(start),
+			polled:      polled,
+			err:         err,
+		}
 	}
 }
 
@@ -1539,4 +1889,119 @@ func setMessageCmd(string) tea.Cmd {
 	return tea.Tick(statusMessageTimeout, func(time.Time) tea.Msg {
 		return clearMsgMsg{}
 	})
+}
+
+// ---------------------------------------------------------------- config file
+
+// configWatchInterval is how often the config file is re-checked. A tick is
+// cheaper than a filesystem watcher dependency, and a second of latency on an
+// edit made in another window is not worth one.
+const configWatchInterval = time.Second
+
+// configTickMsg asks the model to look at the config file again.
+type configTickMsg struct{}
+
+func configTick() tea.Cmd {
+	return tea.Tick(configWatchInterval, func(time.Time) tea.Msg {
+		return configTickMsg{}
+	})
+}
+
+// configStamp fingerprints the config file by mtime and size. An empty stamp
+// means the file does not exist yet.
+func configStamp(path string) string {
+	if path == "" {
+		return ""
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", info.ModTime().UnixNano(), info.Size())
+}
+
+// applyConfig makes a freshly loaded config take effect without a restart.
+func (m *model) applyConfig(cfg config.Config) tea.Cmd {
+	old := m.cfg
+	m.cfg = cfg
+	m.view.SetSmooth(cfg.SmoothScroll)
+	m.view.SetLineNumbers(cfg.LineNumbers)
+	// Wrap cannot ride on top of the two-column layout: the columns are
+	// already narrow, and wrapped columns would need variable row heights.
+	cfg.SplitView = cfg.SplitView && !cfg.Wrap
+	m.view.SetWrap(cfg.Wrap)
+	m.view.SetSplit(cfg.SplitView)
+	if cfg.SidebarWidth != old.SidebarWidth || cfg.LogLimit != old.LogLimit {
+		m.setSize()
+	}
+	if cfg.Context != old.Context || cfg.IgnoreWhitespace != old.IgnoreWhitespace {
+		next, cmd := m.reloadContent()
+		*m = next.(model)
+		return cmd
+	}
+	if cfg.Watch != old.Watch {
+		if cfg.Watch {
+			// A watcher that failed before is worth retrying: the reason may
+			// have been a limit that was raised since.
+			m.watchOff = false
+			dirs, files := m.watchTargets()
+			return tea.Batch(m.startWatch(dirs, files), m.statusTick())
+		}
+		m.stopWatch()
+		return nil
+	}
+	return nil
+}
+
+// saveSetting persists one TUI toggle, appending the failure to the current
+// message instead of dropping it. The file is always written whole, so it
+// stays a complete configuration whatever was toggled.
+func (m *model) saveSetting() {
+	if err := m.saveConfig(); err != nil {
+		m.message += " (not saved: " + err.Error() + ")"
+	}
+}
+
+// saveConfig writes the current settings back to the config file, so a toggle
+// survives the next start. The stamp is refreshed so the watcher does not read
+// our own write as an external edit.
+func (m *model) saveConfig() error {
+	if m.cfgPath == "" {
+		return nil
+	}
+	if err := config.Save(m.cfgPath, m.cfg); err != nil {
+		return err
+	}
+	m.cfgStamp = configStamp(m.cfgPath)
+	return nil
+}
+
+// watchConfig reloads the config file when it changed on disk, so an edit made
+// in another window shows up in the running TUI. Twig's own saves refresh the
+// stamp first, so they never trigger a reload.
+func (m model) watchConfig() (tea.Model, tea.Cmd) {
+	if m.cfgPath == "" {
+		m.configTicking = false
+		return m, nil
+	}
+
+	stamp := configStamp(m.cfgPath)
+	if stamp == m.cfgStamp {
+		return m, configTick()
+	}
+	m.cfgStamp = stamp
+	if stamp == "" {
+		// The file was removed: keep the settings that are running.
+		return m, configTick()
+	}
+
+	cfg, err := config.Load(m.cfgPath)
+	if err != nil {
+		m.message = "config: " + err.Error()
+		return m, tea.Batch(configTick(), setMessageCmd(m.message))
+	}
+
+	cmd := m.applyConfig(cfg)
+	m.message = "config reloaded"
+	return m, tea.Batch(cmd, configTick(), setMessageCmd(m.message))
 }

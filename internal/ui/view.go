@@ -23,6 +23,9 @@ func (m model) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
+	// Regaining focus is the cheapest moment to catch up: whatever happened
+	// while twig was in the background is one status run away.
+	v.ReportFocus = true
 	v.WindowTitle = "twig"
 	// The whole app paints on CharmTone Pepper.
 	v.BackgroundColor = tone.Pepper
@@ -95,47 +98,67 @@ func (m model) headerView() string {
 		{Label: "2 Commits", Active: m.files.Tab() == filelist.TabCommits},
 	}
 
-	var right string
-	if m.d != nil {
-		right = st.GreenFg("+"+strconv.Itoa(m.d.Additions)) + " " +
-			st.RedFg("-"+strconv.Itoa(m.d.Deletions))
+	// The branch and view label is its own segment, with the statistics
+	// flanking it: additions on the left, deletions on the right.
+	var center string
+	if label := m.branch; label != "" {
+		center = st.HeaderBranch().Render(" " + label + " · " + m.src.Describe() + " ")
+		if m.d != nil {
+			// No plain space between the segments: their own padding is the
+			// only gap, so the backgrounds stay continuous.
+			center = st.HeaderAdds().Render("+"+strconv.Itoa(m.d.Additions)) +
+				center +
+				st.HeaderDels().Render("-"+strconv.Itoa(m.d.Deletions))
+		}
+	} else if m.d != nil {
+		center = st.HeaderAdds().Render("+"+strconv.Itoa(m.d.Additions)) +
+			st.HeaderDels().Render("-"+strconv.Itoa(m.d.Deletions))
 	}
 
 	logoText := " Twig "
 	if name := m.project; name != "" {
-		// The gradient owns the logo, the divider dot and the project name
-		// so they read as one continuous segment.
+		// The pill owns the logo, the divider dot and the project name so
+		// they read as one continuous segment.
 		logoText = " Twig · " + name + " "
 	}
 
 	return statusbar.HeaderView(st, m.width, statusbar.HeaderInfo{
-		Logo:  gradientText(logoText, tone.Charple, tone.Mauve, tone.Dolly),
-		Tabs:  tabs,
-		Fill:  m.branch + " · " + m.src.Describe(),
-		Right: right,
+		Logo: gradientPill(logoText, logoStops...),
+		Tabs: tabs,
+		Fill: center,
 	})
 }
 
-// gradientText renders text with a horizontal gradient foreground across the
-// given CharmTone stops. It paints on the app background, so the letters keep
-// full contrast instead of sitting on a saturated block.
-func gradientText(text string, stops ...color.Color) string {
+// logoStops are the two colors of the logo pill: it starts on Hazy and ends
+// on Salmon.
+var logoStops = []color.Color{tone.Hazy, tone.Salmon}
+
+// gradientPill renders text as a solid chip whose background runs through the
+// given stops, with dark letters so the segment reads as one block instead of
+// a gradient string floating on the app background.
+func gradientPill(text string, stops ...color.Color) string {
 	runes := []rune(text)
 	if len(runes) == 0 {
 		return ""
 	}
-	colors := blendStops(len(runes), stops)
+	// The background runs through the stops left to right; every letter is
+	// written in Salt, the same foreground the rest of the top bar uses.
+	backgrounds := blendStops(len(runes), stops)
 
 	var b strings.Builder
 	for i, r := range runes {
-		st := lipgloss.NewStyle().Bold(true).Foreground(tone.Mauve)
-		if i < len(colors) && colors[i] != nil {
-			st = st.Foreground(colors[i])
+		st := lipgloss.NewStyle().Bold(true).Foreground(tone.Salt)
+		if i < len(backgrounds) && backgrounds[i] != nil {
+			st = st.Background(backgrounds[i])
 		}
 		b.WriteString(st.Render(string(r)))
 	}
 	return b.String()
 }
+
+// gradientText renders text with a horizontal gradient foreground across the
+// given CharmTone stops. It paints on the app background, so the letters keep
+// full contrast instead of sitting on a saturated block.
 
 // blendStops spreads a set of colors evenly over n steps, interpolating
 // between consecutive stops.
@@ -208,6 +231,13 @@ func (m model) mainPane() string {
 			content,
 			m.search.View(m.mainRect.Dx()-2, matchMsg),
 		)
+	} else if m.searchApplied && m.view.SearchTerm() != "" {
+		// Applied searches stay visible, muted, until esc clears them. The
+		// count keeps the same quiet green the live input uses.
+		label := m.styles.Subtle().Render(" Search: " + m.view.SearchTerm() + " ")
+		count := m.styles.SemiDimGreenFg(fmt.Sprintf(" %d matches", m.view.MatchCount()))
+		line := ansi.Truncate(label+count, max(1, m.mainRect.Dx()-2), "…")
+		content = lipgloss.JoinVertical(lipgloss.Left, content, line)
 	}
 	return m.pane(content, m.focus == focusMain, m.mainRect)
 }
@@ -242,6 +272,9 @@ func (m model) footerView() string {
 	info := statusbar.Info{
 		Message: m.message,
 	}
+	// the footer says when refreshing has fallen back to polling, so a slow
+	// update is never a mystery
+	info.Watch = m.refreshMode()
 
 	switch m.files.Tab() {
 	case filelist.TabCommits:
@@ -590,6 +623,7 @@ func (m model) helpColumns() []helpColumn {
 			"n", "next match",
 			"N", "prev match",
 			"v", "split view",
+			"m", "smooth scroll",
 			"w", "wrap",
 			"Z", "ignore ws",
 			"c", "context",
@@ -599,11 +633,13 @@ func (m model) helpColumns() []helpColumn {
 			"P", "push",
 			"r", "refresh",
 			"1/2", "tabs",
+		)
+		c5 := newHelpColumn(
 			"H/L", "sidebars",
 			"?", "hide help",
 			"q", "quit",
 		)
-		return []helpColumn{c1, c2, c3, c4}
+		return []helpColumn{c1, c2, c3, c4, c5}
 	}
 
 	c1 := newHelpColumn(
@@ -628,12 +664,15 @@ func (m model) helpColumns() []helpColumn {
 		"t", "tree view",
 		"a", "all changes",
 		"v", "split view",
+		"m", "smooth scroll",
 		"1/2", "tabs",
+	)
+	c4 := newHelpColumn(
 		"H/L", "sidebars",
 		"?", "hide help",
 		"q", "quit",
 	)
-	return []helpColumn{c1, c2, c3}
+	return []helpColumn{c1, c2, c3, c4}
 }
 
 // indent pads every non-empty line, like glow's indent helper.

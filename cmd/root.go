@@ -44,7 +44,7 @@ search, stage and unstage files, and copy patches to the clipboard.
 		Args:              cobra.MaximumNArgs(2),
 		ValidArgsFunction: cobra.NoFileCompletions,
 		RunE: func(c *cobra.Command, args []string) error {
-			cfg, err := loadConfig(cfgPath)
+			cfg, path, err := loadConfig(cfgPath)
 			if err != nil {
 				return err
 			}
@@ -85,6 +85,7 @@ search, stage and unstage files, and copy patches to the clipboard.
 
 			return ui.Run(c.Context(), ui.Options{
 				Config:        cfg,
+				ConfigPath:    path,
 				Source:        src,
 				ShowLogPicker: showLogPicker,
 			})
@@ -96,7 +97,7 @@ search, stage and unstage files, and copy patches to the clipboard.
 		Short: "Browse recent commits and view any of them",
 		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, args []string) error {
-			cfg, err := loadConfig(cfgPath)
+			cfg, path, err := loadConfig(cfgPath)
 			if err != nil {
 				return err
 			}
@@ -112,6 +113,7 @@ search, stage and unstage files, and copy patches to the clipboard.
 
 			return ui.Run(c.Context(), ui.Options{
 				Config:        cfg,
+				ConfigPath:    path,
 				Source:        git.Source{Kind: git.SourceWorktree},
 				ShowLogPicker: true,
 			})
@@ -133,8 +135,13 @@ search, stage and unstage files, and copy patches to the clipboard.
 	return root
 }
 
-func loadConfig(path string) (config.Config, error) {
-	return config.Load(path)
+func loadConfig(path string) (config.Config, string, error) {
+	resolved, err := config.Path(path)
+	if err != nil {
+		return config.Default(), "", err
+	}
+	cfg, err := config.Load(path)
+	return cfg, resolved, err
 }
 
 // Execute runs the root command through fang, which handles help, version,

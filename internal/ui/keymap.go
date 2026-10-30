@@ -35,20 +35,23 @@ type KeyMap struct {
 	SearchPrev key.Binding
 
 	// Actions.
-	Stage       key.Binding
-	Unstage     key.Binding
-	Commit      key.Binding
-	Push        key.Binding
-	YankFile    key.Binding
-	YankHunk    key.Binding
-	ToggleWrap  key.Binding
-	ToggleWS    key.Binding
-	CycleCtx    key.Binding
-	ToggleView  key.Binding
-	ToggleLeft  key.Binding
-	ToggleRight key.Binding
-	ToggleTree  key.Binding
-	AllChanges  key.Binding
+	Stage      key.Binding
+	Unstage    key.Binding
+	Commit     key.Binding
+	Push       key.Binding
+	YankFile   key.Binding
+	YankHunk   key.Binding
+	ToggleWrap key.Binding
+	ToggleWS   key.Binding
+	CycleCtx   key.Binding
+	ToggleView key.Binding
+	// ToggleSmooth turns the harmonica scroll animation on and off. It is a
+	// global key and the choice is written back to the config file.
+	ToggleSmooth key.Binding
+	ToggleLeft   key.Binding
+	ToggleRight  key.Binding
+	ToggleTree   key.Binding
+	AllChanges   key.Binding
 }
 
 // DefaultKeyMap returns the default twig bindings.
@@ -90,7 +93,7 @@ func DefaultKeyMap() KeyMap {
 		// Back deliberately excludes h, l and the arrow keys: those scroll
 		// the diff horizontally, so only esc (and delete) leaves the pane.
 		Back: key.NewBinding(
-			key.WithKeys("esc", "delete"),
+			key.WithKeys("esc"),
 			key.WithHelp("esc", "back to files"),
 		),
 		Filter: key.NewBinding(
@@ -175,6 +178,10 @@ func DefaultKeyMap() KeyMap {
 		ToggleView: key.NewBinding(
 			key.WithKeys("v"),
 			key.WithHelp("v", "split view"),
+		),
+		ToggleSmooth: key.NewBinding(
+			key.WithKeys("m"),
+			key.WithHelp("m", "smooth scroll"),
 		),
 		ToggleLeft: key.NewBinding(
 			key.WithKeys("H"),

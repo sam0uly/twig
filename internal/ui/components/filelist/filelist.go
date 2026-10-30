@@ -6,6 +6,8 @@ package filelist
 import (
 	"fmt"
 	"io"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
@@ -53,7 +55,12 @@ type commitItem struct{ commit git.Commit }
 func (c commitItem) Title() string       { return c.commit.Subject }
 func (c commitItem) Description() string { return describe(c.commit) }
 func (c commitItem) FilterValue() string {
-	return c.commit.Subject + " " + c.commit.Author + " " + c.commit.Short
+	// The commit filter covers what identifies a commit: its message, its
+	// author, the full and short hashes, and the date as shown.
+	return strings.Join([]string{
+		c.commit.Subject, c.commit.Description, c.commit.Author,
+		c.commit.Short, c.commit.Hash, c.commit.When,
+	}, " ")
 }
 
 func describe(c git.Commit) string {
@@ -116,6 +123,7 @@ func newGlowList(d glowDelegate, st styles.Styles) list.Model {
 	// the cursor position.
 	l.SetShowPagination(false)
 	l.SetFilteringEnabled(true)
+	l.Filter = exactFilter
 	l.InfiniteScrolling = true
 	l.Styles.PaginationStyle = st.Pagination()
 	l.Styles.NoItems = st.Subtle()
@@ -220,8 +228,41 @@ func (m *Model) fileItems() []list.Item {
 			items = append(items, fileItem{status: f, staged: staged})
 		}
 	}
-	add("Staged changes", m.staged, true)
-	add("Unstaged changes", m.unstaged, false)
+	// A file can be staged and edited again afterwards; that is "MM" in git's
+	// own status. It gets a section of its own instead of appearing twice.
+	stagedPaths := make(map[string]bool, len(m.staged))
+	for _, f := range m.staged {
+		stagedPaths[f.Path] = true
+	}
+	var both, stagedOnly []git.FileStatus
+	for _, f := range m.staged {
+		if f.Untracked {
+			continue
+		}
+		edited := false
+		for _, u := range m.unstaged {
+			if !u.Untracked && u.Path == f.Path {
+				edited = true
+				break
+			}
+		}
+		if edited {
+			both = append(both, f)
+		} else {
+			stagedOnly = append(stagedOnly, f)
+		}
+	}
+	var unstagedOnly []git.FileStatus
+	for _, f := range m.unstaged {
+		if !f.Untracked && stagedPaths[f.Path] {
+			continue // shown in "Staged and edited"
+		}
+		unstagedOnly = append(unstagedOnly, f)
+	}
+
+	add("Staged and edited", both, true)
+	add("Staged changes", stagedOnly, true)
+	add("Unstaged changes", unstagedOnly, false)
 	return items
 }
 
@@ -300,7 +341,7 @@ func buildTreeItems(files []git.FileStatus, staged bool, collapsed map[string]bo
 
 // SelectDir moves the cursor to the directory with the given path.
 func (m *Model) SelectDir(path string) {
-	for i, it := range m.files.Items() {
+	for i, it := range visible(m.files) {
 		if d, ok := it.(treeDirItem); ok && d.path == path {
 			m.files.Select(i)
 			return
@@ -322,7 +363,7 @@ func (m *Model) ToggleSelectedDir() bool {
 
 // selectNearestFile moves the cursor to the closest selectable file row.
 func (m *Model) selectNearestFile() {
-	items := m.files.Items()
+	items := visible(m.files)
 	cur := m.files.Index()
 	for d := 1; d < len(items); d++ {
 		if cur+d < len(items) {
@@ -363,14 +404,14 @@ func (m *Model) SelectedCommitFile() (*diff.File, bool) {
 
 // SelectCommitFile moves the cursor to the given index.
 func (m *Model) SelectCommitFile(idx int) {
-	if idx >= 0 && idx < len(m.commitFiles.Items()) {
+	if idx >= 0 && idx < len(visible(m.commitFiles)) {
 		m.commitFiles.Select(idx)
 	}
 }
 
 // CommitFilesTotal returns the number of files in the commit sidebar.
 func (m *Model) CommitFilesTotal() int {
-	return len(m.commitFiles.Items())
+	return len(visible(m.commitFiles))
 }
 
 // CommitFilesIndex returns the cursor index of the commit file sidebar.
@@ -380,7 +421,7 @@ func (m *Model) CommitFilesIndex() int {
 
 // Select moves the cursor to the given item index in the files list.
 func (m *Model) Select(idx int) {
-	if idx >= 0 && idx < len(m.files.Items()) {
+	if idx >= 0 && idx < len(visible(m.files)) {
 		m.files.Select(idx)
 	}
 }
@@ -404,7 +445,7 @@ func itemAtRow(l list.Model, row int) (int, bool) {
 		return 0, false
 	}
 	idx := l.Paginator.Page*per + row
-	if idx < 0 || idx >= len(l.Items()) {
+	if idx < 0 || idx >= len(visible(l)) {
 		return 0, false
 	}
 	return idx, true
@@ -415,7 +456,7 @@ func itemAtRow(l list.Model, row int) (int, bool) {
 func (m *Model) SelectedOrdinal() int {
 	cur := m.files.Index()
 	n := 0
-	for i, it := range m.files.Items() {
+	for i, it := range visible(m.files) {
 		if _, ok := it.(fileItem); !ok {
 			continue
 		}
@@ -450,14 +491,14 @@ func (m *Model) SelectedFile() (git.FileStatus, bool) {
 
 // SelectPath moves the cursor to the file with the given path.
 func (m *Model) SelectPath(path string, staged bool) {
-	for i, it := range m.files.Items() {
+	for i, it := range visible(m.files) {
 		if f, ok := it.(fileItem); ok && f.status.Path == path && f.staged == staged {
 			m.files.Select(i)
 			return
 		}
 	}
 	// Fall back to any entry of the same path.
-	for i, it := range m.files.Items() {
+	for i, it := range visible(m.files) {
 		if f, ok := it.(fileItem); ok && f.status.Path == path {
 			m.files.Select(i)
 			return
@@ -476,6 +517,83 @@ func (m *Model) SelectedCommit() (git.Commit, bool) {
 	}
 	return git.Commit{}, false
 }
+
+// VisibleTotal is the number of selectable items the visible tab is showing,
+// which is what the footer and the position counter report while a filter is
+// applied.
+func (m *Model) VisibleTotal() int {
+	if m.tab == TabFiles {
+		return countSelectable(visible(m.files))
+	}
+	return len(visible(m.commits))
+}
+
+// exactFilter matches targets as case-insensitive substrings, or as regular
+// expressions when the term contains metacharacters. The fuzzy default scatters
+// matches across unrelated commits, which reads as "inaccurate" for hashes,
+// dates and names.
+func exactFilter(term string, targets []string) []list.Rank {
+	if term == "" {
+		return nil
+	}
+	var rx *regexp.Regexp
+	if strings.ContainsAny(term, `\.+*?()[]{}^$|`) {
+		rx, _ = regexp.Compile("(?i)" + term)
+	}
+	lower := strings.ToLower(term)
+
+	out := make([]list.Rank, 0, len(targets))
+	for i, t := range targets {
+		switch {
+		case rx != nil:
+			if rx.MatchString(t) {
+				out = append(out, list.Rank{Index: i})
+			}
+		default:
+			if strings.Contains(strings.ToLower(t), lower) {
+				out = append(out, list.Rank{Index: i})
+			}
+		}
+	}
+	return out
+}
+
+// CommitFilesFilterText is the per-commit sidebar's filter query.
+func (m *Model) CommitFilesFilterText() string { return m.commitFiles.FilterInput.Value() }
+
+// CommitFilesFilterState reports the per-commit sidebar's filter state.
+func (m *Model) CommitFilesFilterState() list.FilterState {
+	return m.commitFiles.FilterState()
+}
+
+// SidebarFiltered reports whether the visible list has a filter on, applied or
+// still being typed.
+func (m *Model) SidebarFiltered() bool { return m.FilterStateDebug() != list.Unfiltered }
+
+// CommitFilesFiltering reports whether the per-commit sidebar is capturing
+// keystrokes into its filter input.
+func (m *Model) CommitFilesFiltering() bool {
+	return m.commitFiles.FilterState() == list.Filtering
+}
+
+// CommitFilesFiltered reports whether the per-commit sidebar has a filter on,
+// applied or still being typed.
+func (m *Model) CommitFilesFiltered() bool {
+	return m.commitFiles.FilterState() != list.Unfiltered
+}
+
+// FilterStateDebug reports the visible list's filter state, for tests.
+func (m *Model) FilterStateDebug() list.FilterState {
+	if m.tab == TabFiles {
+		return m.files.FilterState()
+	}
+	return m.commits.FilterState()
+}
+
+// visible returns the items the list actually shows: the filtered set while a
+// filter is on, everything otherwise. Row, ordinal and selection maths all go
+// through it so they stay in step with the screen.
+func visible(l list.Model) []list.Item { return l.VisibleItems() }
 
 // FilterActive reports whether the visible list is filtering.
 func (m *Model) FilterActive() bool {
@@ -533,7 +651,7 @@ type Entry struct {
 // NeighborEntries returns up to n file rows above and below the cursor,
 // nearest first, skipping section headers.
 func (m *Model) NeighborEntries(n int) []Entry {
-	items := m.files.Items()
+	items := visible(m.files)
 	cur := m.files.Index()
 
 	var out []Entry
@@ -569,7 +687,7 @@ func (m *Model) MoveSelection(delta int) {
 	if m.tab == TabCommits {
 		l = &m.commits
 	}
-	total := len(l.Items())
+	total := len(visible(*l))
 	if total == 0 {
 		return
 	}
@@ -580,7 +698,7 @@ func (m *Model) MoveSelection(delta int) {
 // StagedCount returns the number of staged files.
 func (m *Model) StagedCount() int {
 	n := 0
-	for _, it := range m.files.Items() {
+	for _, it := range visible(m.files) {
 		if f, ok := it.(fileItem); ok && f.staged {
 			n++
 		}
@@ -600,7 +718,7 @@ func (m Model) StagedFiles() []git.FileStatus {
 // row maps onto the aggregate's file band.
 func (m Model) OrderedEntries() []Entry {
 	var out []Entry
-	for _, it := range m.files.Items() {
+	for _, it := range visible(m.files) {
 		if f, ok := it.(fileItem); ok {
 			out = append(out, Entry{Status: f.status, Staged: f.staged})
 		}
@@ -639,7 +757,7 @@ func (m *Model) MoveSelectable(delta int) bool { return m.moveSelectable(delta) 
 // moveSelectable moves the cursor by delta rows, skipping section headers
 // (and, outside tree mode, directory rows) and stopping at the ends.
 func (m *Model) moveSelectable(delta int) bool {
-	items := m.files.Items()
+	items := visible(m.files)
 	for i := m.files.Index() + delta; i >= 0 && i < len(items); i += delta {
 		if m.selectable(items[i]) {
 			m.files.Select(i)
@@ -652,34 +770,68 @@ func (m *Model) moveSelectable(delta int) bool {
 // View renders the list for the active tab.
 func (m Model) View() string {
 	if m.tab == TabFiles {
-		return renderList(m.files, m.height)
+		return renderList(m.files, m.height, m.styles)
 	}
-	return renderList(m.commits, m.height)
+	return renderList(m.commits, m.height, m.styles)
 }
 
 // CommitFilesView renders the per-commit file sidebar.
 func (m Model) CommitFilesView() string {
-	return renderList(m.commitFiles, m.height)
+	return renderList(m.commitFiles, m.height, m.styles)
 }
 
 // renderList renders a list into exactly height rows. The bubbles list always
 // reserves its first row for the title/filter section; when nothing is being
 // filtered that row is empty, so it is dropped here. While filtering, the row
 // holds the filter input and the last row is trimmed instead.
-func renderList(l list.Model, height int) string {
+func renderList(l list.Model, height int, st styles.Styles) string {
 	view := l.View()
 	lines := strings.Split(view, "\n")
 
-	if l.FilterState() == list.Unfiltered && len(lines) > 0 && strings.TrimSpace(ansi.Strip(lines[0])) == "" {
+	// The list reserves a row for its title above the items. It is blank
+	// because titles are off, so drop it: while filtering that row would sit
+	// between the filter input and the first match, and unfiltered it would
+	// push the whole listing down one row.
+	if len(lines) > 0 && strings.TrimSpace(ansi.Strip(lines[0])) == "" {
 		lines = lines[1:]
+	} else if len(lines) > 1 && strings.TrimSpace(ansi.Strip(lines[1])) == "" &&
+		l.FilterState() != list.Unfiltered {
+		// Filtering: row 0 is the input, the blank title row follows it.
+		lines = append(lines[:1], lines[2:]...)
 	}
+
+	// With the filter applied the list renders no summary row (titles and the
+	// status bar are off), so the filter would be invisible and look lost.
+	// Keep it on screen until it is cleared.
+	if l.FilterState() == list.FilterApplied {
+		if q := strings.TrimSpace(l.FilterInput.Value()); q != "" {
+			// Same shape as the diff pane's applied search line: the query and
+			// how much it left, muted.
+			line := " Filter: " + q + "  " + countLabel(countSelectable(l.VisibleItems()))
+			lines = append([]string{ansi.Truncate(st.Subtle().Render(line), max(1, l.Width()), "…")}, lines...)
+		}
+	}
+
+	// Two-line commit rows cannot fill an odd pane, and the bubbles list cuts
+	// the second line of the row it lands on. Trim to the row boundary and
+	// paint the leftover row in the list background instead of leaving an
+	// unstyled gap at the bottom.
 	if height > 0 && len(lines) > height {
 		lines = lines[:height]
 	}
+	blank := strings.Repeat(" ", max(1, l.Width()))
 	for height > 0 && len(lines) < height {
-		lines = append(lines, "")
+		lines = append(lines, blank)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// countLabel renders "1 file" or "3 files".
+func countLabel(n int) string {
+	if n == 1 {
+		return "1 file"
+	}
+	return strconv.Itoa(n) + " files"
 }
 
 // UpdateCommitFiles processes messages for the per-commit file sidebar.
@@ -713,10 +865,7 @@ func (d glowDelegate) Spacing() int { return 0 }
 
 func (d glowDelegate) Update(tea.Msg, *list.Model) tea.Cmd { return nil }
 
-const (
-	verticalLine = "┃"
-	icon         = "• "
-)
+const verticalLine = "┃"
 
 func (d glowDelegate) Render(w io.Writer, m list.Model, index int, value list.Item) {
 	st := d.styles
@@ -832,22 +981,21 @@ func (d glowDelegate) Render(w io.Writer, m list.Model, index int, value list.It
 	case commitItem:
 		rowWidth := max(1, m.Width()-2)
 		title := ansi.Truncate(v.commit.Subject, max(1, rowWidth-2), "…")
-		desc := ansi.Truncate(describe(v.commit), max(1, rowWidth-2), "…")
+		meta := ansi.Truncate(describe(v.commit), max(1, rowWidth-2), "…")
+
+		titleStyle := lipgloss.NewStyle().Foreground(st.TitleNormalFg())
+		metaStyle := lipgloss.NewStyle().Foreground(st.DescNormalFg())
+		// The border runs the full height of the row, so both the title and
+		// the metadata line carry it.
+		selector := "  "
 		if index == m.Index() {
-			fmt.Fprintf(
-				w, "%s %s%s\n  %s",
-				lipgloss.NewStyle().Foreground(st.SelectorFg()).Render(verticalLine),
-				lipgloss.NewStyle().Foreground(st.HashActiveFg()).Bold(true).Render(icon),
-				lipgloss.NewStyle().Foreground(st.TitleActiveFg()).Bold(true).Render(title),
-				lipgloss.NewStyle().Foreground(st.DescActiveFg()).Render(desc),
-			)
-		} else {
-			fmt.Fprintf(
-				w, "  %s%s\n  %s",
-				lipgloss.NewStyle().Foreground(st.HashFg()).Render(icon),
-				lipgloss.NewStyle().Foreground(st.TitleNormalFg()).Render(title),
-				lipgloss.NewStyle().Foreground(st.DescNormalFg()).Render(desc),
-			)
+			titleStyle = lipgloss.NewStyle().Foreground(st.TitleActiveFg()).Bold(true)
+			metaStyle = lipgloss.NewStyle().Foreground(st.DescActiveFg())
+			selector = lipgloss.NewStyle().Foreground(st.SelectorFg()).Render(verticalLine) + " "
 		}
+
+		fmt.Fprintf(w, "%s%s\n%s%s",
+			selector, titleStyle.Render(title),
+			selector, metaStyle.Render(meta))
 	}
 }

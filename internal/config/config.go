@@ -24,6 +24,11 @@ type Config struct {
 	SidebarWidth int `json:"sidebar-width"`
 	// SmoothScroll animates large scroll jumps.
 	SmoothScroll bool `json:"smooth-scroll"`
+	// Watch refreshes the view when the repository changes on disk.
+	Watch bool `json:"watch"`
+	// WatchDebounce is how long the filesystem must be quiet before a change
+	// counts, in milliseconds. Zero means the built-in default.
+	WatchDebounce int `json:"watch-debounce"`
 	// LogLimit is the number of commits shown in the log browser.
 	LogLimit int `json:"log-limit"`
 	// SplitView shows diffs as two side-by-side columns instead of one.
@@ -39,6 +44,8 @@ func Default() Config {
 		LineNumbers:      true,
 		SidebarWidth:     32,
 		SmoothScroll:     true,
+		Watch:            true,
+		WatchDebounce:    120,
 		LogLimit:         200,
 		SplitView:        false,
 	}
@@ -82,6 +89,11 @@ func Load(path string) (Config, error) {
 	if cfg.LogLimit < 1 {
 		cfg.LogLimit = 1
 	}
+	// A quiet period below a few tens of milliseconds would report one save as
+	// several, and a huge one would make every save feel late.
+	if cfg.WatchDebounce != 0 {
+		cfg.WatchDebounce = max(min(cfg.WatchDebounce, 2000), 10)
+	}
 
 	return cfg, nil
 }
@@ -97,4 +109,48 @@ func userConfigDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".config", "twig"), nil
+}
+
+// Path resolves where twig reads and writes its config file: the explicit
+// path when one was given, $XDG_CONFIG_HOME/twig/twig.json otherwise.
+func Path(explicit string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	dir, err := userConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "twig.json"), nil
+}
+
+// Save writes cfg to path as indented JSON, creating the parent directory.
+// It writes through a temporary file so a reader never sees half a config.
+func Save(path string, cfg Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	data = append(data, '\n')
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".twig-*.json")
+	if err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("save config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	if err := os.Rename(name, path); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	return nil
 }

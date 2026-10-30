@@ -68,6 +68,9 @@ type Commit struct {
 	Author  string
 	When    string
 	Subject string
+	// Description is the first line of the commit body, empty when the
+	// commit has no body.
+	Description string
 }
 
 // CheckRepository verifies the current directory is inside a git work tree.
@@ -143,7 +146,7 @@ func Log(limit int) ([]Commit, error) {
 	}
 
 	out, err := rc.git("log", "-n", fmt.Sprint(limit),
-		"--pretty=%H%x1f%h%x1f%an%x1f%ad%x1f%s", "--date=format:Jan 2, 2006")
+		"--pretty=%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%b%x1e", "--date=format:%b %d, %y")
 	if err != nil {
 		// An unborn branch has no log but is not an error to browse.
 		if strings.Contains(err.Error(), "does not have any commits") {
@@ -153,24 +156,33 @@ func Log(limit int) ([]Commit, error) {
 	}
 
 	var commits []Commit
-	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
-		if line == "" {
+	for _, rec := range strings.Split(out, "\x1e") {
+		rec = strings.TrimLeft(rec, "\n")
+		if rec == "" {
 			continue
 		}
-		fields := strings.Split(line, "\x1f")
+		fields := strings.Split(rec, "\x1f")
 		if len(fields) < 5 {
 			continue
 		}
-		commits = append(commits, Commit{
+		c := Commit{
 			Hash:    fields[0],
 			Short:   fields[1],
 			Author:  fields[2],
 			When:    fields[3],
 			Subject: fields[4],
-		})
+		}
+		if len(fields) > 5 {
+			// The whole body travels: the viewer shows it in full, line for
+			// line, under the subject.
+			c.Description = strings.TrimSpace(fields[5])
+		}
+		commits = append(commits, c)
 	}
 	return commits, nil
 }
+
+// firstLine returns the first non-empty line of s, trimmed.
 
 // Branch returns the current branch name, or "HEAD" when detached.
 func Branch() string {

@@ -2,6 +2,11 @@ package git
 
 import (
 	"fmt"
+	"hash/fnv"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"samouly.fun/twig/internal/diff"
@@ -15,6 +20,9 @@ type snapshot struct {
 	staged   []FileStatus
 	unstaged []FileStatus
 	files    map[string]*snapFile
+	// stamp fingerprints the index and HEAD, fp the whole view.
+	stamp string
+	fp    string
 }
 
 // snapFile is what a diff needs to know about one path.
@@ -132,7 +140,39 @@ func (rc *repoContext) buildSnapshot() (*snapshot, error) {
 	sortStatus(snap.unstaged)
 
 	rc.snapStamp = stamp
+	snap.stamp = stamp
+	snap.fp = snapshotFingerprint(rc.root, stamp, snap.staged, snap.unstaged)
 	return snap, nil
+}
+
+// snapshotFingerprint identifies the state a snapshot describes. The index and
+// HEAD mtimes cover everything staged or committed; the stat signature of each
+// listed path covers edits to the worktree, which never touch .git. A refresh
+// that produces the same fingerprint has nothing new to show, so it is dropped
+// without repainting instead of rebuilding the view.
+func snapshotFingerprint(root, stamp string, staged, unstaged []FileStatus) string {
+	h := fnv.New64a()
+	io.WriteString(h, stamp)
+
+	var buf [32]byte
+	for _, f := range unstaged {
+		io.WriteString(h, f.Path)
+		io.WriteString(h, f.Letter)
+		if info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(f.Path))); err == nil {
+			h.Write([]byte(strconv.AppendInt(buf[:0], info.Size(), 10)))
+			h.Write([]byte(strconv.AppendInt(buf[:0], info.ModTime().UnixNano(), 10)))
+		} else {
+			io.WriteString(h, "missing")
+		}
+		h.Write([]byte{0})
+	}
+	for _, f := range staged {
+		io.WriteString(h, f.Path)
+		io.WriteString(h, f.OldPath)
+		io.WriteString(h, f.Letter)
+		h.Write([]byte{0})
+	}
+	return strconv.FormatUint(h.Sum64(), 16)
 }
 
 // submoduleOID mode marks a gitlink entry: a submodule, never diffable text.
@@ -265,6 +305,18 @@ func (f *snapFile) stagedOnly() bool {
 	return f.staged && !f.untracked && f.unstagedKind == 0
 }
 
+// workSig identifies the worktree side of an unstaged diff. Blob ids never
+// change, but the file on disk does and the diff is built from it: without the
+// signature in the cache key an edit would keep serving the diff of the
+// previous save for the rest of the session.
+func workSig(root, path string) string {
+	info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(path)))
+	if err != nil {
+		return "missing"
+	}
+	return strconv.FormatInt(info.Size(), 10) + ":" + strconv.FormatInt(info.ModTime().UnixNano(), 10)
+}
+
 // diffFile builds (or returns cached) the diff of one snapshot entry.
 func (rc *repoContext) diffFile(f *snapFile, staged bool, opts Options) (*diff.File, error) {
 	kind := f.unstagedKind
@@ -280,7 +332,12 @@ func (rc *repoContext) diffFile(f *snapFile, staged bool, opts Options) (*diff.F
 		oldOID, newOID = f.headOID, f.indexOID
 	}
 
-	key := fmt.Sprintf("%s|%s|%d|%t|%s|%t|%d", oldOID, newOID, opts.Context,
+	newSide := newOID
+	if !staged {
+		newSide = workSig(rc.root, f.path)
+	}
+
+	key := fmt.Sprintf("%s|%s|%d|%t|%s|%t|%d", oldOID, newSide, opts.Context,
 		opts.IgnoreWhitespace, f.path, staged, kind)
 	if cached, ok := rc.diffs.get(key); ok {
 		return cached, nil
