@@ -151,25 +151,26 @@ func (rc *repoContext) buildSnapshot() (*snapshot, error) {
 // that produces the same fingerprint has nothing new to show, so it is dropped
 // without repainting instead of rebuilding the view.
 func snapshotFingerprint(root, stamp string, staged, unstaged []FileStatus) string {
+	// a hash write reports an error it can never return
 	h := fnv.New64a()
-	io.WriteString(h, stamp)
+	_, _ = io.WriteString(h, stamp)
 
 	var buf [32]byte
 	for _, f := range unstaged {
-		io.WriteString(h, f.Path)
-		io.WriteString(h, f.Letter)
+		_, _ = io.WriteString(h, f.Path)
+		_, _ = io.WriteString(h, f.Letter)
 		if info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(f.Path))); err == nil {
-			h.Write([]byte(strconv.AppendInt(buf[:0], info.Size(), 10)))
-			h.Write([]byte(strconv.AppendInt(buf[:0], info.ModTime().UnixNano(), 10)))
+			h.Write(strconv.AppendInt(buf[:0], info.Size(), 10))
+			h.Write(strconv.AppendInt(buf[:0], info.ModTime().UnixNano(), 10))
 		} else {
-			io.WriteString(h, "missing")
+			_, _ = io.WriteString(h, "missing")
 		}
 		h.Write([]byte{0})
 	}
 	for _, f := range staged {
-		io.WriteString(h, f.Path)
-		io.WriteString(h, f.OldPath)
-		io.WriteString(h, f.Letter)
+		_, _ = io.WriteString(h, f.Path)
+		_, _ = io.WriteString(h, f.OldPath)
+		_, _ = io.WriteString(h, f.Letter)
 		h.Write([]byte{0})
 	}
 	return strconv.FormatUint(h.Sum64(), 16)

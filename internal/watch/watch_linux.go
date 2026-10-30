@@ -35,7 +35,7 @@ func newBackend() (backend, error) {
 	}
 	stopfd, err := unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
 	if err != nil {
-		unix.Close(fd)
+		_ = unix.Close(fd)
 		return nil, fmt.Errorf("inotify: %w", err)
 	}
 	return &inotify{
@@ -139,7 +139,7 @@ func scanEvents(buf []byte) readResult {
 // this runs.
 func (b *inotify) close() error {
 	err := unix.Close(b.fd)
-	unix.Close(b.stopfd)
+	_ = unix.Close(b.stopfd)
 	if errors.Is(err, unix.EBADF) {
 		return nil
 	}

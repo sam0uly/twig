@@ -26,13 +26,12 @@ type fakeBackend struct {
 	closed  bool
 }
 
-func newFakeBackend(dirs, files int) *fakeBackend {
+func newFakeBackend(dirs int) *fakeBackend {
 	return &fakeBackend{
 		added:  make(map[string]int32),
 		isFile: make(map[int32]bool),
 		fail:   make(map[string]error),
 		dirs:   dirs,
-		files:  files,
 		events: make(chan readResult, 16),
 		stopCh: make(chan struct{}),
 	}

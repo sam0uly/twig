@@ -21,7 +21,8 @@ func sampleFile() *diff.File {
 		diff.GenerateOptions{Context: 3})
 }
 
-func newSized(split bool, width, height int) Model {
+func newSized(split bool, width int) Model {
+	const height = 12
 	m := New(false, styles.New())
 	m.SetSize(width, height)
 	m.SetSplit(split)
@@ -31,7 +32,7 @@ func newSized(split bool, width, height int) Model {
 
 func TestViewDimensions(t *testing.T) {
 	for _, split := range []bool{false, true} {
-		m := newSized(split, 60, 12)
+		m := newSized(split, 60)
 		lines := strings.Split(m.View(), "\n")
 		if len(lines) != 12 {
 			t.Fatalf("split=%v: got %d lines, want 12", split, len(lines))
@@ -45,14 +46,14 @@ func TestViewDimensions(t *testing.T) {
 }
 
 func TestGutterShowsLineNumbers(t *testing.T) {
-	m := newSized(false, 60, 12)
+	m := newSized(false, 60)
 	if !strings.Contains(m.View(), "   1    1") {
 		t.Fatalf("expected line numbers in the gutter, got:\n%s", m.View())
 	}
 }
 
 func TestSplitPairsChangedLines(t *testing.T) {
-	m := newSized(true, 60, 12)
+	m := newSized(true, 60)
 	// Strip styling: word highlighting splits a line into several rendered
 	// segments, and this test is about where the text sits, not how it looks.
 	view := ansi.Strip(m.View())
@@ -75,7 +76,7 @@ func TestSplitPairsChangedLines(t *testing.T) {
 }
 
 func TestToggleSplitKeepsFile(t *testing.T) {
-	m := newSized(false, 60, 12)
+	m := newSized(false, 60)
 	before := len(m.rows)
 	m.ToggleSplit()
 	if !m.Split() {
@@ -137,7 +138,7 @@ func TestSplitViewScrollsInsteadOfTruncating(t *testing.T) {
 		"package main\n\nfunc main() {\n\t"+long+" // changed\n}\n",
 		diff.GenerateOptions{Context: 3})
 
-	m := newSized(true, 80, 12)
+	m := newSized(true, 80)
 	m.SetFile(f)
 
 	before := m.View()
@@ -168,7 +169,7 @@ func TestSplitViewScrollsInsteadOfTruncating(t *testing.T) {
 }
 
 func TestNoHorizontalBarWhenContentFits(t *testing.T) {
-	m := newSized(false, 80, 12)
+	m := newSized(false, 80)
 	if m.hscroll() {
 		t.Fatal("short diff should not need a horizontal scrollbar")
 	}
@@ -185,7 +186,7 @@ func TestNoHorizontalBarWhenContentFits(t *testing.T) {
 
 func TestHorizontalBarOnlyWhenNeeded(t *testing.T) {
 	long := strings.Repeat("wide ", 40)
-	m := newSized(false, 60, 12)
+	m := newSized(false, 60)
 	m.SetFile(diff.Generate("wide.go", diff.Modified, long+"\n", long+"changed\n", diff.GenerateOptions{Context: 3}))
 
 	if !m.hscroll() {

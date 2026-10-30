@@ -466,7 +466,7 @@ func (st *diffState) anchors(alo, ahi, blo, bhi int) [][2]int {
 		if !ok || s.oldCount != 1 || s.newCount != 1 {
 			continue
 		}
-		other := int(newStarts[s.newFirst])
+		other := newStarts[s.newFirst]
 		if !sameBlock(st.old, start, st.new, other, st.ignoreWS) {
 			continue
 		}

@@ -1173,7 +1173,7 @@ func TestHeaderCountsFlankTheBranchSegment(t *testing.T) {
 			t.Fatalf("header missing %s:\n%q", name, line)
 		}
 	}
-	if !(adds < branch && branch < dels && dels < tabs) {
+	if adds >= branch || branch >= dels || dels >= tabs {
 		t.Fatalf("header order is wrong: +12=%d branch=%d -3=%d tabs=%d\n%q",
 			adds, branch, dels, tabs, line)
 	}

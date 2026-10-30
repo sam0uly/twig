@@ -872,7 +872,7 @@ func (d glowDelegate) Render(w io.Writer, m list.Model, index int, value list.It
 
 	switch v := value.(type) {
 	case sectionItem:
-		fmt.Fprintf(w, " %s", st.Subtle().Bold(true).Render(v.title))
+		_, _ = fmt.Fprintf(w, " %s", st.Subtle().Bold(true).Render(v.title))
 		return
 
 	case fileItem:
@@ -900,7 +900,7 @@ func (d glowDelegate) Render(w io.Writer, m list.Model, index int, value list.It
 		if index == m.Index() {
 			letterStyle = lipgloss.NewStyle().Foreground(st.HashActiveFg()).Bold(true)
 			titleStyle = lipgloss.NewStyle().Foreground(st.TitleActiveFg()).Bold(true)
-			fmt.Fprintf(
+			_, _ = fmt.Fprintf(
 				w, "%s %s%s%s",
 				lipgloss.NewStyle().Foreground(st.SelectorFg()).Render(verticalLine),
 				conn,
@@ -908,7 +908,7 @@ func (d glowDelegate) Render(w io.Writer, m list.Model, index int, value list.It
 				titleStyle.Render(name),
 			)
 		} else {
-			fmt.Fprintf(
+			_, _ = fmt.Fprintf(
 				w, "  %s%s%s",
 				conn,
 				letterStyle.Render(letter+" "),
@@ -932,7 +932,7 @@ func (d glowDelegate) Render(w io.Writer, m list.Model, index int, value list.It
 		if index == m.Index() {
 			glyphStyle = lipgloss.NewStyle().Foreground(st.HashActiveFg()).Bold(true)
 			nameStyle = lipgloss.NewStyle().Foreground(st.TitleActiveFg()).Bold(true)
-			fmt.Fprintf(
+			_, _ = fmt.Fprintf(
 				w, "%s %s%s%s",
 				lipgloss.NewStyle().Foreground(st.SelectorFg()).Render(verticalLine),
 				conn,
@@ -940,7 +940,7 @@ func (d glowDelegate) Render(w io.Writer, m list.Model, index int, value list.It
 				nameStyle.Render(name),
 			)
 		} else {
-			fmt.Fprintf(
+			_, _ = fmt.Fprintf(
 				w, "  %s%s%s",
 				conn,
 				glyphStyle.Render(glyph),
@@ -961,7 +961,7 @@ func (d glowDelegate) Render(w io.Writer, m list.Model, index int, value list.It
 		}
 		pad := max(0, rowWidth-lipgloss.Width(path)-lipgloss.Width(stats)-3)
 		if index == m.Index() {
-			fmt.Fprintf(
+			_, _ = fmt.Fprintf(
 				w, "%s %s%s%s",
 				lipgloss.NewStyle().Foreground(st.SelectorFg()).Render(verticalLine),
 				lipgloss.NewStyle().Foreground(st.TitleActiveFg()).Bold(true).Render(" "+path),
@@ -969,7 +969,7 @@ func (d glowDelegate) Render(w io.Writer, m list.Model, index int, value list.It
 				lipgloss.NewStyle().Foreground(st.DescActiveFg()).Render(" "+stats),
 			)
 		} else {
-			fmt.Fprintf(
+			_, _ = fmt.Fprintf(
 				w, "  %s%s%s",
 				lipgloss.NewStyle().Foreground(st.TitleNormalFg()).Render(path),
 				strings.Repeat(" ", pad+1),
@@ -994,7 +994,7 @@ func (d glowDelegate) Render(w io.Writer, m list.Model, index int, value list.It
 			selector = lipgloss.NewStyle().Foreground(st.SelectorFg()).Render(verticalLine) + " "
 		}
 
-		fmt.Fprintf(w, "%s%s\n%s%s",
+		_, _ = fmt.Fprintf(w, "%s%s\n%s%s",
 			selector, titleStyle.Render(title),
 			selector, metaStyle.Render(meta))
 	}

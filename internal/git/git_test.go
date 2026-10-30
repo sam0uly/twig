@@ -1,7 +1,6 @@
 package git
 
 import (
-	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,7 +74,7 @@ func (h *repoHarness) commitAll(msg string) {
 
 // newTestRepo creates a temporary git repository, chdirs into it, and seeds
 // it with an initial commit plus working tree changes.
-func newTestRepo(t *testing.T) context.Context {
+func newTestRepo(t *testing.T) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -110,8 +109,6 @@ func newTestRepo(t *testing.T) context.Context {
 	mustWrite("a.txt", "one\nTWO\nthree\n")
 	mustWrite("b.txt", "hello world\n")
 	run("add", "b.txt")
-
-	return context.Background()
 }
 
 func TestCheckRepository(t *testing.T) {

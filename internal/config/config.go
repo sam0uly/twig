@@ -147,9 +147,9 @@ func Save(path string, cfg Config) error {
 		return fmt.Errorf("save config: %w", err)
 	}
 	name := tmp.Name()
-	defer os.Remove(name)
+	defer func() { _ = os.Remove(name) }()
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("save config: %w", err)
 	}
 	if err := tmp.Close(); err != nil {

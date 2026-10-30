@@ -20,7 +20,7 @@ func newFake(t *testing.T, b *fakeBackend, opts Options) *Watcher {
 // events: that has to surface now, not after the quiet period, because the
 // partial set cannot be trusted.
 func TestOverflowReportsWithoutWaiting(t *testing.T) {
-	b := newFakeBackend(8, 0)
+	b := newFakeBackend(8)
 	w := newFake(t, b, Options{Dirs: []string{"/a"}, Quiet: time.Second})
 
 	b.push(readResult{overflow: true})
@@ -35,7 +35,7 @@ func TestOverflowReportsWithoutWaiting(t *testing.T) {
 // TestQuietPeriodIsConfigurable covers the knob: a short quiet period has to
 // make a burst land sooner, which is the whole point of exposing it.
 func TestQuietPeriodIsConfigurable(t *testing.T) {
-	b := newFakeBackend(8, 0)
+	b := newFakeBackend(8)
 	w := newFake(t, b, Options{Dirs: []string{"/a"}, Quiet: 20 * time.Millisecond})
 
 	start := time.Now()
@@ -54,7 +54,7 @@ func TestQuietPeriodIsConfigurable(t *testing.T) {
 // the path must leave the set, so the next Sync adds it instead of trusting a
 // handle that no longer exists.
 func TestDroppedWatchIsPlacedAgain(t *testing.T) {
-	b := newFakeBackend(8, 0)
+	b := newFakeBackend(8)
 	w := newFake(t, b, Options{Dirs: []string{"/a"}, Quiet: 10 * time.Millisecond})
 
 	id, ok := b.idOf("/a")
@@ -83,7 +83,7 @@ func TestDroppedWatchIsPlacedAgain(t *testing.T) {
 // which is reported as truncation rather than as a failure, because polling
 // covers the rest and the watches that are placed still work.
 func TestSetLargerThanThePlatformAllows(t *testing.T) {
-	b := newFakeBackend(2, 0)
+	b := newFakeBackend(2)
 	w := newFake(t, b, Options{Dirs: []string{"/a", "/b", "/c"}})
 
 	h := w.Health()
@@ -101,7 +101,7 @@ func TestSetLargerThanThePlatformAllows(t *testing.T) {
 // TestUnplaceableWatchIsVisible covers the watch limit: an add the kernel
 // refuses must not look like a healthy watch.
 func TestUnplaceableWatchIsVisible(t *testing.T) {
-	b := newFakeBackend(8, 0)
+	b := newFakeBackend(8)
 	b.failWith("/b", errors.New("no space left on device"))
 	w := newFake(t, b, Options{Dirs: []string{"/a", "/b"}})
 
@@ -117,7 +117,7 @@ func TestUnplaceableWatchIsVisible(t *testing.T) {
 // TestDeadBackendIsVisible covers the reader failing: the caller has to learn
 // that no event will arrive again, and still get one last refresh.
 func TestDeadBackendIsVisible(t *testing.T) {
-	b := newFakeBackend(8, 0)
+	b := newFakeBackend(8)
 	w := newFake(t, b, Options{Dirs: []string{"/a"}, Quiet: 10 * time.Millisecond})
 
 	b.failRead(errFakeRead)
@@ -141,7 +141,7 @@ func TestDeadBackendIsVisible(t *testing.T) {
 // TestSyncWhileClosing covers the teardown racing the model: Sync comes from
 // the UI goroutine, Close from the same one, but a reload can be in flight.
 func TestSyncWhileClosing(t *testing.T) {
-	b := newFakeBackend(8, 0)
+	b := newFakeBackend(8)
 	w := newFake(t, b, Options{Dirs: []string{"/a"}})
 
 	var wg sync.WaitGroup
