@@ -240,6 +240,7 @@ func newModel(opts Options, branch, project string) model {
 	m.view.SetWrap(opts.Config.Wrap)
 	m.view.SetLineNumbers(opts.Config.LineNumbers)
 	m.view.SetSplit(opts.Config.SplitView)
+	m.view.SetSyntax(opts.Config.Syntax)
 	if opts.ShowLogPicker {
 		m.files.SetTab(filelist.TabCommits)
 	}
@@ -1962,6 +1963,7 @@ func (m *model) applyConfig(cfg config.Config) tea.Cmd {
 	cfg.SplitView = cfg.SplitView && !cfg.Wrap
 	m.view.SetWrap(cfg.Wrap)
 	m.view.SetSplit(cfg.SplitView)
+	m.view.SetSyntax(cfg.Syntax)
 	// The sidebars are also toggled by hand, so they only move when the file
 	// on disk actually says something different from what is on screen.
 	if cfg.ShowLeftSidebar != old.ShowLeftSidebar {
