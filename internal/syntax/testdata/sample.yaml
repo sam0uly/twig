@@ -1,0 +1,13 @@
+# a comment with a "quote" in it
+name: twig
+version: 2
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: go test ./...
+        env:
+          CGO_ENABLED: "0"
+          PLAIN: on

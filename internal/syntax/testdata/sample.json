@@ -1,0 +1,9 @@
+{
+  "name": "twig",
+  "version": 2,
+  "private": true,
+  "keywords": ["diff", "tui"],
+  "limits": { "rows": 2048, "bytes": 1.5e6 },
+  "nested": { "empty": null, "flag": false },
+  "url": "https://example.com/a//b"
+}
