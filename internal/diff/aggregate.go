@@ -28,6 +28,9 @@ func (f *File) Append(g *File) {
 	} else {
 		sep += "  binary"
 	}
+	// The separator opens this file's band and belongs to it: the rows of an
+	// aggregate run from here to the next segment.
+	f.Segments = append(f.Segments, Segment{Row: offset, Path: g.Path()})
 	f.Lines = append(f.Lines, Line{Kind: HunkHeader, Text: sep})
 	f.Lines = append(f.Lines, g.LinesRange(0, g.NLines())...)
 

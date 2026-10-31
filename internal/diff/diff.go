@@ -97,8 +97,24 @@ type File struct {
 	Additions int
 	Deletions int
 
+	// Segments are the files an aggregate was built from, in row order, each
+	// with the row its band starts on. Rows from one segment to the next belong
+	// to that segment's file, which is how a commit view knows which language a
+	// row is written in. A single file's diff has none.
+	Segments []Segment
+
 	// page holds a diff too large to keep as rendered lines.
 	page *plan
+}
+
+// Segment is one file's run of rows inside an aggregate document.
+type Segment struct {
+	// Row is the first row of the segment, its file's separator band.
+	Row int
+	// Path is the file those rows were written from, which names the language
+	// they are read in. The rows themselves live in the aggregate, so nothing
+	// is held twice.
+	Path string
 }
 
 // Unavailable is a one-line stand-in for a file whose diff could not be built.

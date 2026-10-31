@@ -47,6 +47,38 @@ func TestAppendMatchesAggregate(t *testing.T) {
 	}
 }
 
+// TestSegmentsMarkEachFilesRows pins the layout an aggregate records: every
+// file starts at its own separator band, and the rows of one run to the next.
+func TestSegmentsMarkEachFilesRows(t *testing.T) {
+	files := []*File{
+		aggregateFixture("a.go", 0),
+		aggregateFixture("b.go", 5),
+		aggregateFixture("dir/c.go", 2),
+	}
+	doc := Aggregate(files)
+
+	if len(doc.Segments) != len(files) {
+		t.Fatalf("segments = %d, want %d", len(doc.Segments), len(files))
+	}
+	for i, seg := range doc.Segments {
+		if seg.Path != files[i].Path() {
+			t.Fatalf("segment %d names %q, want %q", i, seg.Path, files[i].Path())
+		}
+		l, ok := doc.LineAt(seg.Row)
+		if !ok || l.Kind != HunkHeader {
+			t.Fatalf("row %d of segment %d is %+v, want its band", seg.Row, i, l)
+		}
+		if want := "── " + files[i].Path(); l.Text[:len(want)] != want {
+			t.Fatalf("row %d starts %q, want %q", seg.Row, l.Text, want)
+		}
+	}
+	// The last file's rows run to the end of the document.
+	last := doc.Segments[len(doc.Segments)-1]
+	if got := doc.NLines() - last.Row; got != 1+files[len(files)-1].NLines() {
+		t.Fatalf("last segment holds %d rows, want %d", got, 1+files[len(files)-1].NLines())
+	}
+}
+
 func TestAppendKeepsExistingPositions(t *testing.T) {
 	first := aggregateFixture("a.go", 4)
 
