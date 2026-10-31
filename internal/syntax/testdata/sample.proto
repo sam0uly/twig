@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package twig.v1;
+
+option go_package = "fun.twig/api/v1;apiv1";
+
+// A cached key, newest first.
+message Entry {
+  string key = 1;
+  int64 seen_at = 2;
+  repeated string tags = 3;
+}
+
+message ListRequest {
+  string prefix = 1;
+  int32 limit = 2 [deprecated = false];
+}
+
+message ListResponse {
+  repeated Entry entries = 1;
+  uint64 total = 2;
+}
+
+/* The service and its two RPCs. */
+service Cache {
+  rpc List(ListRequest) returns (ListResponse);
+  rpc Watch(ListRequest) returns (stream Entry);
+}
+
+enum State {
+  STATE_UNSPECIFIED = 0;
+  STATE_READY = 1;
+}

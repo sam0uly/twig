@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"samouly.fun/twig/internal/diff"
+	"samouly.fun/twig/internal/syntax"
 	"samouly.fun/twig/internal/ui/styles"
 )
 
@@ -141,13 +142,15 @@ func TestSplitViewScrollsInsteadOfTruncating(t *testing.T) {
 	m := newSized(true, 80)
 	m.SetFile(f)
 
-	before := m.View()
+	// Colour codes sit between the tokens now, so the layout assertions read
+	// the plain text.
+	before := ansi.Strip(m.View())
 	if !strings.Contains(before, "value := compute") {
 		t.Fatalf("split view should show the start of the line:\n%s", before)
 	}
 
 	m.vp.SetXOffset(30)
-	after := m.View()
+	after := ansi.Strip(m.View())
 	if after == before {
 		t.Fatal("scrolling the split view did not move the text")
 	}
@@ -157,7 +160,7 @@ func TestSplitViewScrollsInsteadOfTruncating(t *testing.T) {
 
 	m.vp.SetXOffset(60)
 	tail := m.View()
-	if !strings.Contains(tail, "argumentThree") {
+	if !strings.Contains(ansi.Strip(tail), "argumentThree") {
 		t.Fatalf("scrolled split view should reveal the line tail:\n%s", tail)
 	}
 
@@ -597,5 +600,236 @@ func TestAnchorSurvivesReplace(t *testing.T) {
 	m.SetFileAt(diff.Generate("a.go", diff.Modified, before.String(), more.String(), diff.GenerateOptions{Context: 3}), m.Anchor())
 	if got := m.Anchor(); got != 40 {
 		t.Fatalf("anchor after replace = %d, want 40", got)
+	}
+}
+
+// syntaxFile is a small Go diff with an untouched line in it, so the token
+// colours can be read without word-level emphasis on top.
+func syntaxFile() *diff.File {
+	body := "package main\n\nfunc main() {\n\ttotal := 42\n"
+	return diff.Generate("main.go", diff.Modified,
+		body+"\told()\n}\n",
+		body+"\tnew()\n}\n",
+		diff.GenerateOptions{Context: 3})
+}
+
+// TestSyntaxHighlightsTokens checks the three promises of the feature in one
+// place: the text is unchanged, tokens take their own colour, and the setting
+// turns the colouring off again.
+func TestSyntaxHighlightsTokens(t *testing.T) {
+	m := newSized(false, 80)
+	m.SetFile(syntaxFile())
+
+	on := m.View()
+	keyword := m.styles.Syntax(styles.SyntaxContext, syntax.Keyword).Render("func")
+	number := m.styles.Syntax(styles.SyntaxContext, syntax.Number).Render("42")
+	if !strings.Contains(on, keyword) {
+		t.Fatalf("keyword not coloured in:\n%q", on)
+	}
+	if !strings.Contains(on, number) {
+		t.Fatalf("number not coloured in:\n%q", on)
+	}
+
+	m.SetSyntax(false)
+	off := m.View()
+	if ansi.Strip(on) != ansi.Strip(off) {
+		t.Fatal("colouring changed the text")
+	}
+	if off == on {
+		t.Fatal("turning syntax off changed nothing")
+	}
+	if strings.Contains(off, keyword) || strings.Contains(off, number) {
+		t.Fatalf("tokens still coloured while disabled:\n%q", off)
+	}
+	if len(m.syn) != 0 {
+		t.Fatalf("%d indexes kept after disabling", len(m.syn))
+	}
+}
+
+// TestSyntaxIndexIsBuiltOnce guards the cost that matters: opening a diff pays
+// for its tokens once, and scrolling or resizing does not pay again.
+func TestSyntaxIndexIsBuiltOnce(t *testing.T) {
+	m := newSized(false, 80)
+	f := syntaxFile()
+	m.SetFile(f)
+
+	// The index is built on the first paint, not when the file is handed in.
+	m.View()
+	src := m.sourceAt(0)
+	first, ok := m.syn[src]
+	if !ok {
+		t.Fatal("first paint did not index the rows")
+	}
+	m.SetSize(100, 20)
+	m.View()
+	if got, _ := m.syn[src]; got != first {
+		t.Fatal("the index was rebuilt on a repaint")
+	}
+	if first.Bytes() <= 0 {
+		t.Fatalf("index reports %d bytes", first.Bytes())
+	}
+}
+
+// TestSyntaxHighlightsCommitView covers the eager commit view: one flat
+// document built from an aggregate, which has no path of its own, so the rows
+// only get their language from the segments the aggregate recorded.
+func TestSyntaxHighlightsCommitView(t *testing.T) {
+	files := []*diff.File{
+		syntaxFile(),
+		diff.Generate("b.py", diff.Modified, "x = 1\n", "x = 2\n", diff.GenerateOptions{Context: 3}),
+	}
+	m := newSized(false, 80)
+	m.SetFile(diff.Aggregate(files))
+
+	view := m.View()
+	keyword := m.styles.Syntax(styles.SyntaxContext, syntax.Keyword).Render("func")
+	if !strings.Contains(view, keyword) {
+		t.Fatalf("the commit view did not colour the Go file:\n%q", view)
+	}
+	if len(m.syn) == 0 {
+		t.Fatal("no file of the commit was indexed")
+	}
+}
+
+// TestSyntaxHighlightsCommitViewSecondFile makes sure the rows of a later file
+// are read with their own language, not the first file's.
+func TestSyntaxHighlightsCommitViewSecondFile(t *testing.T) {
+	files := []*diff.File{
+		diff.Generate("a.py", diff.Modified, "x = 1\n", "x = 2\n", diff.GenerateOptions{Context: 3}),
+		syntaxFile(),
+	}
+	m := newSized(false, 80)
+	m.SetFile(diff.Aggregate(files))
+
+	view := m.View()
+	keyword := m.styles.Syntax(styles.SyntaxContext, syntax.Keyword).Render("func")
+	if !strings.Contains(view, keyword) {
+		t.Fatalf("rows below the first file were not coloured:\n%q", view)
+	}
+}
+
+// TestSplitViewMixesFilesByRow checks the virtual document in split mode, where
+// a rewritten block is one row a line instead of two and the rows below it sit
+// half as far down. fileForRow maps those rows back to files.
+func TestSplitViewMixesFilesByRow(t *testing.T) {
+	var oldText, newText strings.Builder
+	for i := range 40 {
+		fmt.Fprintf(&oldText, "old line %d\n", i)
+		fmt.Fprintf(&newText, "new line %d\n", i)
+	}
+	files := []*diff.File{
+		diff.Generate("a.go", diff.Modified, oldText.String(), newText.String(), diff.GenerateOptions{Context: 3}),
+		diff.Generate("b.py", diff.Modified, "x = 1\n", "x = 2\n", diff.GenerateOptions{Context: 3}),
+	}
+	m := New(false, styles.New())
+	m.SetSize(80, 20)
+	m.SetSplit(true)
+	m.SetDocument(func(i int) *diff.File { return files[i] })
+	m.AppendBlocks(files)
+	m.View()
+
+	if len(m.fileBands) < 2 {
+		t.Fatalf("expected a band per file, got %d", len(m.fileBands))
+	}
+	row := m.fileBands[1] + 1
+	if got := m.doc.fileForRow(row); got != files[1] {
+		t.Fatalf("row %d resolved to %q, want b.py", row, got.Path())
+	}
+}
+
+// TestCommitViewSplitSourceAtFollowsBand checks the aggregate commit view in
+// split mode: the collapsed first file shifts every later row above its line,
+// so the source of a row below it must still be found by row, not by line.
+func TestCommitViewSplitSourceAtFollowsBand(t *testing.T) {
+	var oldText, newText strings.Builder
+	for i := range 40 {
+		fmt.Fprintf(&oldText, "old line %d\n", i)
+		fmt.Fprintf(&newText, "new line %d\n", i)
+	}
+	files := []*diff.File{
+		diff.Generate("a.go", diff.Modified, oldText.String(), newText.String(), diff.GenerateOptions{Context: 3}),
+		diff.Generate("b.py", diff.Modified,
+			"def greet(name):\n    return \"hi \" + name\n",
+			"def greet(name):\n    return \"hello \" + name\n",
+			diff.GenerateOptions{Context: 3}),
+	}
+	m := New(false, styles.New())
+	m.SetSize(80, 20)
+	m.SetSplit(true)
+	m.SetFile(diff.Aggregate(files))
+	m.View()
+
+	if len(m.fileBands) != len(files) {
+		t.Fatalf("expected %d file bands, got %d", len(files), len(m.fileBands))
+	}
+	row := m.fileBands[1] + 1
+	if got := m.sourceAt(row).path; got != "b.py" {
+		t.Fatalf("row %d resolved to %q, want b.py", row, got)
+	}
+
+	m.JumpTo(m.fileBands[1])
+	view := m.View()
+	keyword := m.styles.Syntax(styles.SyntaxContext, syntax.Keyword).Render("def")
+	if !strings.Contains(view, keyword) {
+		t.Fatalf("the second file's rows were not coloured as Python:\n%q", view)
+	}
+}
+
+// TestSearchKeepsHunkHeaderStyle pins the hunk band while a search match lands
+// inside the header: the token styles only know added, deleted and unchanged
+// rows, so the header must keep its own style for the text no token owns.
+func TestSearchKeepsHunkHeaderStyle(t *testing.T) {
+	m := newSized(false, 80)
+	m.SetFile(syntaxFile())
+	m.View()
+
+	if _, cmd := m.Search("@@"); cmd != nil {
+		m.ApplySearchResults(cmd().(SearchResultsMsg))
+	}
+	if m.MatchCount() == 0 {
+		t.Fatal("the search found no hunk header")
+	}
+
+	// sgr is the escape sequence a style opens with.
+	sgr := func(st lipgloss.Style) string {
+		const probe = "\x00probe\x00"
+		r := st.Render(probe)
+		return r[:strings.Index(r, probe)]
+	}
+	context, hunk := sgr(m.styles.DiffContext()), sgr(m.styles.DiffHunk())
+
+	var header string
+	for line := range strings.SplitSeq(m.View(), "\n") {
+		if strings.Contains(ansi.Strip(line), "@@") {
+			header = line
+			break
+		}
+	}
+	if header == "" {
+		t.Fatal("no hunk header on screen")
+	}
+	if !strings.Contains(header, hunk) {
+		t.Fatalf("the hunk header lost its band while searching: %q", header)
+	}
+	if context != "" && strings.Contains(header, context) {
+		t.Fatalf("the hunk header text took the context colour while searching: %q", header)
+	}
+}
+
+// TestSyntaxIndexCachesMisses makes sure a file with no language is remembered
+// as having none. A miss costs a whole-file tokenisation, so paying it once per
+// painted row would freeze the view.
+func TestSyntaxIndexCachesMisses(t *testing.T) {
+	m := newSized(false, 80)
+	f := diff.Generate("notes.unknownext", diff.Modified, "a\n", "b\n", diff.GenerateOptions{Context: 3})
+	m.SetFile(f)
+	m.View()
+
+	idx, ok := m.syn[m.sourceAt(0)]
+	if !ok {
+		t.Fatal("a file with no language was not remembered")
+	}
+	if idx != nil {
+		t.Fatalf("unexpected index for an unknown language: %d bytes", idx.Bytes())
 	}
 }

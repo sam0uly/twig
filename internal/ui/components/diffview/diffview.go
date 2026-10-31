@@ -25,6 +25,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"samouly.fun/twig/internal/diff"
+	"samouly.fun/twig/internal/syntax"
 	"samouly.fun/twig/internal/ui/styles"
 )
 
@@ -166,6 +167,12 @@ type Model struct {
 	// advance by wall-clock time instead of a fixed assumption.
 	lastFrame time.Time
 
+	// syn is the token index of each file the view has drawn, built on first
+	// paint and dropped when the setting changes. syntaxOn gates the whole
+	// feature so the off path is exactly the pre-syntax renderer.
+	syn      map[rowSource]*syntax.Index
+	syntaxOn bool
+
 	split bool
 	wrap  bool
 	// rx is the compiled regular expression when the search term looks like
@@ -208,6 +215,8 @@ func New(smooth bool, st styles.Styles) Model {
 		styles:          st,
 		gut:             gut,
 		cache:           &rowCache{rows: make(map[int]string)},
+		syn:             make(map[rowSource]*syntax.Index),
+		syntaxOn:        true,
 		smooth:          smooth,
 		spring:          harmonica.NewSpring(frameInterval.Seconds(), baseSpringFreq, 1.0),
 		showLineNumbers: true,
@@ -218,6 +227,17 @@ func New(smooth bool, st styles.Styles) Model {
 // SetStyles updates the theme and re-renders the content.
 func (m *Model) SetStyles(st styles.Styles) {
 	m.styles = st
+	m.rebuild()
+}
+
+// SetSyntax turns token colouring on or off and drops the indexes either way, so
+// the next paint rebuilds what the setting now asks for.
+func (m *Model) SetSyntax(on bool) {
+	if m.syntaxOn == on {
+		return
+	}
+	m.syntaxOn = on
+	clear(m.syn)
 	m.rebuild()
 }
 
@@ -1482,7 +1502,7 @@ func (m *Model) pushContent() {
 		n := m.nrows()
 		rendered := make([]string, n)
 		for i := 0; i < n; i++ {
-			rendered[i] = m.renderRow(m.rowAt(i))
+			rendered[i] = m.renderRow(i, m.rowAt(i))
 		}
 		m.rendered = rendered
 		m.vp.SetContentLines(rendered)
@@ -1613,7 +1633,7 @@ func (m Model) paintRow(i, w int) string {
 	contentW := max(0, w-gutW)
 	x := m.vp.XOffset()
 
-	text := m.renderRow(m.rowAt(i))
+	text := m.renderRow(i, m.rowAt(i))
 	switch {
 	case m.split:
 		// Each column already scrolled its own text; only oversized
@@ -1649,14 +1669,14 @@ func (m Model) spansFor(line int) []Match {
 	return m.matches[i:j]
 }
 
-func (m Model) renderRow(r contentRow) string {
+func (m Model) renderRow(row int, r contentRow) string {
 	switch {
 	case r.pre:
 		return r.text
 	case r.fullWidth:
-		return m.renderLine(r.line, r.flat)
+		return m.renderLine(row, r.line, r.flat)
 	default:
-		return m.renderSplitRow(r)
+		return m.renderSplitRow(row, r)
 	}
 }
 
@@ -1730,25 +1750,26 @@ func tailTruncate(s string, w int) string {
 
 // renderLine renders one full-width diff line with word-level highlights and
 // search matches baked in. flatIdx is the line's index into the plain lines.
-func (m Model) renderLine(l diff.Line, flatIdx int) string {
+func (m Model) renderLine(row int, l diff.Line, flatIdx int) string {
 	if l.Text == "" {
 		return ""
 	}
-	base, out := m.styledText(l, flatIdx)
+	base, out := m.styledText(row, l, flatIdx)
 	return m.padLine(out, base)
 }
 
-// styledText renders one line's text, resolving word and search highlight
-// styles per boundary. Lines without any highlight take the fast path.
-func (m Model) styledText(l diff.Line, flatIdx int) (lipgloss.Style, string) {
-	base, word := m.lineStyles(l)
+// styledText renders one line's text, resolving token, word and search styles
+// per boundary. Lines with nothing to highlight take the fast path.
+func (m Model) styledText(row int, l diff.Line, flatIdx int) (lipgloss.Style, string) {
+	base := m.lineStyles(l)
 	if l.Text == "" {
 		return base, ""
 	}
 
+	toks := m.tokens(row, l)
 	spans := m.spansFor(flatIdx)
 	words := l.WordRanges()
-	if len(words) == 0 && len(spans) == 0 {
+	if len(toks) == 0 && len(words) == 0 && len(spans) == 0 {
 		return base, base.Render(l.Text)
 	}
 
@@ -1762,7 +1783,8 @@ func (m Model) styledText(l diff.Line, flatIdx int) (lipgloss.Style, string) {
 		}
 	}
 
-	bounds := boundarySet(0, len(l.Text), words, spans)
+	kind := syntaxKind(l.Kind)
+	bounds := tokenBounds(boundarySet(0, len(l.Text), words, spans), toks, len(l.Text))
 
 	var b strings.Builder
 	for i := 0; i+1 < len(bounds); i++ {
@@ -1771,9 +1793,16 @@ func (m Model) styledText(l diff.Line, flatIdx int) (lipgloss.Style, string) {
 			continue
 		}
 		mid := (a + z) / 2
+		class := tokenClass(toks, mid)
+		// Text no token owns keeps the line's own wash. The syntax table only
+		// knows added, deleted and unchanged rows, so a hunk header or the
+		// no-newline marker would otherwise lose its band to a context style.
 		st := base
+		if class != syntax.Plain {
+			st = m.styles.Syntax(kind, class)
+		}
 		if containsSpan(words, mid) {
-			st = word
+			st = m.styles.SyntaxWord(kind, class)
 		}
 		if containsMatch(spans, mid) {
 			st = m.styles.SearchHi()
@@ -1786,18 +1815,228 @@ func (m Model) styledText(l diff.Line, flatIdx int) (lipgloss.Style, string) {
 	return base, b.String()
 }
 
+// syntaxKind maps a line kind to the row kind the token styles are indexed by.
+func syntaxKind(k diff.LineKind) int {
+	switch k {
+	case diff.Addition:
+		return styles.SyntaxAdd
+	case diff.Deletion:
+		return styles.SyntaxDel
+	default:
+		return styles.SyntaxContext
+	}
+}
+
+// tokenBounds merges the edges of a line's tokens into a sorted boundary set.
+// Token offsets are source offsets, so they move past the diff sign.
+func tokenBounds(set []int, toks []uint32, n int) []int {
+	if len(toks) == 0 {
+		return set
+	}
+	for _, w := range toks {
+		start, end, _ := syntax.UnpackToken(w)
+		set = append(set, clampIndex(int(start)+1, n), clampIndex(int(end)+1, n))
+	}
+	slices.Sort(set)
+	return slices.Compact(set)
+}
+
+// clampIndex keeps a boundary inside a line of n bytes.
+func clampIndex(v, n int) int { return min(max(v, 0), n) }
+
+// tokenClass is the class covering pos, or Plain where no token does. Tokens
+// arrive in order, so the scan stops at the first one that starts after pos.
+func tokenClass(toks []uint32, pos int) syntax.Class {
+	for _, w := range toks {
+		start, end, class := syntax.UnpackToken(w)
+		if pos < int(start)+1 {
+			return syntax.Plain
+		}
+		if pos < int(end)+1 {
+			return class
+		}
+	}
+	return syntax.Plain
+}
+
+// fileAtRow returns the file behind a document row, which decides the language.
+// Only the all-changes view and a commit hold several files in one document.
+// The commit view is one flat row slice, and the rows of it are told apart by
+// the segments Aggregate recorded.
+//
+// rowSource is where a rendered row's tokens come from. A row belongs to a
+// document, to the rows of that document written in one language, and to the
+// path that names the language. Most documents are one file from top to bottom;
+// a commit is one band of the aggregate per file.
+type rowSource struct {
+	file *diff.File
+	path string
+	from int
+	to   int
+}
+
+// sourceAt is the source of document row i.
+func (m Model) sourceAt(row int) rowSource {
+	if m.doc != nil {
+		f := m.doc.fileForRow(row)
+		return singleSource(f)
+	}
+	f := m.file
+	if f == nil {
+		return rowSource{}
+	}
+	if segs := f.Segments; len(segs) > 0 {
+		// A segment records the line its file starts at, but row is a screen
+		// row, and split mode folds a run of replaced lines into max(dels,
+		// adds) rows: from the first change on, every row sits above its line
+		// and the arithmetic below would reach back into an earlier file.
+		// Bands live in row space, and the aggregate writes one per file in
+		// segment order, so they name the right file where lines cannot.
+		var j int
+		if len(m.fileBands) == len(segs) {
+			j = sort.Search(len(m.fileBands), func(k int) bool { return m.fileBands[k] > row }) - 1
+		} else {
+			i := row - m.gut.header - len(m.noteRows)
+			j = len(segs) - 1
+			for j > 0 && segs[j].Row > i {
+				j--
+			}
+			if i < segs[j].Row {
+				j = -1
+			}
+		}
+		if j >= 0 {
+			to := f.NLines()
+			if j+1 < len(segs) {
+				to = segs[j+1].Row
+			}
+			return rowSource{file: f, path: segs[j].Path, from: segs[j].Row, to: to}
+		}
+	}
+	return singleSource(f)
+}
+
+// singleSource is a whole file read in one language.
+func singleSource(f *diff.File) rowSource {
+	if f == nil {
+		return rowSource{}
+	}
+	return rowSource{file: f, path: f.Path(), to: f.NLines()}
+}
+
+// syntaxMaxLine is the longest line worth colouring. A generated bundle or a
+// minified file arrives as one enormous line, and past this length the tokens
+// cost more to paint than they are worth reading, so the line keeps its diff
+// wash alone.
+const syntaxMaxLine = 400
+
+// tokens returns the token run of a diff line, or nil when the file is not
+// indexed and the line is painted with the diff wash alone.
+func (m Model) tokens(row int, l diff.Line) []uint32 {
+	if !m.syntaxOn || len(l.Text) > syntaxMaxLine {
+		return nil
+	}
+	idx := m.indexFor(m.sourceAt(row))
+	switch l.Kind {
+	case diff.Addition:
+		return idx.New(l.New)
+	case diff.Deletion:
+		return idx.Old(l.Old)
+	case diff.Context:
+		return idx.Old(l.Old)
+	}
+	return nil
+}
+
+// indexFor returns the token index of a row's source, building it on first use.
+// A diff laid out as a virtual document is never indexed: its rows are generated
+// on demand, and tokenising millions of them whole would cost more than the diff
+// did.
+func (m Model) indexFor(src rowSource) *syntax.Index {
+	if !m.syntaxOn || src.file == nil || src.file.NLines() > hugeFileLines {
+		return nil
+	}
+	if idx, ok := m.syn[src]; ok {
+		return idx
+	}
+	// A source with no language, or one whose tokens outgrew the budget, is
+	// remembered as nil: a miss here costs a whole-file tokenisation, and one
+	// per painted row would freeze the view.
+	idx := buildIndex(src)
+	if n := m.synCount(); n >= maxSyntaxFiles || m.synBytes()+idx.Bytes() > maxSyntaxTotal {
+		clear(m.syn)
+	}
+	m.syn[src] = idx
+	return idx
+}
+
+// synBytes is how much the token indexes hold together.
+func (m Model) synBytes() int {
+	n := 0
+	for _, idx := range m.syn {
+		n += idx.Bytes()
+	}
+	return n
+}
+
+// synCount is how many files hold an index, nil entries included: they cost a
+// map slot each and are the ones most likely to be asked for again.
+func (m Model) synCount() int {
+	return len(m.syn)
+}
+
+// maxSyntaxFiles is how many files keep their tokens at once, and
+// maxSyntaxBytes how much one index may take before it is dropped. Both are
+// deliberately small: a diff cache that can hold 64 MB should not be shadowed
+// by its highlighter.
+const (
+	maxSyntaxFiles = 16
+	maxSyntaxBytes = 8 << 20
+	maxSyntaxTotal = 32 << 20
+)
+
+// buildIndex tokenises every row of a diff once, keeping the state of each side
+// so a comment or a string opened inside a hunk still colours what follows.
+func buildIndex(src rowSource) *syntax.Index {
+	lang := syntax.Detect(src.path, "")
+	if lang == nil {
+		return nil
+	}
+	b := syntax.NewBuilder(lang)
+	for i := src.from; i < src.to && i < src.file.NLines(); i++ {
+		l, ok := src.file.LineAt(i)
+		if !ok || len(l.Text) < 2 {
+			continue
+		}
+		text := l.Text[1:]
+		switch l.Kind {
+		case diff.Addition:
+			b.New(text, l.New)
+		case diff.Deletion:
+			b.Old(text, l.Old)
+		case diff.Context:
+			b.Context(text, l.Old, l.New)
+		}
+	}
+	idx := b.Index()
+	if idx.Bytes() > maxSyntaxBytes {
+		return nil
+	}
+	return idx
+}
+
 // renderSplitRow renders a pair of lines as two columns.
-func (m Model) renderSplitRow(r contentRow) string {
+func (m Model) renderSplitRow(row int, r contentRow) string {
 	w := m.vpWidth()
 	leftW := w / 2
 	rightW := w - leftW
-	return m.renderSide(r.left, r.leftFlat, r.hasLeft, leftW, true) +
-		m.renderSide(r.right, r.rightFlat, r.hasRight, rightW, false)
+	return m.renderSide(row, r.left, r.leftFlat, r.hasLeft, leftW, true) +
+		m.renderSide(row, r.right, r.rightFlat, r.hasRight, rightW, false)
 }
 
 // renderSide renders one column of a split row: line number, text, then a
 // background wash out to the column edge.
-func (m Model) renderSide(l diff.Line, flatIdx int, present bool, colW int, oldSide bool) string {
+func (m Model) renderSide(row int, l diff.Line, flatIdx int, present bool, colW int, oldSide bool) string {
 	if colW <= 0 {
 		return ""
 	}
@@ -1805,7 +2044,7 @@ func (m Model) renderSide(l diff.Line, flatIdx int, present bool, colW int, oldS
 		return m.fillSide(colW)
 	}
 
-	base, text := m.styledText(l, flatIdx)
+	base, text := m.styledText(row, l, flatIdx)
 
 	var gut int
 	var num string
@@ -1884,18 +2123,18 @@ func posInSpan(s [2]int, pos int) bool {
 	return pos >= s[0] && pos < s[1]
 }
 
-func (m Model) lineStyles(l diff.Line) (base, word lipgloss.Style) {
+func (m Model) lineStyles(l diff.Line) lipgloss.Style {
 	switch l.Kind {
 	case diff.Addition:
-		return m.styles.DiffAdd(), m.styles.DiffAddWord()
+		return m.styles.DiffAdd()
 	case diff.Deletion:
-		return m.styles.DiffDel(), m.styles.DiffDelWord()
+		return m.styles.DiffDel()
 	case diff.HunkHeader:
-		return m.styles.DiffHunk(), m.styles.DiffHunk()
+		return m.styles.DiffHunk()
 	case diff.NoNewline:
-		return m.styles.DiffNoNewline(), m.styles.DiffNoNewline()
+		return m.styles.DiffNoNewline()
 	default:
-		return m.styles.DiffContext(), m.styles.DiffContext()
+		return m.styles.DiffContext()
 	}
 }
 

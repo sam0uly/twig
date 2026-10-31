@@ -99,3 +99,29 @@ func TestRenderedRowCache(t *testing.T) {
 		t.Fatalf("SetFile kept %d stale rows", len(m.cache.rows))
 	}
 }
+
+// BenchmarkRenderRow is the gate the feature has to pass: colouring a row costs
+// one style lookup per token, not a second render pass. The row cache means
+// this runs once per row, so the number is the price of the first paint.
+func BenchmarkRenderRow(b *testing.B) {
+	f := largeFile(400)
+	for _, syntax := range []bool{false, true} {
+		name := "syntax=off"
+		if syntax {
+			name = "syntax=on"
+		}
+		b.Run(name, func(b *testing.B) {
+			m := New(false, styles.New())
+			m.SetSize(120, 40)
+			m.SetFile(f)
+			m.SetSyntax(syntax)
+			row := m.rowAt(10)
+			b.ResetTimer()
+			b.ReportAllocs()
+			for b.Loop() {
+				m.cache.reset()
+				_ = m.renderRow(10, row)
+			}
+		})
+	}
+}

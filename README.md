@@ -20,12 +20,13 @@ rules, rename detection and index races behave like the `git` you already use.
 
 ## Why it's fast
 
-|                          | twig                                            | the usual viewer                  |
-| ------------------------ | ----------------------------------------------- | --------------------------------- |
-| a save                   | ~150 ms, watched, no repaint if nothing changed | manual refresh, or a full re-read |
-| a 100000 line file added | 4.7 ms, 14 allocations                          | seconds, hundreds of thousands    |
-| a 5000 line rewrite      | 12.6 ms, 3.0 ms paged                           | quadratic on adversarial edits    |
-| idle                     | 0% CPU                                          | a timer that keeps re-reading     |
+|                          | twig                                              | the usual viewer                   |
+| ------------------------ | ------------------------------------------------- | ---------------------------------- |
+| a save                   | ~150 ms, watched, no repaint if nothing changed   | manual refresh, or a full re-read  |
+| a 100000 line file added | 4.7 ms, 14 allocations                            | seconds, hundreds of thousands     |
+| a 5000 line rewrite      | 12.6 ms, 3.0 ms paged                             | quadratic on adversarial edits     |
+| a screen of colour       | ~100 ns a line, 2.8 µs a screen, once, cached     | re-lexes the file, or colours none |
+| idle                     | 0% CPU                                            | a timer that keeps re-reading      |
 
 The engine anchors on unique blocks first and only runs Myers inside the gaps,
 under a cost cap, so a rewrite that would pin a core for a minute is a few
@@ -100,7 +101,8 @@ it elsewhere. Every key is optional.
   "show-right-sidebar": false,
   "smooth-scroll": true,
   "log-limit": 200,
-  "split-view": false
+  "split-view": false,
+  "syntax": true
 }
 ```
 
@@ -111,6 +113,10 @@ the quiet period in milliseconds, 120 by default. `show-left-sidebar` and
 choice back. Events come from inotify, kqueue or `ReadDirectoryChangesW`, so a
 save lands in about a tenth of a second; when they cannot carry the view the
 footer says `polling` and a two second pass takes over.
+
+`syntax` colours diff lines by what a token is: keywords, strings, comments,
+numbers, names. It is on by default, needs no external tool and no grammar
+files, and `false` returns the plain diff wash.
 
 ## How it works
 
@@ -199,6 +205,41 @@ and a row needs no stored counter. The all-changes view streams blocks, indexes
 them the same way, and builds only the rows near the viewport; searching a paged
 file scans the two sources and maps a byte offset back to its line.
 
+**Highlighting: tokens, not a tree.** A diff only needs a keyword told from a string,
+a comment from a number, a key from a value: twig scans instead of parsing, one word of
+state carrying a block comment, a raw string or half a tag across a hunk gap, 14
+token classes for every language, and tables that are plain strings - no grammar
+file, no regex engine, no embedded data. It costs 256 KB and about 100 ns a line,
+2.8 µs for a 28 line screen, once per row. The model is
+[Reps–Teitelbaum–Demers]'s incremental lexer, the same idea as Vim's `syn sync`
+and [Monarch], the tokenizer vscode uses for the same reason. Colours follow the
+[Charm][Charm] - [charmtone colorscheme][tone].
+
+**It follows the file into other languages.** `<script>` and `<style>` take theirs
+from `lang`, `.php` islands are PHP inside HTML, a Markdown fence takes its tag,
+and the host takes the line back at the closer; heredocs and raw strings match a
+per-file terminator; nested comments carry a depth; a regex shares JSX's "an
+expression may start here" bit. Lines over 400 bytes stay plain.
+
+<details>
+<summary>64 tables, and what a scanner cannot express</summary>
+
+Go, Rust, Python, JS/JSX, TS/TSX, C/C++, Objective-C, CUDA, D, Nim, Crystal, Zig,
+Java, C#, Kotlin, Swift, Scala, Dart, Ruby, PHP, Groovy, Elixir, Erlang, Haskell,
+Elm, OCaml, Clojure, F#, PureScript, Lisp, R, Julia, Perl, Raku, PowerShell, Lua,
+shell, Batch, Awk, Tcl, Vim script, Fortran, LaTeX, SQL, JSON, YAML, TOML, INI,
+HTML, Vue/Svelte, XML, CSS, Markdown, GraphQL, protobuf, HCL, Nix, Solidity,
+Nginx, Verilog and assembly. Anything else keeps the plain wash, and adding one
+is a table entry and a fixture, about 2 KB with no start-up cost.
+
+A scanner cannot do: D's `/+ +/`, LaTeX `\commands`, Objective-C's `@interface`
+prefix, YAML's `|` block scalars, Lua's levelled `--[==[` comments, Svelte's
+`{#if}` blocks, JSX nested inside a `{expression}`, a single-line `<?php … ?>`.
+Each degrades to plain text rather than wrong colour, and a hunk that starts
+inside a block paints plain until a closer appears.
+
+</details>
+
 **Git does git.** Status, rename detection, ignore rules and the racy index are
 delegated to the `git` binary through porcelain. A blobless partial clone still
 works: `git cat-file` fetches on demand, and an object that is genuinely gone
@@ -220,7 +261,10 @@ The engine is checked three ways: invariants over a corpus of ~1000 generated
 pairs (spans on rune boundaries, pairing a partial bijection, order-preserving,
 symmetric under swap), golden files that pin the exact row and span layout, and
 an oracle that builds files with known edits so a missed or cross-pair is a
-counted error. `go test ./internal/diff -update` regenerates the goldens.
+counted error. `go test ./internal/diff -update` regenerates the goldens. The
+lexer is checked the same way: a span must sit inside its line and never overlap
+another, and tokenising a file line by line must agree with tokenising it in one
+gulp, which is what a lost state byte breaks.
 
 ## Benchmarks
 
@@ -232,8 +276,10 @@ as ~20% and compare runs rather than the table.
 | 5000 lines, 400 edits | 12.6 ms | 19 698      |
 | the same, paged       | 3.04 ms | 56          |
 | 100000 line addition  | 4.68 ms | 14          |
-| 20000 row repaint     | 1.52 ms | 1 230       |
-| one scroll step       | 0.36 ms | 278         |
+| 20000 row repaint     | 2.35 ms | 8 300       |
+| one scroll step       | 0.34 ms | 505         |
+| 28 rows of tokens     | 2.8 µs  | 0           |
+| one row, coloured     | 53 µs   | 246         |
 
 A 100000 line addition retains 3.09 MB for 2.69 MB of source, and paging costs
 a quarter of materialising the same rows, which is why the viewer pages above
@@ -254,8 +300,14 @@ publishes the cross-compiled binaries, checksums and packages.
 
 ## Acknowledgments
 
-Standing on the shoulders of [Charm] — [Bubble Tea v2], [Bubbles v2], [Lip Gloss
-v2], [ultraviolet], [harmonica], [fang] and [tone] — and [Task] for the build.
+Standing on the shoulders of [Charm] - [Bubble Tea v2], [Bubbles v2], [Lip Gloss
+v2], [ultraviolet], [harmonica], [fang] and [tone] - and [Task] for the build.
+
+The scanner follows the line-state model of [micro]'s highlighter. Heredoc
+terminators borrow from Vim's `\z(` external matches and tree-sitter's external
+scanners, and the JSX disambiguation from [TypeScript]'s own parser. [Chroma] and
+[tree-sitter] were measured as alternatives before this was written: the first
+costs 2.18 MB and cannot resume mid-file, the second 6.7 MB and cgo.
 
 ## License
 
@@ -268,7 +320,7 @@ Apache License, Version 2.0. See [LICENSE](LICENSE).
 [harmonica]: https://github.com/charmbracelet/harmonica
 [fang]: https://github.com/charmbracelet/fang
 [tone]: https://github.com/charmbracelet/tone
-[Charm]: https://charm.sh
+[Charm]: https://charm.land
 [Task]: https://taskfile.dev
 [Myers]: http://www.xmailserver.org/diff2.pdf
 [Bentley–McIlroy]: https://dl.acm.org/doi/10.1145/359460.359467
@@ -277,3 +329,9 @@ Apache License, Version 2.0. See [LICENSE](LICENSE).
 [diff-match-patch]: https://github.com/google/diff-match-patch/wiki/API
 [Fenwick]: https://en.wikipedia.org/wiki/Fenwick_tree
 [maphash]: https://pkg.go.dev/hash/maphash
+[Reps–Teitelbaum–Demers]: https://dl.acm.org/doi/pdf/10.1145/2166.357218
+[Monarch]: https://code.visualstudio.com/blogs/2017/02/08/syntax-highlighting-optimizations
+[micro]: https://github.com/zyedidia/micro
+[Chroma]: https://github.com/alecthomas/chroma
+[tree-sitter]: https://github.com/tree-sitter/tree-sitter
+[TypeScript]: https://github.com/microsoft/TypeScript

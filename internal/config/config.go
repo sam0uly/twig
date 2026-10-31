@@ -37,6 +37,8 @@ type Config struct {
 	LogLimit int `json:"log-limit"`
 	// SplitView shows diffs as two side-by-side columns instead of one.
 	SplitView bool `json:"split-view"`
+	// Syntax colours diff lines by token class.
+	Syntax bool `json:"syntax"`
 }
 
 // Default returns the built-in default configuration.
@@ -54,6 +56,7 @@ func Default() Config {
 		WatchDebounce:    120,
 		LogLimit:         200,
 		SplitView:        false,
+		Syntax:           true,
 	}
 }
 

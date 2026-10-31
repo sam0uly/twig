@@ -9,6 +9,8 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"charm.land/tone"
+
+	"samouly.fun/twig/internal/syntax"
 )
 
 // Styles contains all styles used in the UI.
@@ -92,6 +94,12 @@ type Styles struct {
 	modalTitle  lipgloss.Style
 	modalHint   lipgloss.Style
 	modalKeycap lipgloss.Style
+
+	// syn and synWord hold one style per token class for each kind of diff
+	// row, so the render path picks a style by index instead of composing one
+	// per segment. Plain is the diff wash itself.
+	syn     *[3][syntax.ClassCount]lipgloss.Style
+	synWord *[3][syntax.ClassCount]lipgloss.Style
 
 	// Background is the whole-app background color (CharmTone Pepper).
 	Background color.Color
@@ -246,7 +254,88 @@ func New() Styles {
 	s.BorderFocused = tone.Hazy
 	s.BorderBlurred = tone.Char
 
+	s.buildSyntax()
+
 	return s
+}
+
+// Row kinds the syntax table is indexed by.
+const (
+	// SyntaxContext is an unchanged or non-diff row.
+	SyntaxContext = iota
+	// SyntaxAdd is an added line.
+	SyntaxAdd
+	// SyntaxDel is a deleted line.
+	SyntaxDel
+)
+
+// buildSyntax lays out the token styles: the diff wash for the background, one
+// foreground per class, and a bolder variant for the words a diff highlights.
+func (s *Styles) buildSyntax() {
+	// The palette is the author's own charmtone colorscheme, followed exactly:
+	// each class takes the colour of the vim or treesitter group that reads the
+	// same way. Contrast against the three diff backgrounds is measured in
+	// TestSyntaxContrast; the reference scheme deliberately keeps comments dim.
+	//
+	//   keyword, key   guppy      structure and the name before a separator
+	//   type           salt       types are the brightest text in the scheme
+	//   function       sardine    calls
+	//   boolean        sardine    bold: true and false
+	//   string         yam        quoted literals
+	//   number         bok        literals
+	//   constant       bok        nil and shouted names
+	//   escape         bok        escapes inside a string
+	//   tag            orchid     markup element names
+	//   comment, doc   oyster     dim on purpose
+	//   operator       salmon
+	//   punctuation    zest
+	fg := [syntax.ClassCount]color.Color{
+		syntax.Plain:    nil,
+		syntax.Keyword:  tone.Guppy,
+		syntax.Type:     tone.Salt,
+		syntax.Function: tone.Sardine,
+		syntax.String:   tone.Yam,
+		syntax.Escape:   tone.Bok,
+		syntax.Number:   tone.Bok,
+		syntax.Constant: tone.Bok,
+		syntax.Boolean:  tone.Sardine,
+		syntax.Key:      tone.Guppy,
+		syntax.Tag:      tone.Orchid,
+		syntax.Comment:  tone.Oyster,
+		syntax.Doc:      tone.Oyster,
+		syntax.Operator: tone.Salmon,
+		syntax.Punct:    tone.Zest,
+	}
+	base := [3]lipgloss.Style{s.diffContext, s.diffAdd, s.diffDel}
+	wordBg := [3]color.Color{nil, tone.Gator, tone.Steak}
+
+	s.syn = new([3][syntax.ClassCount]lipgloss.Style)
+	s.synWord = new([3][syntax.ClassCount]lipgloss.Style)
+	for kind := range base {
+		for class := range syntax.ClassCount {
+			style := base[kind]
+			if class != syntax.Plain && fg[class] != nil {
+				style = style.Foreground(fg[class])
+			}
+			// The reference scheme sets a boolean in bold, and nothing else.
+			if class == syntax.Boolean {
+				style = style.Bold(true)
+			}
+			s.syn[kind][class] = style
+
+			word := style.Bold(true)
+			if wordBg[kind] != nil {
+				word = word.Background(wordBg[kind])
+			}
+			s.synWord[kind][class] = word
+		}
+	}
+
+	// A word the diff highlights keeps its old look when no token owns it, so
+	// turning the colouring off is byte-identical to the renderer before it.
+	s.synWord[SyntaxContext][syntax.Plain] = s.diffContext
+	s.synWord[SyntaxAdd][syntax.Plain] = s.diffAddWord
+	s.synWord[SyntaxDel][syntax.Plain] = s.diffDelWord
 }
 
 func darkGrayFgStyle(c color.Color) lipgloss.Style {
@@ -403,6 +492,17 @@ func (s Styles) DiffNoNewline() lipgloss.Style { return s.diffNoNewline }
 
 // DiffBinary returns the style for binary file notices.
 func (s Styles) DiffBinary() lipgloss.Style { return s.diffBinary }
+
+// Syntax returns the style a token class takes on a kind of diff row.
+func (s Styles) Syntax(kind int, class syntax.Class) lipgloss.Style {
+	return s.syn[kind][class]
+}
+
+// SyntaxWord returns the same style for a word the diff highlights, which keeps
+// the token colour and adds the emphasis background.
+func (s Styles) SyntaxWord(kind int, class syntax.Class) lipgloss.Style {
+	return s.synWord[kind][class]
+}
 
 // DiffFill returns the style for empty split-view cells.
 func (s Styles) DiffFill() lipgloss.Style { return s.diffFill }

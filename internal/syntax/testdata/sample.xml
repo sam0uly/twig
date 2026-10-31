@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A small build manifest. -->
+<project name="twig" version="0.4.1">
+  <properties>
+    <go.version>1.24</go.version>
+    <target>linux/amd64</target>
+  </properties>
+
+  <target name="build" depends="clean">
+    <mkdir dir="${out}/bin"/>
+    <exec executable="go">
+      <arg value="build"/>
+      <arg value="-o"/>
+      <arg value="${out}/bin/twig"/>
+    </exec>
+  </target>
+
+  <target name="clean">
+    <delete dir="${out}"/>
+  </target>
+
+  <![CDATA[
+    raw text <not a tag> & ampersands
+  ]]>
+</project>

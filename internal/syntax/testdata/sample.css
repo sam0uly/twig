@@ -1,0 +1,13 @@
+/* a comment
+   over two lines */
+:root {
+  --fg: #f7f6fb;
+  --bg: #201f26;
+}
+
+.wrap > p::after {
+  content: "a // not a comment";
+  margin: 0 auto;
+  color: var(--fg);
+  background: var(--bg);
+}

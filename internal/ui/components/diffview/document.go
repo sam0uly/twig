@@ -294,6 +294,27 @@ func (d *blockDoc) source(b *docBlock) *diff.File {
 	return d.src
 }
 
+// fileForRow returns the diff behind document row i, which is what picks the
+// language for the row's tokens. Only the all-changes view mixes files, and
+// each file's rows are as few in split mode as in unified, so the lookup has to
+// use the layout on screen.
+func (d *blockDoc) fileForRow(i int) *diff.File {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.src != nil {
+		return d.src
+	}
+	if len(d.blocks) == 0 {
+		return nil
+	}
+	bi, _ := d.idx[d.mode].find(max(0, i-d.rowOffset()))
+	if bi < 0 || bi >= len(d.blocks) {
+		return nil
+	}
+	return d.source(&d.blocks[bi])
+}
+
 // blockLines returns a block's lines, rebuilt from its source when they are
 // not resident. For a paged file that costs only this block.
 func (d *blockDoc) blockLines(b *docBlock) []diff.Line {

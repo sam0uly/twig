@@ -1,0 +1,39 @@
+# Schema for the cache service.
+schema {
+  query: Query
+  mutation: Mutation
+}
+
+"""A cached key, newest first."""
+type Entry {
+  key: ID!
+  seenAt: Int!
+  tags: [String!]!
+}
+
+type Query {
+  entries(limit: Int = 16): [Entry!]!
+  entry(key: ID!): Entry
+}
+
+type Mutation {
+  push(key: ID!, tags: [String!] = []): Entry!
+}
+
+enum State {
+  READY
+  EXPIRED
+}
+
+input Filter {
+  prefix: String
+  active: Boolean = true
+}
+
+directive @auth(role: String) on FIELD_DEFINITION
+
+# Fragments and unions round out the schema.
+fragment EntryFields on Entry {
+  key
+  seenAt
+}
