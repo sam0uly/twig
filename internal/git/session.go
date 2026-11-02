@@ -40,6 +40,16 @@ type repoContext struct {
 	blobs *blobCache
 	work  *workCache
 	diffs *diffCache
+
+	// attrsMu guards attrs, which caches what git would do to a path's bytes
+	// between the worktree and the index.
+	attrsMu sync.Mutex
+	attrs   map[string]attributes
+
+	// autocrlf is core.autocrlf, resolved once, and autocrlfSet says whether it
+	// has been. It decides whether a file with no attributes still converts.
+	autocrlf    string
+	autocrlfSet bool
 }
 
 // One session per process: resolving the work tree root and git directory is
@@ -120,25 +130,55 @@ func (rc *repoContext) git(args ...string) (string, error) {
 // from machine-readable porcelain, so the locale is pinned and git is kept
 // from taking optional index locks while twig is only reading.
 func runGit(dir string, args ...string) (string, error) {
+	out, _, err := runGitIO(dir, nil, false, args...)
+	return out, err
+}
+
+// runGitWrite runs a command that changes the repository. It says so to git,
+// which is what makes git take the real index lock rather than skip the
+// optional one, and it hands back standard error even on success: git's
+// warnings about what it just wrote are worth reading.
+func runGitWrite(dir string, stdin []byte, args ...string) (stdout, stderr string, err error) {
+	return runGitIO(dir, stdin, true, args...)
+}
+
+// runGitIO is the single place a git child is built. Stdin is only wired when
+// a caller has bytes to send, so a command that reads the terminal is never
+// handed an empty pipe by accident.
+func runGitIO(dir string, stdin []byte, write bool, args ...string) (stdout, stderr string, err error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(
-		os.Environ(),
-		"LC_ALL=C",
-		"GIT_OPTIONAL_LOCKS=0",
-		"GIT_TERMINAL_PROMPT=0",
-	)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Env = gitEnv(write)
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
+		msg := strings.TrimSpace(errBuf.String())
 		if msg == "" {
 			msg = err.Error()
 		}
-		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
+		return "", errBuf.String(), fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
 	}
-	return stdout.String(), nil
+	return outBuf.String(), errBuf.String(), nil
+}
+
+// gitEnv is the environment every git child inherits. A read-only command asks
+// git not to take optional index locks, since twig may be polling while the
+// user's own git is running. A writing command must not: the lock it takes is
+// the whole point.
+func gitEnv(write bool) []string {
+	env := append(
+		os.Environ(),
+		"LC_ALL=C",
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	if !write {
+		env = append(env, "GIT_OPTIONAL_LOCKS=0")
+	}
+	return env
 }
 
 // zeroOID is the all-zero object id git reports for a side that does not

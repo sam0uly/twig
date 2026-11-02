@@ -120,3 +120,40 @@ func TestCommitDiffDegradesOnMissingBlob(t *testing.T) {
 		t.Fatalf("degraded = %d, loaded = %d, want 1 and 1", degraded, loaded)
 	}
 }
+
+// TestCommitAmendReplacesHEAD checks that amending rewrites the commit instead
+// of stacking another one, which is the whole difference the toggle makes.
+func TestCommitAmendReplacesHEAD(t *testing.T) {
+	h := newRepoHarness(t)
+	h.write("f.txt", "one\n")
+	h.commitAll("first")
+	first := strings.TrimSpace(h.gitOutput("rev-parse", "HEAD"))
+
+	h.write("f.txt", "one\ntwo\n")
+	h.git("add", "f.txt")
+	hash, err := CommitWith("first, better", CommitOptions{Amend: true})
+	if err != nil {
+		t.Fatalf("amend: %v", err)
+	}
+	if got := strings.TrimSpace(h.gitOutput("rev-parse", "HEAD")); got != hash {
+		t.Fatalf("HEAD is %q, want the amended %q", got, hash)
+	}
+	if hash == first {
+		t.Fatal("an amend must produce a new commit id")
+	}
+	if got, want := h.gitOutput("rev-list", "--count", "HEAD"), "1\n"; got != want {
+		t.Fatalf("%s commits after the amend, want 1", strings.TrimSpace(got))
+	}
+	if got := h.gitOutput("log", "-1", "--pretty=%s"); strings.TrimSpace(got) != "first, better" {
+		t.Fatalf("subject is %q", strings.TrimSpace(got))
+	}
+}
+
+// TestCommitEmptyMessageIsRefused keeps an accidental ctrl+s from creating an
+// empty commit.
+func TestCommitEmptyMessageIsRefused(t *testing.T) {
+	newRepoHarness(t)
+	if _, err := CommitWith("", CommitOptions{}); err == nil {
+		t.Fatal("an empty message was committed")
+	}
+}

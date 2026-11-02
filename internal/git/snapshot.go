@@ -41,6 +41,12 @@ type snapFile struct {
 
 	headOID  string
 	indexOID string
+
+	// indexMode and workMode are the modes of the two sides. A partial stage
+	// has to repeat the index mode in the record it writes, and a new file's
+	// mode comes from the worktree, so both are worth keeping.
+	indexMode string
+	workMode  string
 }
 
 // snapshotFor returns a snapshot, computing it when missing (or always when
@@ -156,7 +162,8 @@ func snapshotFingerprint(root, stamp string, staged, unstaged []FileStatus) stri
 	_, _ = io.WriteString(h, stamp)
 
 	var buf [32]byte
-	for _, f := range unstaged {
+	for i := range unstaged {
+		f := unstaged[i]
 		_, _ = io.WriteString(h, f.Path)
 		_, _ = io.WriteString(h, f.Letter)
 		if info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(f.Path))); err == nil {
@@ -231,6 +238,17 @@ func parseOrdinary(snap *snapshot, f []string) {
 			path: path, unstagedKind: diff.Deleted, indexOID: hI,
 		})
 	}
+
+	// Both records above merge into one entry, so the modes are attached once,
+	// here, where both halves are in scope.
+	if f, ok := snap.files[path]; ok {
+		if xy[0] != '.' && mI != "000000" {
+			f.indexMode = mI
+		}
+		if xy[1] != '.' && mW != "000000" {
+			f.workMode = mW
+		}
+	}
 }
 
 // parseRename handles "2" records: the path in the record, the original path
@@ -261,6 +279,15 @@ func parseRename(snap *snapshot, f []string, origPath string) {
 	case 'D':
 		snap.add(path, &snapFile{path: path, unstagedKind: diff.Deleted, indexOID: hI})
 	}
+
+	if f, ok := snap.files[path]; ok {
+		if mI != "000000" {
+			f.indexMode = mI
+		}
+		if xy[1] != '.' {
+			f.workMode = mI
+		}
+	}
 }
 
 // add stores or merges a file entry. A path can be staged and unstaged at
@@ -281,6 +308,12 @@ func (s *snapshot) add(path string, f *snapFile) {
 		}
 		if f.modeChanged {
 			existing.modeChanged = true
+		}
+		if f.indexMode != "" {
+			existing.indexMode = f.indexMode
+		}
+		if f.workMode != "" {
+			existing.workMode = f.workMode
 		}
 		return
 	}
@@ -325,7 +358,7 @@ func (rc *repoContext) diffFile(f *snapFile, staged bool, opts Options) (*diff.F
 		kind = f.stagedKind
 	}
 	if kind == 0 {
-		return nil, fmt.Errorf("no change for %q", f.path)
+		return nil, fmt.Errorf("%w for %q", ErrNoChange, f.path)
 	}
 
 	oldOID, newOID := f.indexOID, ""
