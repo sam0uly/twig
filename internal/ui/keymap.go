@@ -42,9 +42,26 @@ type KeyMap struct {
 	YankFile   key.Binding
 	YankHunk   key.Binding
 	ToggleWrap key.Binding
-	ToggleWS   key.Binding
-	CycleCtx   key.Binding
-	ToggleView key.Binding
+
+	// Partial staging in the diff pane. One verb, whose object is whatever the
+	// cursor is on, so there is no mode to be in.
+	StageHere  key.Binding
+	RangeKey   key.Binding
+	ApplyMarks key.Binding
+	Undo       key.Binding
+	Discard    key.Binding
+	CursorUp   key.Binding
+	CursorDown key.Binding
+	// Scrolling, for surfaces that have no cursor to move. The diff pane's
+	// viewport takes the same keys from Bubbles, so a reader who knows how to
+	// scroll one knows how to scroll the other.
+	ScrollLeft  key.Binding
+	ScrollRight key.Binding
+	PageUp      key.Binding
+	PageDown    key.Binding
+	ToggleWS    key.Binding
+	CycleCtx    key.Binding
+	ToggleView  key.Binding
 	// ToggleSmooth turns the harmonica scroll animation on and off. It is a
 	// global key and the choice is written back to the config file.
 	ToggleSmooth key.Binding
@@ -162,6 +179,54 @@ func DefaultKeyMap() KeyMap {
 		YankHunk: key.NewBinding(
 			key.WithKeys("Y"),
 			key.WithHelp("Y", "yank hunk"),
+		),
+		StageHere: key.NewBinding(
+			// bubbletea reports the space bar as "space", not " ".
+			key.WithKeys("space"),
+			key.WithHelp("space", "stage"),
+		),
+		RangeKey: key.NewBinding(
+			key.WithKeys("V"),
+			key.WithHelp("V", "select range"),
+		),
+		ApplyMarks: key.NewBinding(
+			key.WithKeys("enter"),
+			key.WithHelp("enter", "apply"),
+		),
+		Undo: key.NewBinding(
+			key.WithKeys("z"),
+			key.WithHelp("z", "undo"),
+		),
+		Discard: key.NewBinding(
+			key.WithKeys("x"),
+			key.WithHelp("x", "discard"),
+		),
+		CursorUp: key.NewBinding(
+			key.WithKeys("k", "up"),
+			key.WithHelp("k/↑", "up"),
+		),
+		CursorDown: key.NewBinding(
+			key.WithKeys("j", "down"),
+			key.WithHelp("j/↓", "down"),
+		),
+		// The overlays scroll with the keys the diff pane already scrolls
+		// with, so there is one set to learn and no key that means two things
+		// in the same place.
+		ScrollLeft: key.NewBinding(
+			key.WithKeys("h", "left"),
+			key.WithHelp("h/←", "scroll left"),
+		),
+		ScrollRight: key.NewBinding(
+			key.WithKeys("l", "right"),
+			key.WithHelp("l/→", "scroll right"),
+		),
+		PageUp: key.NewBinding(
+			key.WithKeys("b", "pgup"),
+			key.WithHelp("b/pgup", "page up"),
+		),
+		PageDown: key.NewBinding(
+			key.WithKeys("f", "pgdown"),
+			key.WithHelp("f/pgdn", "page down"),
 		),
 		ToggleWrap: key.NewBinding(
 			key.WithKeys("w"),

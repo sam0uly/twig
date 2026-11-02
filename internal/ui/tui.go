@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -30,16 +31,14 @@ import (
 
 const (
 	statusMessageTimeout = time.Second * 3
-	// prefetchRadius is how many neighbouring files are queued ahead of the
-	// cursor while browsing the file list.
+	// prefetchRadius is how many neighbouring files are queued ahead of the cursor.
 	prefetchRadius = 2
 )
 
 // Options configures the TUI.
 type Options struct {
 	Config config.Config
-	// ConfigPath is the file twig read its config from and writes toggles
-	// back to. It is also watched for edits made outside the app.
+	// ConfigPath is the config file twig read and writes toggles back to.
 	ConfigPath    string
 	Source        git.Source
 	ShowLogPicker bool
@@ -50,6 +49,9 @@ type state int
 const (
 	stateShowList state = iota
 	stateCompose
+	// stateConfirm is the discard dialog, the only modal guarding an irreversible
+	// action.
+	stateConfirm
 	stateFatal
 )
 
@@ -65,16 +67,13 @@ var contextCycle = []int{0, 1, 3, 5, 8}
 
 // Run starts the twig TUI.
 func Run(ctx context.Context, opts Options) error {
-	// Opening the repository and resolving HEAD takes seconds on a large one, so
-	// it happens in a command (see loadRepoInfoCmd): the first frame must never
-	// wait for git.
+	// Opening the repository and resolving HEAD happens in a command: the first frame
+	// must never wait for git.
 	m := newModel(opts, "", "")
 
 	p := tea.NewProgram(m, tea.WithContext(ctx))
 	final, err := p.Run()
-	// Release the inotify descriptor and the goroutines parked on it. The
-	// process is about to exit, but a host that runs twig in-process (tests,
-	// an embedded caller) must not accumulate them.
+	// Release the inotify descriptor and the goroutines parked on it.
 	if m, ok := final.(model); ok {
 		m.stopWatch()
 	}
@@ -85,8 +84,7 @@ func Run(ctx context.Context, opts Options) error {
 type model struct {
 	cfg     config.Config
 	cfgPath string
-	// cfgStamp fingerprints the config file, so an edit made outside twig is
-	// picked up without restarting it.
+	// cfgStamp fingerprints the config file, so an outside edit is picked up.
 	cfgStamp      string
 	configTicking bool
 	src           git.Source
@@ -97,6 +95,21 @@ type model struct {
 	styles        styles.Styles
 	keys          KeyMap
 
+	// undo is the bounded stack of operations that can be reversed exactly.
+	undo []git.Undo
+	// stageAnchor is where the cursor was when an operation started, so the reload
+	// puts the reader back instead of at the top.
+	stageAnchor *diffview.CursorAnchor
+	// anchorWait holds the restore back until the document it named has been replaced,
+	// or the two scrolls fight.
+	anchorWait bool
+	// advanceList marks a whole-file operation: the reader is moved on to the
+	// next file once the list has been rebuilt.
+	advanceList bool
+	// confirm is the pending discard, empty unless state is stateConfirm.
+	confirm *confirmState
+
+	// d is the diff being browsed.
 	d *diff.Diff
 	// loaded marks the first status load.
 	loaded bool
@@ -105,12 +118,10 @@ type model struct {
 		path   string
 		staged bool
 	}
-	// reloadPending marks a refresh that has to re-read the file already on
-	// screen, whose path did not move but whose content may have.
+	// reloadPending marks a refresh that must re-read the file on screen.
 	reloadPending bool
 	message       string
-	// searchApplied keeps the query on screen (muted) after the input closes,
-	// the same way a sidebar filter persists.
+	// searchApplied keeps the query on screen, muted, after the input closes.
 	searchApplied bool
 	err           error
 	state         state
@@ -121,65 +132,53 @@ type model struct {
 	showLeft  bool
 	showRight bool
 
-	// allChanges shows every working-tree change in one virtual document
-	// instead of one file at a time.
+	// allChanges shows every change in one virtual document.
 	allChanges bool
 	allLoading bool
-	// allGen numbers the running all-changes load, so chunks from a
-	// superseded load are dropped instead of appended to the new document.
+	// allGen numbers the running all-changes load, so stale chunks are dropped.
 	allGen int
-	// allPendingJump defers the jump to the selected file until its band has
-	// been received.
+	// allPendingJump defers the jump to a file until its band arrives.
 	allPendingJump bool
-	// allAdds and allDels total the document's stats; the document itself
-	// keeps only a window of rows, so it cannot be asked for them later.
+	// allAdds and allDels total the document's stats, which the header shows.
 	allAdds, allDels int
-	// allAnchor is where the reader was when a refresh replaced the document,
-	// and allRestore carries it to the end of the streamed rebuild. Both are
-	// -1 when there is nothing to restore.
+	// allAnchor is where the reader was when a refresh replaced the document, and
+	// allRestore carries it to the end of the rebuild; -1 when there is nothing.
 	allAnchor, allRestore int
 
 	// welcomeFrame drives the welcome screen animation.
 	welcomeFrame int
-	// welcomeTicking records whether a welcome tick is in flight, so leaving
-	// and re-entering the splash never stacks two chains.
+	// welcomeTicking keeps one welcome tick chain alive at most.
 	welcomeTicking bool
-	// spinnerTicking records whether the spinner chain is running, so it is
-	// started once per load and stops when the load lands.
+	// spinnerTicking keeps the spinner chain to one per load.
 	spinnerTicking bool
-	// pushing marks a push in flight: it talks to the network, so the footer
-	// shows the spinner until it returns.
+	// pushing marks a push in flight, which the footer shows while it lasts.
 	pushing bool
 
-	// watcher reports filesystem activity around the repository. watchOff
-	// records that there is no watcher to have, so it is never tried twice,
-	// and watchStarting covers the command that is still creating one.
+	// watcher reports filesystem activity. watchOff records that there is no watcher
+	// to have, watchStarting covers one still being created.
 	watcher       *watch.Watcher
 	watchOff      bool
 	watchStarting bool
 	// watchPaths are the changed paths the current watch set was built from.
 	watchPaths []string
-	// watchHealth is what the watcher is actually doing: live events, a partial
-	// set, or nothing. The footer shows it and the poll interval follows it.
+	// watchHealth is what the watcher is actually doing, which the footer shows.
 	watchHealth watch.Health
-	// watchSuspect marks a watcher that is installed but keeps missing changes
-	// the poll finds, which is how a network mount or a broken backend looks.
+	// watchSuspect marks a watcher that keeps missing changes the poll finds.
 	watchSuspect bool
-	// watchLastEvent is when the watcher last reported activity, used to tell
-	// a real event from a change only the poll noticed.
+	// watchLastEvent is when the watcher last reported activity.
 	watchLastEvent time.Time
-	// statusPending marks a status run in flight, so a tick or an event
-	// cannot stack a second one behind it.
+	// statusPending marks a status run in flight, so nothing stacks a second one.
 	statusPending bool
-	// repoFingerprint is the working tree state last painted. A refresh that
-	// produces the same fingerprint is dropped without touching the view.
+	// repoFingerprint is the tree state last painted; a refresh with the same one is
+	// dropped without touching the view.
 	repoFingerprint string
-	// statusCost is how long the last status run took, which sets how often
-	// the poll backstop runs.
+	// statusCost is how long the last status run took, which sets the poll interval.
 	statusCost time.Duration
 
 	// commit is the commit inspected on the commits tab.
 	commit git.Commit
+	// amend makes the next commit replace HEAD instead of adding to it.
+	amend bool
 	// commitFileList holds the files of that commit for the right sidebar.
 	commitFileList []*diff.File
 
@@ -187,19 +186,19 @@ type model struct {
 	cache *diffCache
 	// prefetchAt is the file index whose neighbours are already queued.
 	prefetchAt int
-	// seq numbers the latest file selection; stale loads are dropped instead of
-	// repainting the pane with a diff the user already moved past.
+	// seq numbers the latest file selection, so stale loads are dropped.
 	seq int
-	// commitSeq numbers the latest commit selection. It is kept apart from seq
-	// so a commit load can never discard a file diff that is still wanted (and
-	// the other way round).
+	// commitSeq numbers the latest commit selection, kept apart from seq so neither
+	// discards the other.
 	commitSeq int
 
-	files   filelist.Model
-	view    diffview.Model
-	status  statusbar.Model
-	search  searchbar.Model
-	compose composer.Model
+	// The panes are held behind pointers: Bubble Tea copies the model by value on every
+	// message, and a fresh copy of five component models is hundreds of kilobytes.
+	files   *filelist.Model
+	view    *diffview.Model
+	status  *statusbar.Model
+	search  *searchbar.Model
+	compose *composer.Model
 	spinner spinner.Model
 
 	// pane rects, computed by setSize.
@@ -230,11 +229,11 @@ func newModel(opts Options, branch, project string) model {
 		keys:      DefaultKeyMap(),
 		state:     stateShowList,
 		focus:     focusMain,
-		files:     filelist.New(0, 0, st),
-		view:      diffview.New(opts.Config.SmoothScroll, st),
-		status:    statusbar.New(st),
-		search:    searchbar.New(st),
-		compose:   composer.New(st),
+		files:     newFilelist(st),
+		view:      newDiffview(opts.Config.SmoothScroll, st),
+		status:    newStatusbar(st),
+		search:    newSearchbar(st),
+		compose:   newComposer(st),
 		spinner:   spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(st.SpinnerStyle())),
 	}
 	m.view.SetWrap(opts.Config.Wrap)
@@ -262,10 +261,8 @@ func (m model) diffOptions() git.Options {
 	return git.Options{Context: m.cfg.Context, IgnoreWhitespace: m.cfg.IgnoreWhitespace}
 }
 
-// Update implements tea.Model. It also keeps the welcome animation alive:
-// leaving the splash for another tab ends the tick chain, and the transition
-// back into it starts a fresh one. A message that lands on an already visible
-// splash is left alone, so its command keeps its identity.
+// Update implements tea.Model, and keeps the welcome animation and the spinner
+// alive: a message on an already visible splash is left alone.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	wasWelcome := m.showWelcome()
 	next, cmd := m.update(msg)
@@ -277,12 +274,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		nm.welcomeTicking = true
 		cmd = tea.Batch(cmd, welcomeTick())
 	}
-	// The spinner runs only while there is work in front of the user: the
-	// first load, and a push. Its chain ends when that work lands.
+	// The spinner runs only while there is work in front of the user.
 	if (nm.loading() || nm.pushing) && !nm.spinnerTicking {
 		nm.spinnerTicking = true
 		cmd = tea.Batch(cmd, nm.spinner.Tick)
 	}
+	// The staging cursor is an affordance, not a mode: offered where staging is
+	// possible, and kept across the reload an operation triggers.
+	nm.syncStaging()
 	return nm, cmd
 }
 
@@ -339,6 +338,17 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cache.Clear()
 		m.loaded = true
 		m.files.SetFiles(msg.staged, msg.unstaged)
+		if m.advanceList {
+			// A whole file was dealt with: move on to the next one, so the next
+			// keystroke lands on the next piece of work instead of on a file
+			// that is already done. If the file left the listing the cursor has
+			// already moved to a neighbour, and advancing again would skip it.
+			m.advanceList = false
+			dealt := m.lastLoaded.path
+			if path, _ := m.files.SelectedFile(); path.Path == dealt {
+				m.files.MoveSelectable(1)
+			}
+		}
 		if m.files.Tab() == filelist.TabFiles && m.files.Total() == 0 {
 			// Everything was staged or reverted: drop the stale diff so the
 			// welcome screen can take over.
@@ -349,6 +359,21 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.view.SetFile(nil)
 			m.d = nil
 			m.lastLoaded.path, m.lastLoaded.staged = "", false
+			m.stageAnchor = nil
+			m.anchorWait = false
+			m.reloadPending = false
+		}
+		// The file on screen can leave the listing entirely, which happens when
+		// an editor reverts it. The pane must let go of it, or pressing space
+		// stages into a file that no longer has a change.
+		if m.files.Tab() == filelist.TabFiles && m.lastLoaded.path != "" {
+			if !m.stillChanged(m.lastLoaded.path, m.lastLoaded.staged) {
+				m.view.SetFile(nil)
+				m.d = nil
+				m.lastLoaded.path, m.lastLoaded.staged = "", false
+				m.stageAnchor = nil
+				m.anchorWait = false
+			}
 		}
 		// The file on screen may be exactly the one that changed, and its
 		// path did not move: reload it instead of trusting the cursor.
@@ -394,9 +419,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.watchStarting = false
 		if msg.err != nil || msg.w == nil || !m.cfg.Watch {
 			// No watcher is not a failure: the poll backstop covers the
-			// repository without one, so this is only worth remembering. A
-			// watcher that arrived after watching was turned off is closed
-			// rather than parked on.
+			// repository without one, so it is only worth remembering; a watcher that arrived
+			// after watching was turned off is closed rather than parked on.
 			if msg.w != nil {
 				_ = msg.w.Close()
 			}
@@ -404,9 +428,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.watcher = msg.w
-		// The set was captured before the watcher existed, and the view may
-		// have moved on since: sync before waiting, or the first events for
-		// newly listed targets are missed.
+		// The set was captured before the watcher existed: sync before waiting.
 		dirs, files := m.watchTargets()
 		m.watcher.Sync(dirs, files)
 		m.watchHealth = m.watcher.Health()
@@ -420,8 +442,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(waitForChange(m.watcher), m.requestStatus(false))
 
 	case statusPollMsg:
-		// The poll chain re-arms here and only here, so exactly one chain is
-		// alive however many status runs it triggers.
+		// The poll chain re-arms here and only here.
 		cmds := []tea.Cmd{m.statusTick()}
 		if m.loaded {
 			cmds = append(cmds, m.requestStatus(true))
@@ -429,8 +450,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case tea.FocusMsg:
-		// Back from another window, which is where changes made elsewhere
-		// usually come from: catch up, once.
+		// Back from another window: catch up, once.
 		if !m.loaded || !m.cfg.Watch {
 			return m, nil
 		}
@@ -446,6 +466,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case allLoadedMsg:
 		m.allLoading = false
+		m.anchorWait = false
 		if msg.err != nil {
 			m.message = msg.err.Error()
 			return m, setMessageCmd(m.message)
@@ -456,7 +477,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.d = &diff.Diff{Additions: msg.file.Additions, Deletions: msg.file.Deletions}
 		m.view.SetNotes(nil)
 		m.view.SetFile(msg.file)
-		m.view.JumpToBandNow(m.files.SelectedOrdinal() - 1)
+		idx := m.files.SelectedOrdinal() - 1
+		m.view.JumpToBandNow(idx)
+		m.view.CursorToBand(idx)
 		return m, nil
 
 	case allChunkMsg:
@@ -466,28 +489,36 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.allLoading = false
 			m.message = msg.err.Error()
+			// A failed stream is terminal, and a stuck anchor disables every later follow.
+			m.dropAnchor()
+			m.allRestore = -1
 			return m, setMessageCmd(m.message)
 		}
 		if !m.allChanges || m.files.Tab() != filelist.TabFiles {
 			m.allLoading = false
+			m.dropAnchor()
+			m.allRestore = -1
 			return m, nil
 		}
 
 		first := msg.from == 0
-		m.view.AppendBlocks(msg.files)
+		m.view.AppendBlocksSided(msg.files, blockSides(msg.entries, msg.from, len(msg.files)))
 		for _, f := range msg.files {
 			m.allAdds += f.Additions
 			m.allDels += f.Deletions
 		}
 		m.d = &diff.Diff{Additions: m.allAdds, Deletions: m.allDels}
 
-		// The selected file may sit beyond the blocks received so far; keep
-		// the jump pending until its band exists.
+		// The selected file may sit beyond the blocks received: keep the jump pending.
 		if first || m.allPendingJump {
 			idx := m.files.SelectedOrdinal() - 1
 			if m.view.HasBand(idx) {
 				m.view.JumpToBandNow(idx)
 				m.allPendingJump = false
+				// The band is the file the reader is looking at: the cursor follows the scroll.
+				if m.stageAnchor == nil {
+					m.view.CursorToBand(idx)
+				}
 			} else {
 				m.allPendingJump = true
 			}
@@ -498,17 +529,17 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, loadAllChunkCmd(msg.entries, msg.from+len(msg.files), msg.gen, m.diffOptions())
 		}
 		m.allLoading = false
+		// The rebuilt document is complete: the operation's anchor can be replayed.
+		m.anchorWait = false
 		if m.allRestore >= 0 {
-			// The document was rebuilt by a refresh rather than by the reader:
-			// put them back on the line they were reading instead of leaving
-			// the pane at the file the sidebar happens to select.
+			// A refresh replaced the document: put the reader back on their line.
 			m.view.JumpToLine(m.allRestore)
 			m.allRestore = -1
 		}
 		return m, nil
 
 	case prefetchedMsg:
-		if msg.err == nil && msg.file != nil {
+		if msg.err == nil && msg.file != nil && msg.fingerprint == m.repoFingerprint {
 			m.cache.Put(msg.key, cacheEntry{file: msg.file})
 		}
 		return m, nil
@@ -527,15 +558,28 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case fileLoadedMsg:
 		if msg.err != nil {
+			if errors.Is(msg.err, git.ErrNoChange) {
+				// The last change on this side is gone, which is what staging leaves behind.
+				m.message = nothingLeft(msg.path, msg.staged)
+				if msg.seq == m.seq {
+					m.view.SetNotes(nil)
+					m.view.SetFile(nil)
+					m.d = nil
+					m.lastLoaded.path, m.lastLoaded.staged = "", false
+				}
+				m.anchorWait = false
+				return m, setMessageCmd(m.message)
+			}
 			m.message = msg.err.Error()
 			if msg.seq == m.seq {
-				// The pane must not keep showing a diff the reader has moved
-				// past: say what failed, where the diff would have been.
+				// The pane must not keep a diff the reader has moved past.
 				m.view.SetNotes(nil)
 				m.view.SetFile(diff.Unavailable(msg.path, msg.err.Error()))
 				m.d = nil
 				m.lastLoaded.path, m.lastLoaded.staged = "", false
 			}
+			// A failed reload never brings the document the anchor named, so stop waiting.
+			m.anchorWait = false
 			return m, setMessageCmd(m.message)
 		}
 		m.cache.Put(fileCacheKey(msg.path, msg.staged, m.cfg), cacheEntry{file: msg.file})
@@ -543,11 +587,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// The user moved on; the diff is cached for when they come back.
 			return m, nil
 		}
+		if m.stageAnchor != nil && m.stageAnchor.Path == msg.path {
+			// The operation's own reload landed: the anchor can be replayed.
+			m.anchorWait = false
+		}
 		if m.lastLoaded.path == msg.path && m.lastLoaded.staged == msg.staged {
-			// A refresh reloaded the file the reader is on. The content-addressed
-			// diff cache hands back the same object when the file did not change,
-			// so nothing moved and the pane is left alone; when it did change,
-			// the diff is redrawn where they were reading.
+			// A refresh reloaded the file on screen. The content-addressed cache hands back
+			// the same object when nothing changed; when it did change, the diff is redrawn
+			// where they were reading.
 			if m.view.File() == msg.file {
 				return m, nil
 			}
@@ -611,17 +658,15 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.message = msg.err.Error()
 			if msg.seq == m.commitSeq {
-				// The pane must not keep showing whatever came before: the
-				// reader asked for this commit and it could not be built.
+				// The pane must not keep whatever came before: this commit could not be built.
 				m.view.SetNotes(nil)
 				m.view.SetFile(diff.Unavailable(msg.commit.Short, msg.err.Error()))
 				m.d = nil
 			}
 			return m, setMessageCmd(m.message)
 		}
-		// Cache the commit without its per-file payload: the sidebar only
-		// needs paths and counts, and the aggregated document already holds
-		// every row the viewer will paint.
+		// Cache the commit without its per-file payload: the sidebar needs paths and
+		// counts, and the document already holds the rows.
 		m.cache.Put(commitCacheKey(msg.commit.Hash, m.cfg), cacheEntry{file: msg.file, files: slimFiles(msg.files)})
 		if msg.seq != m.commitSeq && msg.seq != 0 {
 			return m, nil
@@ -634,15 +679,17 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case stageDoneMsg:
+		return m.applyStageDone(msg)
+
+	case undoDoneMsg:
 		if msg.err != nil {
-			m.message = msg.err.Error()
-			return m, setMessageCmd(m.message)
+			return m.notify(msg.err.Error())
 		}
-		if msg.staged {
-			m.message = "staged!"
-		} else {
-			m.message = "unstaged!"
+		label := msg.label
+		if label == "" {
+			label = "change"
 		}
+		m.message = "undid " + label
 		return m, tea.Batch(loadStatusCmd(false), setMessageCmd(m.message))
 
 	case committedMsg:
@@ -681,46 +728,102 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateKey(msg)
 
 	case list.FilterMatchesMsg:
-		// The matches belong to the list that asked for them. The commit-file
-		// sidebar is not the visible tab's list, so without this the results
-		// landed in the commits listing and the right pane never narrowed.
+		// The matches belong to the list that asked for them, or they land in the wrong
+		// sidebar.
 		if m.files.CommitFilesFiltering() {
-			var cmd tea.Cmd
-			m.files, cmd = m.files.UpdateCommitFiles(msg)
-			return m, cmd
+			return m, m.updateCommitFiles(msg)
 		}
-		var cmd tea.Cmd
-		m.files, cmd = m.files.Update(msg)
-		return m, cmd
+		return m, m.updateFiles(msg)
 	}
 
 	return m.updateChildren(msg)
 }
 
-// autoLoadFile loads the diff of the currently selected file so the main
-// pane is never stale after a status refresh.
+// newFilelist builds the listing behind a pointer, since the model is copied by
+// value on every message and the listing alone is over a hundred kilobytes.
+func newFilelist(st styles.Styles) *filelist.Model {
+	m := filelist.New(0, 0, st)
+	return &m
+}
+
+// updateFiles applies a list update in place, writing the value back rather than
+// allocating again.
+func (m *model) updateFiles(msg tea.Msg) tea.Cmd {
+	updated, cmd := m.files.Update(msg)
+	*m.files = updated
+	return cmd
+}
+
+// updateCommitFiles is updateFiles for the commit files pane.
+func (m *model) updateCommitFiles(msg tea.Msg) tea.Cmd {
+	updated, cmd := m.files.UpdateCommitFiles(msg)
+	*m.files = updated
+	return cmd
+}
+
+// newStatusbar, newSearchbar and newComposer build the other panes behind pointers
+// for the same reason: a smaller model means smaller stack frames.
+func newStatusbar(st styles.Styles) *statusbar.Model {
+	m := statusbar.New(st)
+	return &m
+}
+
+func newSearchbar(st styles.Styles) *searchbar.Model {
+	m := searchbar.New(st)
+	return &m
+}
+
+func newComposer(st styles.Styles) *composer.Model {
+	m := composer.New(st)
+	return &m
+}
+
+// applySearch and applyCompose write an update back into the pane they own.
+func (m *model) applySearch(msg tea.Msg) tea.Cmd {
+	updated, cmd := m.search.Update(msg)
+	*m.search = updated
+	return cmd
+}
+
+func (m *model) applyCompose(msg tea.Msg) tea.Cmd {
+	updated, cmd := m.compose.Update(msg)
+	*m.compose = updated
+	return cmd
+}
+
+// newDiffview builds the pager behind a pointer, for the same reason.
+func newDiffview(smooth bool, st styles.Styles) *diffview.Model {
+	m := diffview.New(smooth, st)
+	return &m
+}
+
+func (m *model) applyView(msg tea.Msg) tea.Cmd {
+	updated, cmd := m.view.Update(msg)
+	*m.view = updated
+	return cmd
+}
+
+// autoLoadFile loads the selected file's diff so the pane never goes stale.
 func (m model) autoLoadFile() (tea.Model, tea.Cmd) {
 	if m.files.Tab() != filelist.TabFiles || m.allChanges {
 		return m, nil
 	}
-	fs, staged := m.files.SelectedFile()
+	fs, _ := m.files.SelectedFile()
 	if fs.Path == "" {
 		return m, nil
 	}
-	// A refresh re-reads the file on screen even though its path did not
-	// move, because its content may have.
-	if !m.reloadPending && fs.Path == m.lastLoaded.path && staged == m.lastLoaded.staged && m.lastLoaded.path != "" {
+	path, staged := m.selectedSide()
+	// A refresh re-reads the file on screen: its path did not move, its content may.
+	if !m.reloadPending && path == m.lastLoaded.path && staged == m.lastLoaded.staged && m.lastLoaded.path != "" {
 		return m, nil
 	}
 	m.reloadPending = false
-	return m.showFile(fs.Path, staged)
+	return m.showFile(path, staged)
 }
 
-// showFile displays a file diff, reusing the cached copy when available and
-// otherwise loading it right away.
+// showFile displays a file diff, from the cache when it is there.
 func (m model) showFile(path string, staged bool) (tea.Model, tea.Cmd) {
-	// The file on screen is the one the reader is about to edit, so its
-	// directory joins the watch set before anything is loaded.
+	// The file on screen is about to be edited: its directory joins the watch set.
 	m.syncWatch()
 	if e, ok := m.cache.Get(fileCacheKey(path, staged, m.cfg)); ok {
 		m.view.SetNotes(nil)
@@ -729,27 +832,23 @@ func (m model) showFile(path string, staged bool) (tea.Model, tea.Cmd) {
 		m.lastLoaded.path, m.lastLoaded.staged = path, staged
 		return m, nil
 	}
-	// File diffs are cheap: load immediately so holding an arrow key keeps
-	// the main pane in step with the selection.
+	// File diffs are cheap: load now, so holding an arrow key keeps up.
 	m.seq++
 	return m, loadFileDiffCmd(path, staged, m.diffOptions(), m.seq)
 }
 
-// showCommit displays a commit diff, reusing the cached copy when available
-// and otherwise loading it right away.
+// showCommit displays a commit diff, from the cache when it is there.
 func (m model) showCommit(c git.Commit) (tea.Model, tea.Cmd) {
 	if e, ok := m.cache.Get(commitCacheKey(c.Hash, m.cfg)); ok {
 		m.applyCommit(c, e.file, e.files)
 		return m, nil
 	}
-	// Listing the commit is tree data only, so it is cheap even where the
-	// content is not present locally; how much to load follows from the list.
+	// Listing a commit is tree data only, so it is cheap; how much to load follows.
 	m.commitSeq++
 	return m, loadCommitListCmd(c, m.commitSeq)
 }
 
-// prefetchNeighbors warms the cache for the files just above and below the
-// cursor, so stepping through a long listing is instant.
+// prefetchNeighbors warms the cache for the files above and below the cursor.
 func (m model) prefetchNeighbors() (model, tea.Cmd) {
 	if m.files.Tab() != filelist.TabFiles {
 		return m, nil
@@ -768,9 +867,12 @@ func (m model) prefetchNeighbors() (model, tea.Cmd) {
 			continue
 		}
 		path, staged := e.Status.Path, e.Staged
+		// Stamp the prefetch with the state it was taken from: landing after the tree
+		// moved would put a stale diff into a cache that was just cleared.
+		fingerprint := m.repoFingerprint
 		cmds = append(cmds, func() tea.Msg {
 			f, err := git.FileDiff(path, staged, opts)
-			return prefetchedMsg{key: key, file: f, err: err}
+			return prefetchedMsg{key: key, file: f, err: err, fingerprint: fingerprint}
 		})
 	}
 	return m, tea.Batch(cmds...)
@@ -786,11 +888,8 @@ func (m *model) applyCommit(c git.Commit, f *diff.File, files []*diff.File) {
 	m.view.SetFile(f)
 }
 
-// applyCommitLazy shows a large commit as a virtual document. The file list came
-// from tree data, so nothing was diffed yet: each file is generated when it
-// comes into view (and again if it is evicted), the sidebar fills in its counts
-// as files arrive, and a file whose content is missing locally shows a one-line
-// band instead of failing the commit.
+// applyCommitLazy shows a large commit as a virtual document: each file is
+// generated when it comes into view, and the sidebar fills in counts as they arrive.
 func (m *model) applyCommitLazy(c git.Commit, changes []git.CommitChange) {
 	skeleta := commitSkeleta(changes)
 	m.commit = c
@@ -801,8 +900,7 @@ func (m *model) applyCommitLazy(c git.Commit, changes []git.CommitChange) {
 	m.view.SetDocument(commitBlockLoader(c.Hash, changes, m.diffOptions()))
 }
 
-// commitSkeleta is the sidebar payload for a lazily loaded commit: paths and
-// kinds, with the counts left unknown (negative) until the diff is loaded.
+// commitSkeleta is the sidebar payload for a lazy commit: paths and kinds.
 func commitSkeleta(changes []git.CommitChange) []*diff.File {
 	out := make([]*diff.File, len(changes))
 	for i, c := range changes {
@@ -817,9 +915,7 @@ func commitSkeleta(changes []git.CommitChange) []*diff.File {
 	return out
 }
 
-// commitBlockLoader re-diffs one file of a lazily loaded commit when the
-// document needs its rows again. The session's diff cache makes that a lookup in
-// the common case.
+// commitBlockLoader re-diffs one file of a lazy commit when it is needed again.
 func commitBlockLoader(hash string, changes []git.CommitChange, opts git.Options) func(int) *diff.File {
 	return func(i int) *diff.File {
 		if i < 0 || i >= len(changes) {
@@ -833,9 +929,7 @@ func commitBlockLoader(hash string, changes []git.CommitChange, opts git.Options
 	}
 }
 
-// slimFiles strips the content of a commit's per-file diffs. Their paths and
-// counts are all the per-commit sidebar renders, and the cached document
-// already holds the rows.
+// slimFiles strips a commit's per-file diffs: the sidebar needs paths and counts.
 func slimFiles(files []*diff.File) []*diff.File {
 	out := make([]*diff.File, len(files))
 	for i, f := range files {
@@ -848,8 +942,7 @@ func (m model) updateChildren(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
 
-	// The spinner runs only while the first diff is on its way. Every frame
-	// repaints the whole view, so an idle twig keeps the chain stopped.
+	// The spinner runs only while the first diff is on its way.
 	if m.loading() || m.pushing || !isSpinnerTick(msg) {
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
@@ -859,16 +952,18 @@ func (m model) updateChildren(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch m.state {
 	case stateCompose:
-		m.compose, cmd = m.compose.Update(msg)
+		cmd = m.applyCompose(msg)
 		cmds = append(cmds, cmd)
+	case stateConfirm:
+		// A dialog swallows mouse and idle traffic.
 	default:
-		m.view, cmd = m.view.Update(msg)
+		cmd = m.applyView(msg)
 		cmds = append(cmds, cmd)
-		m.files, cmd = m.files.Update(msg)
+		cmd = m.updateFiles(msg)
 		cmds = append(cmds, cmd)
 	}
 
-	m.search, cmd = m.search.Update(msg)
+	cmd = m.applySearch(msg)
 	cmds = append(cmds, cmd)
 
 	return m, tea.Batch(cmds...)
@@ -881,22 +976,19 @@ func (m model) updateWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case m.showLeft && inRect(msg.X, msg.Y, m.sideRect):
 		var cmd tea.Cmd
-		m.files, cmd = m.files.Update(msg)
+		cmd = m.updateFiles(msg)
 		// The wheel moves the list cursor too; keep the diff in step.
 		return m.followSelection(cmd)
 	case m.showRight && m.files.Tab() == filelist.TabCommits && inRect(msg.X, msg.Y, m.commitFilesRct):
-		var cmd tea.Cmd
-		m.files, cmd = m.files.UpdateCommitFiles(msg)
-		return m, cmd
+		return m, m.updateCommitFiles(msg)
 	default:
 		var cmd tea.Cmd
-		m.view, cmd = m.view.Update(msg)
+		cmd = m.applyView(msg)
 		return m, cmd
 	}
 }
 
-// updateClick handles mouse clicks across the whole screen: header tabs,
-// the help pill, pane focus, and row selection inside the sidebars.
+// updateClick handles clicks: tabs, help pill, pane focus and row selection.
 func (m model) updateClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	if m.state != stateShowList {
 		return m, nil
@@ -921,6 +1013,14 @@ func (m model) updateClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 			m.setSize()
 			return m, nil
 		}
+		return m, nil
+	}
+
+	// Main pane: a click puts the staging cursor on the row under the pointer.
+	if inRect(msg.X, msg.Y, m.mainRect) {
+		m.focus = focusMain
+		row := m.view.YOffset() + (msg.Y - m.mainRect.Min.Y - 1)
+		m.view.CursorTo(row)
 		return m, nil
 	}
 
@@ -969,9 +1069,8 @@ func (m model) updateClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// tabHitRanges returns the cell ranges of the header tab segments. The ranges
-// are read from the rendered header itself so they always match what is on
-// screen, whatever the styles do.
+// tabHitRanges returns the cell ranges of the header tabs, read from the rendered
+// header so they match what is on screen.
 func (m model) tabHitRanges() (filesX, filesW, commitsX, commitsW int) {
 	header := ansi.Strip(m.headerView())
 
@@ -1006,26 +1105,24 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.setSize()
 			return m, nil
 		case m.focus == focusCommitFiles && m.files.CommitFilesFiltered():
-			var cmd tea.Cmd
-			m.files, cmd = m.files.UpdateCommitFiles(msg)
-			return m, cmd
+			return m, m.updateCommitFiles(msg)
 		case m.focus == focusSidebar && m.files.SidebarFiltered():
-			var cmd tea.Cmd
-			m.files, cmd = m.files.Update(msg)
-			return m, cmd
+			return m, m.updateFiles(msg)
+		case m.view.RangeActive() || !m.view.Pending().Empty():
+			// Esc steps back to neutral before it moves focus: a range or marks are the
+			// nearest thing to undo.
+			m.view.ClearRange()
+			m.view.ClearPending()
+			return m, nil
 		}
 	}
 
 	// While the sidebar list is filtering, every key belongs to it.
 	if m.state == stateShowList && m.focus == focusSidebar && m.files.FilterActive() {
-		var cmd tea.Cmd
-		m.files, cmd = m.files.Update(msg)
-		return m, cmd
+		return m, m.updateFiles(msg)
 	}
 	if m.state == stateShowList && m.focus == focusCommitFiles && m.files.CommitFilesFiltering() {
-		var cmd tea.Cmd
-		m.files, cmd = m.files.UpdateCommitFiles(msg)
-		return m, cmd
+		return m, m.updateCommitFiles(msg)
 	}
 
 	if m.search.Active() {
@@ -1036,6 +1133,9 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.state == stateCompose {
 		return m.updateCompose(msg)
+	}
+	if m.state == stateConfirm {
+		return m.updateConfirm(msg)
 	}
 
 	switch {
@@ -1053,8 +1153,10 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.CommitsTab):
 		return m.switchTab(filelist.TabCommits)
 	case key.Matches(msg, m.keys.NextHunk):
+		m.dropAnchor()
 		return m, m.view.NextHunk()
 	case key.Matches(msg, m.keys.PrevHunk):
+		m.dropAnchor()
 		return m, m.view.PrevHunk()
 	case key.Matches(msg, m.keys.NextFile):
 		return m.stepFile(1)
@@ -1062,7 +1164,10 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.stepFile(-1)
 	case key.Matches(msg, m.keys.ToggleLeft):
 		m.showLeft = !m.showLeft
-		if !m.showLeft && m.focus == focusSidebar {
+		// Showing a pane puts the keys in it; hiding it gives them back.
+		if m.showLeft {
+			m.focus = focusSidebar
+		} else {
 			m.focus = focusMain
 		}
 		m.setSize()
@@ -1072,7 +1177,9 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, setMessageCmd(m.message)
 	case key.Matches(msg, m.keys.ToggleRight):
 		m.showRight = !m.showRight
-		if !m.showRight && m.focus == focusCommitFiles {
+		if m.showRight {
+			m.focus = focusCommitFiles
+		} else {
 			m.focus = focusMain
 		}
 		m.setSize()
@@ -1087,9 +1194,7 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.ToggleView):
 		m.view.ToggleSplit()
 		m.cfg.SplitView = m.view.Split()
-		// Wrap is a stacked-layout feature: the two columns of a split view
-		// are already narrow, and a wrapped column would need row heights the
-		// layout does not have.
+		// Wrap is a stacked-layout feature: split columns are narrow already.
 		if m.cfg.SplitView && m.cfg.Wrap {
 			m.cfg.Wrap = false
 			m.view.SetWrap(false)
@@ -1100,8 +1205,7 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.ToggleWrap):
 		m.cfg.Wrap = !m.cfg.Wrap
 		if m.cfg.Wrap && m.view.Split() {
-			// Wrapping needs the full width, so it takes the view back to the
-			// stacked layout instead of silently doing nothing.
+			// Wrapping needs the full width, so it leaves the split layout.
 			m.view.SetSplit(false)
 			m.cfg.SplitView = false
 		}
@@ -1117,6 +1221,38 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, setMessageCmd(m.message)
 	case key.Matches(msg, m.keys.AllChanges):
 		return m.toggleAllChanges()
+	// Keys about the view belong to the whole window, so they work from the sidebar
+	// too.
+	case key.Matches(msg, m.keys.YankFile):
+		if patch := m.view.CurrentFilePatch(); patch != "" {
+			m.message = "copied patch"
+			return m, tea.Batch(tea.SetClipboard(patch), setMessageCmd(m.message))
+		}
+		m.message = "nothing to copy"
+		return m, setMessageCmd(m.message)
+	case key.Matches(msg, m.keys.YankHunk):
+		if patch := m.view.CurrentHunkPatch(); patch != "" {
+			return m, tea.SetClipboard(patch)
+		}
+		return m, nil
+	case key.Matches(msg, m.keys.ToggleWS):
+		m.cfg.IgnoreWhitespace = !m.cfg.IgnoreWhitespace
+		m.message = "ignore whitespace " + onOff(m.cfg.IgnoreWhitespace)
+		return m.reloadContent()
+	case key.Matches(msg, m.keys.CycleCtx):
+		m.cfg.Context = nextContext(m.cfg.Context)
+		m.message = "context lines: " + itoa(m.cfg.Context)
+		return m.reloadContent()
+	case key.Matches(msg, m.keys.SearchNext):
+		if m.view.MatchCount() > 0 {
+			m.view.HighlightNext()
+		}
+		return m, nil
+	case key.Matches(msg, m.keys.SearchPrev):
+		if m.view.MatchCount() > 0 {
+			m.view.HighlightPrevious()
+		}
+		return m, nil
 	}
 
 	return m.updateFocus(msg)
@@ -1162,8 +1298,7 @@ func (m model) switchTab(tab int) (tea.Model, tea.Cmd) {
 	return m.autoLoadFile()
 }
 
-// cycleFocus moves focus across the panes of the active tab, skipping the
-// sidebars while they are hidden.
+// cycleFocus moves focus across the panes, skipping hidden sidebars.
 func (m model) cycleFocus(back bool) (tea.Model, tea.Cmd) {
 	order := make([]focus, 0, 3)
 	if m.showLeft {
@@ -1205,9 +1340,7 @@ func (m model) updateFocus(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.focus = focusMain
-			// Make sure the pane matches the row that was just accepted,
-			// even when the selection changed without a key press (mouse
-			// wheel, click, a fresh load).
+			// Make the pane match the row just accepted, even without a key press.
 			next, cmd := m.followSelection(nil)
 			nm := next.(model)
 			if m.files.Tab() == filelist.TabCommits {
@@ -1219,6 +1352,10 @@ func (m model) updateFocus(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m.startCompose()
 		case key.Matches(msg, m.keys.Push):
 			return m.startPush()
+		case key.Matches(msg, m.keys.Cycle), key.Matches(msg, m.keys.CycleBack):
+			// tab is advertised as "next pane" everywhere, so it has to work
+			// from the sidebar too and not only from the pane it lands on.
+			return m.cycleFocus(key.Matches(msg, m.keys.CycleBack))
 		case key.Matches(msg, m.keys.Stage):
 			return m.toggleStage(true)
 		case key.Matches(msg, m.keys.Unstage):
@@ -1244,40 +1381,48 @@ func (m model) updateFocus(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			cmd := m.search.Activate()
 			m.setSize()
 			return m, cmd
-		case key.Matches(msg, m.keys.SearchNext):
-			if m.view.MatchCount() > 0 {
-				m.view.HighlightNext()
-			}
-			return m, nil
-		case key.Matches(msg, m.keys.SearchPrev):
-			if m.view.MatchCount() > 0 {
-				m.view.HighlightPrevious()
-			}
-			return m, nil
-		case key.Matches(msg, m.keys.YankFile):
-			if patch := m.view.CurrentFilePatch(); patch != "" {
-				m.message = "copied patch"
-				return m, tea.Batch(tea.SetClipboard(patch), setMessageCmd(m.message))
-			}
-			m.message = "nothing to copy"
-			return m, setMessageCmd(m.message)
-		case key.Matches(msg, m.keys.YankHunk):
-			if patch := m.view.CurrentHunkPatch(); patch != "" {
-				return m, tea.SetClipboard(patch)
-			}
-			return m, nil
-		case key.Matches(msg, m.keys.ToggleWS):
-			m.cfg.IgnoreWhitespace = !m.cfg.IgnoreWhitespace
-			m.message = "ignore whitespace " + onOff(m.cfg.IgnoreWhitespace)
-			return m.reloadContent()
-		case key.Matches(msg, m.keys.CycleCtx):
-			m.cfg.Context = nextContext(m.cfg.Context)
-			m.message = "context lines: " + itoa(m.cfg.Context)
-			return m.reloadContent()
 		case key.Matches(msg, m.keys.Commit):
 			return m.startCompose()
 		case key.Matches(msg, m.keys.Push):
 			return m.startPush()
+		case key.Matches(msg, m.keys.StageHere):
+			return m.stageHere()
+		case key.Matches(msg, m.keys.RangeKey):
+			// V starts a range at the cursor and V again takes it back, so the
+			// key is its own way out.
+			if m.view.RangeActive() {
+				m.view.ClearRange()
+			} else if !m.view.StartRange() {
+				return m.notify("move the cursor first")
+			}
+			return m, nil
+		case key.Matches(msg, m.keys.ApplyMarks) && m.cfg.StageApply == config.StageApplySelect:
+			return m.applyMarks()
+		case key.Matches(msg, m.keys.Undo):
+			return m.undoLast()
+		case key.Matches(msg, m.keys.Discard):
+			return m.discardHere()
+		case key.Matches(msg, m.keys.CursorDown), key.Matches(msg, m.keys.CursorUp):
+			// With a staging cursor the pane behaves like a list; without one
+			// it stays the reader it has always been.
+			if !m.view.Selectable() {
+				return m.forwardMain(msg)
+			}
+			// Steering the cursor takes ownership of it away from any pending
+			// restore.
+			m.dropAnchor()
+			delta := 1
+			if key.Matches(msg, m.keys.CursorUp) {
+				delta = -1
+			}
+			// A live range is extended by the same keys that move the cursor:
+			// V is the whole mode, so there is no second set of keys to learn.
+			if m.view.HasRange() || m.view.RangeActive() {
+				m.view.ExtendCursor(delta)
+			} else {
+				m.view.MoveCursor(delta)
+			}
+			return m, nil
 		}
 		// Keys belong only to the main pane; the sidebar must not scroll.
 		return m.forwardMain(msg)
@@ -1297,7 +1442,7 @@ func (m model) updateFocus(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		var cmd tea.Cmd
-		m.files, cmd = m.files.UpdateCommitFiles(msg)
+		cmd = m.updateCommitFiles(msg)
 		m.focus = focusCommitFiles
 		if idx := m.files.CommitFilesIndex(); idx >= 0 {
 			m.view.JumpToBandNow(idx)
@@ -1309,9 +1454,7 @@ func (m model) updateFocus(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // updateSidebar forwards keys to the sidebar list and follows selection
 // changes into the main pane.
 func (m model) updateSidebar(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	m.files, cmd = m.files.Update(msg)
-	return m.followSelection(cmd)
+	return m.followSelection(m.updateFiles(msg))
 }
 
 // followSelection loads the diff for whatever the sidebar now points at.
@@ -1331,9 +1474,12 @@ func (m model) followSelection(extra tea.Cmd) (tea.Model, tea.Cmd) {
 
 	switch m.files.Tab() {
 	case filelist.TabFiles:
-		fs, staged := m.files.SelectedFile()
-		if fs.Path != "" && (fs.Path != m.lastLoaded.path || staged != m.lastLoaded.staged || m.lastLoaded.path == "") {
-			next, loadCmd := m.showFile(fs.Path, staged)
+		// selectedSide, not the row's staging flag: a partially staged file
+		// opens on the work left to stage, the same side the all-changes view
+		// shows and the same one a keystroke acts on.
+		path, staged := m.selectedSide()
+		if path != "" && (path != m.lastLoaded.path || staged != m.lastLoaded.staged || m.lastLoaded.path == "") {
+			next, loadCmd := m.showFile(path, staged)
 			m = next.(model)
 			var preCmd tea.Cmd
 			m, preCmd = m.prefetchNeighbors()
@@ -1462,6 +1608,7 @@ func (m model) startCompose() (tea.Model, tea.Cmd) {
 	}
 	m.state = stateCompose
 	m.focus = focusSidebar
+	m.amend = false
 	m.compose.Reset()
 	m.setSize()
 	return m, m.compose.Focus()
@@ -1480,7 +1627,12 @@ func (m model) updateCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.message = "commit message is empty"
 			return m, setMessageCmd(m.message)
 		}
-		return m, commitCmd(text)
+		return m, commitCmd(text, m.amend)
+	case "ctrl+a":
+		// Amend is a property of the commit being written, so it belongs in
+		// the dialog that writes it rather than on a key in the list.
+		m.amend = !m.amend
+		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
 	}
@@ -1507,7 +1659,7 @@ func (m model) updateSearch(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
-	m.search, cmd = m.search.Update(msg)
+	cmd = m.applySearch(msg)
 	cmds = append(cmds, cmd)
 	m.spinner, cmd = m.spinner.Update(msg)
 	cmds = append(cmds, cmd)
@@ -1530,8 +1682,14 @@ func (m model) updateSearch(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m model) forwardMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
-	m.view, cmd = m.view.Update(msg)
+	before := m.view.YOffset()
+	cmd = m.applyView(msg)
 	cmds = append(cmds, cmd)
+	if m.view.YOffset() != before {
+		// Reading somewhere else means the operation's anchor no longer names
+		// where the reader is, and a later refresh must not pull them back.
+		m.dropAnchor()
+	}
 	m.spinner, cmd = m.spinner.Update(msg)
 	cmds = append(cmds, cmd)
 	return m, tea.Batch(cmds...)
@@ -1880,21 +2038,26 @@ func loadAllChunkCmd(entries []filelist.Entry, from, gen int, opts git.Options) 
 	}
 }
 
+// stageCmd stages or unstages one whole file. It reports the scope as "file"
+// so the reader can be moved on to the next file afterwards: a file that has
+// just been dealt with is no longer the thing to look at.
 func stageCmd(path string, staged bool) tea.Cmd {
 	return func() tea.Msg {
 		var err error
+		op := "stage"
 		if staged {
 			err = git.Stage(path)
 		} else {
+			op = "unstage"
 			err = git.Unstage(path)
 		}
-		return stageDoneMsg{staged: staged, err: err}
+		return stageDoneMsg{staged: staged, op: op, path: path, scope: "file", err: err}
 	}
 }
 
-func commitCmd(message string) tea.Cmd {
+func commitCmd(message string, amend bool) tea.Cmd {
 	return func() tea.Msg {
-		hash, err := git.CommitChanges(message)
+		hash, err := git.CommitWith(message, git.CommitOptions{Amend: amend})
 		return committedMsg{hash: hash, err: err}
 	}
 }
@@ -1983,6 +2146,8 @@ func (m *model) applyConfig(cfg config.Config) tea.Cmd {
 		m.setSize()
 	}
 	if cfg.Context != old.Context || cfg.IgnoreWhitespace != old.IgnoreWhitespace {
+		// The diffs change shape with the options, and a snapshot taken under
+		// the old ones cannot be compared with a diff taken under the new ones.
 		next, cmd := m.reloadContent()
 		*m = next.(model)
 		return cmd

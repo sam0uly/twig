@@ -5,6 +5,7 @@ import (
 
 	"samouly.fun/twig/internal/diff"
 	"samouly.fun/twig/internal/git"
+	"samouly.fun/twig/internal/ui/components/diffview"
 	"samouly.fun/twig/internal/ui/components/filelist"
 )
 
@@ -76,9 +77,22 @@ type logLoadedMsg struct {
 	err     error
 }
 
-// stageDoneMsg reports the result of a stage or unstage operation.
+// stageDoneMsg reports the result of a staging operation: staging, unstaging
+// or discarding, at whatever scope the cursor named.
 type stageDoneMsg struct {
 	staged bool
+	// op is "stage", "unstage" or "discard".
+	op string
+	// path is the file the operation touched.
+	path string
+	// scope is what the cursor covered: "file", "hunk", "line" or "range".
+	scope string
+	// lines is how many changed lines moved.
+	lines int
+	// undo reverses the operation exactly.
+	undo git.Undo
+	// anchor is where the reader was, so the reload can put them back.
+	anchor diffview.CursorAnchor
 	err    error
 }
 
@@ -86,6 +100,12 @@ type stageDoneMsg struct {
 type committedMsg struct {
 	hash string
 	err  error
+}
+
+// undoDoneMsg reports the result of reversing an operation.
+type undoDoneMsg struct {
+	label string
+	err   error
 }
 
 // pushedMsg reports the result of a push.
@@ -96,11 +116,14 @@ type pushedMsg struct {
 // clearMsgMsg clears the transient status message.
 type clearMsgMsg struct{}
 
-// prefetchedMsg carries a background-loaded file diff for the cache.
+// prefetchedMsg carries a background-loaded file diff for the cache. The
+// fingerprint says which working-tree state it was taken from, so a prefetch that
+// lands after the tree moved is dropped instead of caching a stale diff.
 type prefetchedMsg struct {
-	key  string
-	file *diff.File
-	err  error
+	key         string
+	file        *diff.File
+	err         error
+	fingerprint string
 }
 
 // allLoadedMsg carries the aggregate of every working-tree change used by the
