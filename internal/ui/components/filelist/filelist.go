@@ -204,22 +204,24 @@ func (m *Model) rebuildFiles() {
 	case prev.Path != "":
 		m.SelectPath(prev.Path, prev.Staged)
 	}
-	// Never leave the cursor parked on a section header.
-	if it := m.files.SelectedItem(); it != nil {
-		if _, ok := it.(sectionItem); ok {
-			m.selectNearestFile()
-		}
+	// Never leave the cursor parked on a section header, or past the end of a
+	// listing that just got shorter.
+	if it := m.files.SelectedItem(); it == nil || !m.selectable(it) {
+		m.selectNearestFile()
 	}
 }
 
-// fileItems builds the item list for the current rendering mode.
+// fileItems builds the item list for the current rendering mode. A file that is
+// staged and then edited again appears under both sections, once for each diff it
+// has: one row is one diff, so the pane never has to say which half of the file
+// it is showing, and no key has to flip between them.
 func (m *Model) fileItems() []list.Item {
 	var items []list.Item
 	add := func(title string, files []git.FileStatus, staged bool) {
 		if len(files) == 0 {
 			return
 		}
-		items = append(items, sectionItem{title: title})
+		items = append(items, sectionItem{title: title + " (" + strconv.Itoa(len(files)) + ")"})
 		if m.tree {
 			items = append(items, buildTreeItems(files, staged, m.collapsed)...)
 			return
@@ -228,41 +230,17 @@ func (m *Model) fileItems() []list.Item {
 			items = append(items, fileItem{status: f, staged: staged})
 		}
 	}
-	// A file can be staged and edited again afterwards; that is "MM" in git's
-	// own status. It gets a section of its own instead of appearing twice.
-	stagedPaths := make(map[string]bool, len(m.staged))
+	// Untracked files have no index side, so they only ever appear unstaged.
+	var staged, unstaged []git.FileStatus
 	for _, f := range m.staged {
-		stagedPaths[f.Path] = true
-	}
-	var both, stagedOnly []git.FileStatus
-	for _, f := range m.staged {
-		if f.Untracked {
-			continue
-		}
-		edited := false
-		for _, u := range m.unstaged {
-			if !u.Untracked && u.Path == f.Path {
-				edited = true
-				break
-			}
-		}
-		if edited {
-			both = append(both, f)
-		} else {
-			stagedOnly = append(stagedOnly, f)
+		if !f.Untracked {
+			staged = append(staged, f)
 		}
 	}
-	var unstagedOnly []git.FileStatus
-	for _, f := range m.unstaged {
-		if !f.Untracked && stagedPaths[f.Path] {
-			continue // shown in "Staged and edited"
-		}
-		unstagedOnly = append(unstagedOnly, f)
-	}
+	unstaged = append(unstaged, m.unstaged...)
 
-	add("Staged and edited", both, true)
-	add("Staged changes", stagedOnly, true)
-	add("Unstaged changes", unstagedOnly, false)
+	add("Staged changes", staged, true)
+	add("Unstaged changes", unstaged, false)
 	return items
 }
 
@@ -364,8 +342,13 @@ func (m *Model) ToggleSelectedDir() bool {
 // selectNearestFile moves the cursor to the closest selectable file row.
 func (m *Model) selectNearestFile() {
 	items := visible(m.files)
-	cur := m.files.Index()
-	for d := 1; d < len(items); d++ {
+	if len(items) == 0 {
+		return
+	}
+	// The cursor can be past the end after the listing shrank, which is what
+	// happens when the file on screen is reverted and leaves the list.
+	cur := min(max(0, m.files.Index()), len(items)-1)
+	for d := 0; d < len(items); d++ {
 		if cur+d < len(items) {
 			if _, ok := items[cur+d].(fileItem); ok {
 				m.files.Select(cur + d)
@@ -514,11 +497,8 @@ func (m *Model) SelectedFile() (git.FileStatus, bool) {
 
 // SelectPath moves the cursor to the file with the given path.
 func (m *Model) SelectPath(path string, staged bool) {
-	for i, it := range visible(m.files) {
-		if f, ok := it.(fileItem); ok && f.status.Path == path && f.staged == staged {
-			m.files.Select(i)
-			return
-		}
+	if m.SelectSide(path, staged) {
+		return
 	}
 	// Fall back to any entry of the same path.
 	for i, it := range visible(m.files) {
@@ -527,6 +507,20 @@ func (m *Model) SelectPath(path string, staged bool) {
 			return
 		}
 	}
+}
+
+// SelectSide moves the cursor to one side of a path and reports whether that
+// row exists. A partly staged file is listed twice, so a path on its own does
+// not name a row, and a caller that follows a specific diff must not be
+// handed the other one.
+func (m *Model) SelectSide(path string, staged bool) bool {
+	for i, it := range visible(m.files) {
+		if f, ok := it.(fileItem); ok && f.status.Path == path && f.staged == staged {
+			m.files.Select(i)
+			return true
+		}
+	}
+	return false
 }
 
 // SelectedCommit returns the selected commit on the commits tab.
@@ -745,6 +739,25 @@ func (m Model) OrderedEntries() []Entry {
 		if f, ok := it.(fileItem); ok {
 			out = append(out, Entry{Status: f.status, Staged: f.staged})
 		}
+	}
+	return out
+}
+
+// AllEntries returns every changed row, whatever the sidebar is filtered or
+// collapsed to: one entry per side, so a file that is staged and edited appears
+// twice, exactly as it does in the listing. Watching the working tree is not a
+// view of the list: a file hidden by a filter is still a file something is
+// editing, and a refresh must not mistake "hidden" for "gone".
+func (m Model) AllEntries() []Entry {
+	out := make([]Entry, 0, len(m.staged)+len(m.unstaged))
+	for _, f := range m.staged {
+		if f.Untracked {
+			continue
+		}
+		out = append(out, Entry{Status: f, Staged: true})
+	}
+	for _, f := range m.unstaged {
+		out = append(out, Entry{Status: f, Staged: false})
 	}
 	return out
 }
