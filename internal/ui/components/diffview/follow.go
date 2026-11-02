@@ -1,0 +1,126 @@
+package diffview
+
+import (
+	"sort"
+	"strings"
+
+	"github.com/charmbracelet/x/ansi"
+
+	"samouly.fun/twig/internal/diff"
+)
+
+// displayLine is where a row starts in the viewport's coordinates under soft wrap.
+func (m Model) displayLine(row int) int {
+	if !m.vp.SoftWrap {
+		return row
+	}
+	width := max(1, m.vp.Width())
+	lines := 0
+	for i := 0; i < row && i < len(m.rendered); i++ {
+		lines += max(1, (ansi.StringWidth(m.rendered[i])+width-1)/width)
+	}
+	return lines
+}
+
+// wrapWithBar paints the staging gutter over the wrapped window: the viewport wraps
+// and scrolls in display lines, so the bar cannot live in the row cache.
+func (m Model) wrapWithBar() string {
+	lines := strings.Split(m.vp.View(), "\n")
+	gutter := m.barWidth()
+	cursorLine := -1
+	if m.HasCursor() {
+		cursorLine = m.displayLineOf(m.cursor) - m.vp.YOffset()
+	}
+	for i := range lines {
+		bar := strings.Repeat(" ", gutter)
+		if i == cursorLine {
+			bar = m.barAt(m.cursor)
+		}
+		lines[i] = bar + lines[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// displayLineOf is displayLine with the prefix table, for the paint path.
+func (m Model) displayLineOf(row int) int {
+	if !m.vp.SoftWrap || row < 0 {
+		return row
+	}
+	if row < len(m.wrapPrefix) {
+		return m.wrapPrefix[row]
+	}
+	return m.displayLine(row)
+}
+
+// SyncContent makes the viewport's line count exact, which pushContent skips while a
+// document streams.
+func (m *Model) SyncContent() {
+	if len(m.blank) == 0 {
+		return
+	}
+	m.blank = m.blank[:0]
+	m.pushContent()
+}
+
+// ensureContent brings the viewport's line count up when an append left it behind.
+func (m *Model) ensureContent() {
+	if len(m.blank) == 0 || len(m.blank) >= m.nrows() {
+		return
+	}
+	m.blank = m.blank[:0]
+	m.pushContent()
+}
+
+// SetSide says which half of the file on screen this pane shows.
+func (m *Model) SetSide(staged bool) { m.fileStaged = staged }
+
+// BlockSide says which half of a file a block shows, and how its band names it.
+type BlockSide struct {
+	// Staged is the index side; the worktree side is the other one.
+	Staged bool
+	// Tag is appended to the band line, for the blocks of a doubled path.
+	Tag string
+}
+
+// AppendBlocksSided adds blocks and the side each one shows: a file can appear twice,
+// so the side belongs to the block rather than to the path.
+func (m *Model) AppendBlocksSided(files []*diff.File, sides []BlockSide) {
+	if m.doc == nil || len(files) == 0 {
+		return
+	}
+	tags := make([]string, len(files))
+	staged := make([]bool, len(files))
+	for i := range files {
+		if i < len(sides) {
+			tags[i], staged[i] = sides[i].Tag, sides[i].Staged
+		}
+	}
+	m.appendBlocks(files, tags)
+	m.blockStaged = append(m.blockStaged, staged...)
+}
+
+// CursorStaged reports which half of a file the cursor is in.
+func (m Model) CursorStaged() (bool, bool) {
+	if m.doc == nil {
+		return m.fileStaged, true
+	}
+	if !m.HasCursor() || len(m.blockStaged) == 0 {
+		return false, false
+	}
+	band := sort.SearchInts(m.fileBands, m.cursor)
+	if band >= len(m.fileBands) || m.fileBands[band] > m.cursor {
+		band--
+	}
+	if band < 0 || band >= len(m.blockStaged) {
+		return false, false
+	}
+	return m.blockStaged[band], true
+}
+
+// BandRow is where block i starts.
+func (m Model) BandRow(i int) int {
+	if i < 0 || i >= len(m.fileBands) {
+		return -1
+	}
+	return m.fileBands[i]
+}

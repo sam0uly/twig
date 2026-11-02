@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"samouly.fun/twig/internal/diff"
 	"samouly.fun/twig/internal/ui/styles"
 )
@@ -312,5 +314,78 @@ func TestBoundarySetClampsStaleSpans(t *testing.T) {
 				t.Fatalf("boundary %d outside [0,3] for spans %v", v, spans)
 			}
 		}
+	}
+}
+
+// TestBlockBandsNameTheirSide: a file that is listed twice is in the document
+// as two blocks whose bands are otherwise identical, so the band has to carry
+// the side. A path that is listed once stays bare.
+func TestBlockBandsNameTheirSide(t *testing.T) {
+	files := []*diff.File{
+		docTestFile("semi.txt", 4, "STAGED"),
+		docTestFile("semi.txt", 4, "WORKTREE"),
+		docTestFile("solo.txt", 4, "SOLO"),
+	}
+	m := New(false, styles.New())
+	m.SetSize(80, 30)
+	m.SetDocument(func(i int) *diff.File { return files[i] })
+	m.AppendBlocksSided(files, []BlockSide{
+		{Staged: true, Tag: "  · staged"},
+		{Tag: "  · unstaged"},
+		{},
+	})
+
+	view := ansi.Strip(m.View())
+	for _, want := range []string{"── semi.txt  · staged", "── semi.txt  · unstaged"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("missing band %q in:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "── solo.txt  ·") {
+		t.Fatalf("a single block named its side anyway:\n%s", view)
+	}
+
+	// The tag is decoration; the side a keystroke acts on still comes from the
+	// block.
+	m.SetSelectable(true)
+	if !m.PlaceCursor() {
+		t.Fatal("no cursor in the document")
+	}
+	if got, ok := m.CursorStaged(); !ok || !got {
+		t.Fatalf("first block reads staged=%v ok=%v", got, ok)
+	}
+}
+
+// TestCursorToBandLandsInTheBlock: the document keeps only a window of blocks
+// materialised, so placing the cursor in a band has to be able to ask for that
+// block's rows; a search over unmaterialised rows finds nothing and leaves the
+// cursor somewhere else entirely.
+func TestCursorToBandLandsInTheBlock(t *testing.T) {
+	const n = 12
+	files := make([]*diff.File, n)
+	sides := make([]BlockSide, n)
+	for i := range files {
+		files[i] = docTestFile(fmt.Sprintf("f%d.txt", i+1), 4, "CHANGED")
+	}
+	m := New(false, styles.New())
+	m.SetSize(80, 24)
+	m.SetSelectable(true)
+	m.SetDocument(func(i int) *diff.File { return files[i] })
+	m.AppendBlocksSided(files, sides)
+
+	const want = 7
+	band := m.BandRow(want)
+	if band <= 0 {
+		t.Fatalf("band %d is at row %d", want, band)
+	}
+	m.JumpToBandNow(want)
+	if got := m.YOffset(); got != band {
+		t.Fatalf("the document is at %d, want the band at %d", got, band)
+	}
+	if !m.CursorToBand(want) {
+		t.Fatalf("no row to place the cursor on in the band at %d", band)
+	}
+	if got := m.CursorRow(); got < band || got >= m.BandRow(want+1) {
+		t.Fatalf("cursor on row %d, want inside the block at %d", got, band)
 	}
 }
