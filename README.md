@@ -20,13 +20,13 @@ rules, rename detection and index races behave like the `git` you already use.
 
 ## Why it's fast
 
-|                          | twig                                              | the usual viewer                   |
-| ------------------------ | ------------------------------------------------- | ---------------------------------- |
-| a save                   | ~150 ms, watched, no repaint if nothing changed   | manual refresh, or a full re-read  |
-| a 100000 line file added | 4.7 ms, 14 allocations                            | seconds, hundreds of thousands     |
-| a 5000 line rewrite      | 12.6 ms, 3.0 ms paged                             | quadratic on adversarial edits     |
-| a screen of colour       | ~100 ns a line, 2.8 µs a screen, once, cached     | re-lexes the file, or colours none |
-| idle                     | 0% CPU                                            | a timer that keeps re-reading      |
+|                          | twig                                            | the usual viewer                   |
+| ------------------------ | ----------------------------------------------- | ---------------------------------- |
+| a save                   | ~150 ms, watched, no repaint if nothing changed | manual refresh, or a full re-read  |
+| a 100000 line file added | 4.7 ms, 14 allocations                          | seconds, hundreds of thousands     |
+| a 5000 line rewrite      | 12.6 ms, 3.0 ms paged                           | quadratic on adversarial edits     |
+| a screen of colour       | ~100 ns a line, 2.8 µs a screen, once, cached   | re-lexes the file, or colours none |
+| idle                     | 0% CPU                                          | a timer that keeps re-reading      |
 
 The engine anchors on unique blocks first and only runs Myers inside the gaps,
 under a cost cap, so a rewrite that would pin a core for a minute is a few
@@ -61,27 +61,58 @@ twig log          # browse commits, open any of them
 `H` and `L` bring a sidebar in; the diff gets the whole window otherwise.
 Search and the list filters run as you type, and `esc` clears either.
 
-| Key                                  | Action                                          |
-| ------------------------------------ | ----------------------------------------------- |
-| `enter`                              | open diff / jump to file / expand a tree folder |
-| `esc`                                | back to the sidebar                             |
-| `tab` / `shift+tab`                  | next / previous pane                            |
-| `j` / `k`, `d` / `ctrl+u`, `f` / `b` | scroll the diff                                 |
-| `h` / `l`, `←` / `→`                 | horizontal scroll (when wrap is off)            |
-| `[` / `]`                            | previous / next hunk                            |
-| `J` / `K`                            | next / previous file                            |
-| `g` / `G`                            | top / bottom                                    |
-| `t`                                  | tree / flat listing                             |
-| `a`                                  | all changes in one scroll                       |
-| `H` / `L`                            | left / right sidebar                            |
-| `/`                                  | filter files, or search the diff                |
-| `n` / `N`                            | next / previous match                           |
-| `s` / `u`                            | stage / unstage                                 |
-| `C` / `P`                            | commit / push                                   |
-| `y` / `Y`                            | copy the patch / the hunk                       |
-| `v` / `w`                            | split view / soft wrap                          |
-| `Z` / `c`                            | ignore whitespace / cycle context               |
-| `r` / `?` / `q`                      | refresh / help / quit                           |
+| Key                       | Action                                          |
+| ------------------------- | ----------------------------------------------- |
+| `enter`                   | open diff / jump to file / expand a tree folder |
+| `esc`                     | back to the sidebar                             |
+| `tab` / `shift+tab`       | next / previous pane                            |
+| `j` / `k`, `↑` / `↓`      | move the staging cursor a line                  |
+| `d` / `ctrl+u`, `f` / `b` | scroll the diff                                 |
+| `h` / `l`, `←` / `→`      | horizontal scroll (when wrap is off)            |
+| `[` / `]`                 | previous / next hunk                            |
+| `J` / `K`                 | next / previous file                            |
+| `g` / `G`                 | top / bottom                                    |
+| `t`                       | tree / flat listing                             |
+| `a`                       | all changes in one scroll                       |
+| `H` / `L`                 | left / right sidebar                            |
+| `/`                       | filter files, or search the diff                |
+| `n` / `N`                 | next / previous match                           |
+| `space`                   | stage or unstage what the cursor is on          |
+| `V`                       | select a range, extended with `j` / `k`         |
+| `z`                       | undo the last staging operation                 |
+| `x`                       | discard what the cursor is on                   |
+| `s` / `u`                 | stage / unstage the whole file                  |
+| `C` / `P`                 | commit / push                                   |
+| `y` / `Y`                 | copy the patch / the hunk                       |
+| `v` / `w`                 | split view / soft wrap                          |
+| `Z` / `c`                 | ignore whitespace / cycle context               |
+| `r` / `?` / `q`           | refresh / help / quit                           |
+
+## Staging
+
+The row under the cursor decides what `space` does: a band stages the file, a hunk
+header the hunk, a changed line that line. `V` anchors a range, `j` / `k` extend it,
+`space` acts on it, `V` or `esc` drops it; a range stays in one file.
+
+A staged file edited again has two diffs and is listed twice, one row per diff, so a
+row shows what `space` acts on and each side stages only itself. In `a` the cursor
+spans every file and the block picks the file.
+
+`space` writes at once and `z` reverses the exact record; with `stage-apply:
+"select"` it marks lines, `enter` applies them, `esc` clears them. Either half of a
+`-old` / `+new` pair brings the other, so a change is never staged halfway.
+
+No patches: twig builds the new content, writes it with
+[`hash-object`][git hash-object] `-w` and records it with
+[`update-index`][git update-index] `--cacheinfo`, so git keeps the lock, the rename
+and the objects ([index format][gitformat-index]). Whole file only: binary, submodule,
+symlink, rename, newline-only, and on discard any file with a
+[clean filter][gitattributes] or line ending conversion.
+
+`x` discards what the cursor names at the same three scopes, after showing those
+lines, scrollable and saying where in the list you are: `enter` discards, `esc` keeps,
+`y` stays yank, `z` undoes it. The lines are re-checked at write time, so a file that
+moved under the dialog is refused, not half-applied.
 
 ## Config
 
@@ -102,7 +133,10 @@ it elsewhere. Every key is optional.
   "smooth-scroll": true,
   "log-limit": 200,
   "split-view": false,
-  "syntax": true
+  "syntax": true,
+  "stage": true,
+  "stage-apply": "instant",
+  "discard-confirm": "line"
 }
 ```
 
@@ -117,6 +151,10 @@ footer says `polling` and a two second pass takes over.
 `syntax` colours diff lines by what a token is: keywords, strings, comments,
 numbers, names. It is on by default, needs no external tool and no grammar
 files, and `false` returns the plain diff wash.
+
+`stage` adds the cursor, `false` gives `j`/`k` back. `stage-apply`: `instant`/`select`.
+`discard-confirm` is the smallest discard that asks: `line`, `hunk` (one line goes), `file`
+(only files), `never`.
 
 ## How it works
 
@@ -335,3 +373,7 @@ Apache License, Version 2.0. See [LICENSE](LICENSE).
 [Chroma]: https://github.com/alecthomas/chroma
 [tree-sitter]: https://github.com/tree-sitter/tree-sitter
 [TypeScript]: https://github.com/microsoft/TypeScript
+[gitformat-index]: https://git-scm.com/docs/gitformat-index
+[gitattributes]: https://git-scm.com/docs/gitattributes
+[git hash-object]: https://git-scm.com/docs/git-hash-object
+[git update-index]: https://git-scm.com/docs/git-update-index
