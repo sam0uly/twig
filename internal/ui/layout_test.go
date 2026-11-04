@@ -178,7 +178,7 @@ func TestNeighbourPrefetchCachesDiffs(t *testing.T) {
 		{Path: "b.go", Letter: "M"},
 		{Path: "c.go", Letter: "M"},
 	})
-	m.files.SelectPath("b.go", false)
+	m.files.SelectSide("b.go", false)
 
 	next, cmd := m.prefetchNeighbors()
 	if cmd == nil {
@@ -787,7 +787,7 @@ func TestAllChangesBuildsAggregateAndJumps(t *testing.T) {
 	})
 	m.focus = focusSidebar
 	// Start on the last file so its band is somewhere below the first screen.
-	m.files.SelectPath("c.go", false)
+	m.files.SelectSide("c.go", false)
 
 	next, cmd := m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	m = next.(model)
@@ -843,7 +843,7 @@ func TestAllChangesStreamsChunks(t *testing.T) {
 	})
 	m.focus = focusSidebar
 	// Select the last file: its band only exists once the final chunk lands.
-	m.files.SelectPath("c.go", false)
+	m.files.SelectSide("c.go", false)
 
 	next, cmd := m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	m = next.(model)

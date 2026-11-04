@@ -501,11 +501,11 @@ func TestEachRowLoadsItsOwnSide(t *testing.T) {
 		[]git.FileStatus{{Path: "both.go", Letter: "M"}},
 	)
 
-	m.files.SelectPath("both.go", true)
+	m.files.SelectSide("both.go", true)
 	if path, staged := m.selectedSide(); path != "both.go" || !staged {
 		t.Fatalf("the staged row loaded %q staged=%v", path, staged)
 	}
-	m.files.SelectPath("both.go", false)
+	m.files.SelectSide("both.go", false)
 	if path, staged := m.selectedSide(); path != "both.go" || staged {
 		t.Fatalf("the unstaged row loaded %q staged=%v", path, staged)
 	}

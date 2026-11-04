@@ -202,7 +202,12 @@ func (m *Model) rebuildFiles() {
 	case prevDir != "":
 		m.SelectDir(prevDir)
 	case prev.Path != "":
-		m.SelectPath(prev.Path, prev.Staged)
+		if !m.SelectSide(prev.Path, prev.Staged) {
+			// The side the cursor was on left the listing, which is what
+			// staging the last change of a file does. Staying in the file is
+			// what a restore wants, since the reader's next key lands there.
+			m.selectAnySide(prev.Path)
+		}
 	}
 	// Never leave the cursor parked on a section header, or past the end of a
 	// listing that just got shorter.
@@ -495,18 +500,17 @@ func (m *Model) SelectedFile() (git.FileStatus, bool) {
 	return git.FileStatus{}, false
 }
 
-// SelectPath moves the cursor to the file with the given path.
-func (m *Model) SelectPath(path string, staged bool) {
-	if m.SelectSide(path, staged) {
-		return
-	}
-	// Fall back to any entry of the same path.
+// selectAnySide moves the cursor to any row of a path, whichever side it shows.
+// Only a restore uses it: a partly staged file is listed twice, so a caller that
+// means one diff must ask for that side, or it hands back the other one.
+func (m *Model) selectAnySide(path string) bool {
 	for i, it := range visible(m.files) {
 		if f, ok := it.(fileItem); ok && f.status.Path == path {
 			m.files.Select(i)
-			return
+			return true
 		}
 	}
+	return false
 }
 
 // SelectSide moves the cursor to one side of a path and reports whether that

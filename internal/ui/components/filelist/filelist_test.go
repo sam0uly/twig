@@ -145,7 +145,7 @@ func TestTreeToggleKeepsSelection(t *testing.T) {
 	m := New(30, 20, styles.New())
 	m.SetSize(30, 20)
 	m.SetFiles(nil, treeSample())
-	m.SelectPath("internal/ui/view.go", false)
+	m.SelectSide("internal/ui/view.go", false)
 
 	m.SetTree(true)
 	if f, _ := m.SelectedFile(); f.Path != "internal/ui/view.go" {
@@ -181,7 +181,7 @@ func TestSelectedOrdinalSkipsHeadersAndDirs(t *testing.T) {
 	m.SetFiles(nil, treeSample())
 	m.SetTree(true)
 
-	m.SelectPath("internal/diff/myers.go", false)
+	m.SelectSide("internal/diff/myers.go", false)
 	if got := m.SelectedOrdinal(); got != 4 {
 		t.Fatalf("ordinal = %d, want 4", got)
 	}
@@ -337,11 +337,11 @@ func TestAPartlyStagedFileIsListedTwice(t *testing.T) {
 		t.Fatalf("sections are out of order, want staged first:\n%s", view)
 	}
 	// A row knows its own side, which is what the pane loads.
-	m.SelectPath("both.go", true)
+	m.SelectSide("both.go", true)
 	if _, staged := m.SelectedFile(); !staged {
 		t.Fatal("the staged row does not report the staged side")
 	}
-	m.SelectPath("both.go", false)
+	m.SelectSide("both.go", false)
 	if _, staged := m.SelectedFile(); staged {
 		t.Fatal("the unstaged row does not report the worktree side")
 	}
@@ -356,7 +356,7 @@ func TestShrunkListingKeepsAValidSelection(t *testing.T) {
 	m.SetFiles(nil, treeSample())
 
 	// Select the last file, then take away everything below the first row.
-	m.SelectPath("internal/diff/myers.go", false)
+	m.SelectSide("internal/diff/myers.go", false)
 	m.SetFiles(nil, []git.FileStatus{{Path: "README.md", Letter: "M"}})
 
 	// SelectedFile's bool is the row's staging state, not "is anything
@@ -367,5 +367,38 @@ func TestShrunkListingKeepsAValidSelection(t *testing.T) {
 	}
 	if got.Path != "README.md" {
 		t.Fatalf("selected %q, want README.md", got.Path)
+	}
+}
+
+// TestSelectSideNeverCrossesSides: a partly staged file is listed twice, so a
+// selection that asks for one side must not land on the other. Getting this
+// wrong makes the next keystroke stage the diff the reader is not looking at.
+func TestSelectSideNeverCrossesSides(t *testing.T) {
+	m := New(40, 20, styles.New())
+	m.SetFiles(
+		[]git.FileStatus{{Path: "both.go", Letter: "M"}},
+		[]git.FileStatus{{Path: "both.go", Letter: "M"}},
+	)
+	if !m.SelectSide("both.go", true) {
+		t.Fatal("the staged row was not found")
+	}
+	if _, staged := m.SelectedFile(); !staged {
+		t.Fatal("selecting the staged side put the cursor on the worktree row")
+	}
+	if !m.SelectSide("both.go", false) {
+		t.Fatal("the worktree row was not found")
+	}
+	if _, staged := m.SelectedFile(); staged {
+		t.Fatal("selecting the worktree side put the cursor on the staged row")
+	}
+
+	// A side that is not listed is reported missing, and the cursor is left
+	// where it was rather than moved to the other diff of the same path.
+	m.SetFiles(nil, []git.FileStatus{{Path: "both.go", Letter: "M"}})
+	if m.SelectSide("both.go", true) {
+		t.Fatal("reported a staged row for a file that is only unstaged")
+	}
+	if _, staged := m.SelectedFile(); staged {
+		t.Fatal("the cursor landed on a side that does not exist")
 	}
 }
