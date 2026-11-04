@@ -287,3 +287,37 @@ func mapKinds(kinds []LineKind) []string {
 	}
 	return out
 }
+
+// TestChangeGroupsShowDeletionsFirst: a rewritten block is drawn as its
+// deletions and then its additions. An oversized region is diffed in halves, and
+// each half used to emit its own deletions and additions, which turned one
+// rewritten block into alternating rows. The fixture is big enough to take that
+// path.
+func TestChangeGroupsShowDeletionsFirst(t *testing.T) {
+	var before, after strings.Builder
+	for i := 0; i < 3000; i++ {
+		fmt.Fprintf(&before, "line %d\n", i)
+		if i >= 100 && i <= 1100 {
+			fmt.Fprintf(&after, "changed %d\n", i)
+			continue
+		}
+		fmt.Fprintf(&after, "line %d\n", i)
+	}
+	f := Generate("a.txt", Modified, before.String(), after.String(), GenerateOptions{Context: 3})
+	if len(f.Hunks) == 0 {
+		t.Fatal("the fixture produced no hunks")
+	}
+	for hi, h := range f.Hunks {
+		seenAdd := false
+		for _, l := range h.Lines {
+			switch l.Kind {
+			case Addition:
+				seenAdd = true
+			case Deletion:
+				if seenAdd {
+					t.Fatalf("hunk %d shows a deletion after an addition", hi)
+				}
+			}
+		}
+	}
+}
