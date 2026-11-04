@@ -68,12 +68,43 @@ func (m model) stillChanged(path string, staged bool) bool {
 	return false
 }
 
-// blockSides is the side of each block in a streamed chunk, one per listing row.
-func blockSides(entries []filelist.Entry, from, n int) []diffview.BlockSide {
+// blockSides is the side of each block in a chunk, and the label its band needs. A
+// path the listing holds twice is a file with a change staged and another left in the
+// worktree, so only those blocks say which half they are.
+func blockSides(cfg config.Config, entries []filelist.Entry, from, n int) []diffview.BlockSide {
 	out := make([]diffview.BlockSide, n)
+	seen := make(map[string]bool, len(entries))
+	doubled := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if seen[e.Status.Path] {
+			doubled[e.Status.Path] = true
+			continue
+		}
+		seen[e.Status.Path] = true
+	}
+	label := func(staged bool) string {
+		switch cfg.SideLabels {
+		case config.SideLabelsOff:
+			return ""
+		case config.SideLabelsGlyph:
+			if staged {
+				return "  \u25b2"
+			}
+			return "  \u25c6"
+		}
+		if staged {
+			return "  \u00b7 staged"
+		}
+		return "  \u00b7 unstaged"
+	}
 	for i := range out {
-		if from+i < len(entries) {
-			out[i] = diffview.BlockSide{Staged: entries[from+i].Staged}
+		if from+i >= len(entries) {
+			continue
+		}
+		e := entries[from+i]
+		out[i] = diffview.BlockSide{Staged: e.Staged}
+		if doubled[e.Status.Path] {
+			out[i].Tag = label(e.Staged)
 		}
 	}
 	return out

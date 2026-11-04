@@ -589,7 +589,7 @@ func TestDocumentCarriesEachRowsSide(t *testing.T) {
 		t.Fatalf("%d rows, want one per side", len(entries))
 	}
 	m.view.SetDocument(func(int) *diff.File { return nil })
-	m.view.AppendBlocksSided([]*diff.File{staged, unstaged}, blockSides(entries, 0, 2))
+	m.view.AppendBlocksSided([]*diff.File{staged, unstaged}, blockSides(m.cfg, entries, 0, 2))
 	m.syncStaging()
 
 	// The staged block comes first, so the cursor starts there.
@@ -610,6 +610,43 @@ func TestDocumentCarriesEachRowsSide(t *testing.T) {
 	}
 	if path, side, ok := m.cursorTarget(); path != "both.go" || side || !ok {
 		t.Fatalf("cursorTarget = %q %v %v, want the worktree side of both.go", path, side, ok)
+	}
+}
+
+// TestBlockSidesLabelTheHalves: a file with a change staged and another left in the
+// worktree is listed twice, so its two blocks have to carry the label that tells them
+// apart, in whichever of the three forms the reader asked for.
+func TestBlockSidesLabelTheHalves(t *testing.T) {
+	entries := []filelist.Entry{
+		{Status: git.FileStatus{Path: "both.go"}, Staged: true},
+		{Status: git.FileStatus{Path: "solo.go"}},
+		{Status: git.FileStatus{Path: "both.go"}},
+	}
+	for _, tc := range []struct {
+		mode             string
+		staged, worktree string
+	}{
+		{config.SideLabelsText, "  \u00b7 staged", "  \u00b7 unstaged"},
+		{config.SideLabelsGlyph, "  \u25b2", "  \u25c6"},
+		{config.SideLabelsOff, "", ""},
+		// An unknown value falls back to the default, which is the text.
+		{"nonsense", "  \u00b7 staged", "  \u00b7 unstaged"},
+	} {
+		cfg := config.Default()
+		cfg.SideLabels = tc.mode
+		got := blockSides(cfg, entries, 0, len(entries))
+		if len(got) != 3 {
+			t.Fatalf("%s: %d sides for %d rows", tc.mode, len(got), len(entries))
+		}
+		if !got[0].Staged || got[0].Tag != tc.staged {
+			t.Fatalf("%s: staged row = %+v, want tag %q", tc.mode, got[0], tc.staged)
+		}
+		if got[1].Staged || got[1].Tag != "" {
+			t.Fatalf("%s: single row = %+v, want a bare worktree block", tc.mode, got[1])
+		}
+		if got[2].Staged || got[2].Tag != tc.worktree {
+			t.Fatalf("%s: worktree row = %+v, want tag %q", tc.mode, got[2], tc.worktree)
+		}
 	}
 }
 
