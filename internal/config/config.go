@@ -48,6 +48,9 @@ type Config struct {
 	// DiscardConfirm is the smallest thing a discard asks about: "line",
 	// "hunk", "file" or "never".
 	DiscardConfirm string `json:"discard-confirm"`
+	// SideLabels is how the all-changes document tells the two blocks of a
+	// partly staged file apart: "text", "glyph" or "off".
+	SideLabels string `json:"side-labels"`
 }
 
 // The two ways a staging decision reaches the index.
@@ -66,6 +69,17 @@ const (
 	DiscardConfirmHunk  = "hunk"
 	DiscardConfirmFile  = "file"
 	DiscardConfirmNever = "never"
+)
+
+// How a document names which half of a file a block shows. Only a file that is
+// partly staged has two blocks, and only those have to say it.
+const (
+	// SideLabelsText spells the side out: "staged" / "unstaged".
+	SideLabelsText = "text"
+	// SideLabelsGlyph marks it with one character, for a narrower band.
+	SideLabelsGlyph = "glyph"
+	// SideLabelsOff leaves the band as it is.
+	SideLabelsOff = "off"
 )
 
 // Default returns the built-in default configuration.
@@ -87,6 +101,7 @@ func Default() Config {
 		Stage:            true,
 		StageApply:       StageApplyInstant,
 		DiscardConfirm:   DiscardConfirmLine,
+		SideLabels:       SideLabelsText,
 	}
 }
 
@@ -142,6 +157,11 @@ func Load(path string) (Config, error) {
 	case DiscardConfirmLine, DiscardConfirmHunk, DiscardConfirmFile, DiscardConfirmNever:
 	default:
 		cfg.DiscardConfirm = DiscardConfirmLine
+	}
+	switch cfg.SideLabels {
+	case SideLabelsText, SideLabelsGlyph, SideLabelsOff:
+	default:
+		cfg.SideLabels = SideLabelsText
 	}
 
 	return cfg, nil

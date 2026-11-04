@@ -507,7 +507,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		first := msg.from == 0
-		m.view.AppendBlocksSided(msg.files, blockSides(msg.entries, msg.from, len(msg.files)))
+		m.view.AppendBlocksSided(msg.files, blockSides(m.cfg, msg.entries, msg.from, len(msg.files)))
 		for _, f := range msg.files {
 			m.allAdds += f.Additions
 			m.allDels += f.Deletions

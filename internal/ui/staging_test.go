@@ -589,7 +589,7 @@ func TestDocumentCarriesEachRowsSide(t *testing.T) {
 		t.Fatalf("%d rows, want one per side", len(entries))
 	}
 	m.view.SetDocument(func(int) *diff.File { return nil })
-	m.view.AppendBlocksSided([]*diff.File{staged, unstaged}, blockSides(entries, 0, 2))
+	m.view.AppendBlocksSided([]*diff.File{staged, unstaged}, blockSides(m.cfg, entries, 0, 2))
 	m.syncStaging()
 
 	// The staged block comes first, so the cursor starts there.
@@ -610,6 +610,53 @@ func TestDocumentCarriesEachRowsSide(t *testing.T) {
 	}
 	if path, side, ok := m.cursorTarget(); path != "both.go" || side || !ok {
 		t.Fatalf("cursorTarget = %q %v %v, want the worktree side of both.go", path, side, ok)
+	}
+}
+
+// TestSideTags: the band label is the only thing telling two blocks of one file
+// apart in the all-changes document, so the three modes have to say something
+// different.
+func TestSideTags(t *testing.T) {
+	for _, tc := range []struct {
+		mode   string
+		staged bool
+		want   string
+	}{
+		{config.SideLabelsText, true, "  · staged"},
+		{config.SideLabelsText, false, "  · unstaged"},
+		{config.SideLabelsGlyph, true, "  ▲"},
+		{config.SideLabelsGlyph, false, "  ◆"},
+		{config.SideLabelsOff, true, ""},
+		{config.SideLabelsOff, false, ""},
+		// An unknown value falls back to the default, which is the text.
+		{"nonsense", false, "  · unstaged"},
+	} {
+		if got := sideTag(tc.mode, tc.staged); got != tc.want {
+			t.Fatalf("sideTag(%q, %v) = %q, want %q", tc.mode, tc.staged, got, tc.want)
+		}
+	}
+}
+
+// TestSideTagOnlyForADoubledPath: a path listed once has nothing to tell apart,
+// so its band stays as it was even when the reader asked for labels.
+func TestSideTagOnlyForADoubledPath(t *testing.T) {
+	entries := []filelist.Entry{
+		{Status: git.FileStatus{Path: "both.go"}, Staged: true},
+		{Status: git.FileStatus{Path: "solo.go"}},
+		{Status: git.FileStatus{Path: "both.go"}},
+	}
+	got := blockSides(config.Default(), entries, 0, len(entries))
+	if len(got) != 3 {
+		t.Fatalf("%d sides for %d rows", len(got), len(entries))
+	}
+	if !got[0].Staged || got[0].Tag == "" {
+		t.Fatalf("staged row = %+v, want a staged block with a label", got[0])
+	}
+	if got[1].Staged || got[1].Tag != "" {
+		t.Fatalf("single row = %+v, want a bare worktree block", got[1])
+	}
+	if got[2].Staged || got[2].Tag == "" {
+		t.Fatalf("worktree row = %+v, want a labelled worktree block", got[2])
 	}
 }
 
