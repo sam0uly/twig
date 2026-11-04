@@ -294,6 +294,30 @@ func (f *File) HunkAt(i int) (Hunk, bool) {
 	return h, true
 }
 
+// RowOf finds the rendered row of a changed line, counting the rows of every hunk
+// before it, or -1 when the line is not in the diff. A paged diff answers from its
+// runs, so a line near the end of a huge file costs no walk.
+func (f *File) RowOf(line Line) int {
+	if line.Kind != Addition && line.Kind != Deletion {
+		return -1
+	}
+	if f.page != nil {
+		return f.page.rowOf(line)
+	}
+	for i, l := range f.Lines {
+		if l.Kind != line.Kind {
+			continue
+		}
+		if line.Kind == Addition && line.New != 0 && l.New == line.New {
+			return i
+		}
+		if line.Kind == Deletion && line.Old != 0 && l.Old == line.Old {
+			return i
+		}
+	}
+	return -1
+}
+
 // HunkPatch renders hunk i as patch text, header included.
 func (f *File) HunkPatch(i int) string {
 	h, ok := f.HunkAt(i)

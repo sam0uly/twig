@@ -348,6 +348,39 @@ func (p *plan) hunkLines(i int) []Line {
 // buildPrefix fills in the row prefix index. Every run covers at least one row,
 // so the prefix is strictly increasing and a binary search always lands on the
 // run that owns a row.
+// rowOf is RowOf over the runs: a line belongs to at most one run, so the walk is
+// proportional to the number of hunks, not to the file. A run's first line is its
+// start plus one, which is where the row and the source number line up.
+func (p *plan) rowOf(line Line) int {
+	for i, o := range p.ops {
+		row := int(p.prefix[i])
+		switch o.kind {
+		case opDelete:
+			if line.Kind == Deletion && inRun(line.Old, o.oldStart, o.oldLen) {
+				return row + line.Old - int(o.oldStart) - 1
+			}
+		case opInsert:
+			if line.Kind == Addition && inRun(line.New, o.newStart, o.newLen) {
+				return row + line.New - int(o.newStart) - 1
+			}
+		case opReplace:
+			if line.Kind == Deletion && inRun(line.Old, o.oldStart, o.oldLen) {
+				return row + line.Old - int(o.oldStart) - 1
+			}
+			if line.Kind == Addition && inRun(line.New, o.newStart, o.newLen) {
+				return row + int(o.oldLen) + line.New - int(o.newStart) - 1
+			}
+		}
+	}
+	return -1
+}
+
+// inRun reports whether a one-based source line falls inside a run.
+func inRun(line int, start, length int32) bool {
+	return line > 0 && line >= int(start)+1 && line < int(start)+int(length)+1
+}
+
+// buildPrefix fills the row index that turns a run into its first row.
 func (p *plan) buildPrefix() {
 	p.prefix = make([]int32, len(p.ops)+1)
 	for i, o := range p.ops {

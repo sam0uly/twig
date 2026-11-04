@@ -204,3 +204,46 @@ func TestNoCommonLinesPagesALongAppend(t *testing.T) {
 
 // TestRowOfAgreesBetweenPagingAndRendering: a paged diff answers RowOf from its runs,
 // while a resident one walks its rows. The two must name the same row, or a follow
+// lands beside the change instead of on it.
+func TestRowOfAgreesBetweenPagingAndRendering(t *testing.T) {
+	var before, after strings.Builder
+	for i := 0; i < 4000; i++ {
+		if i%7 == 0 {
+			fmt.Fprintf(&before, "old %d\n", i)
+			fmt.Fprintf(&after, "new %d\n", i)
+			continue
+		}
+		fmt.Fprintf(&before, "same %d\n", i)
+		fmt.Fprintf(&after, "same %d\n", i)
+	}
+	opts := GenerateOptions{Context: 3}
+	rendered := generate("a.go", Modified, before.String(), after.String(), opts, residentLimit)
+	paged := generate("a.go", Modified, before.String(), after.String(), opts, 32)
+	if paged.page == nil {
+		t.Fatal("the fixture must be paged")
+	}
+	if rendered.page != nil {
+		t.Fatal("the fixture must be resident to be a reference")
+	}
+
+	checked := 0
+	for i := range rendered.Hunks {
+		h, ok := rendered.HunkAt(i)
+		if !ok {
+			continue
+		}
+		for _, l := range h.Lines {
+			if l.Kind != Addition && l.Kind != Deletion {
+				continue
+			}
+			want, got := rendered.RowOf(l), paged.RowOf(l)
+			if got != want {
+				t.Fatalf("line %+v: paged row %d, rendered row %d", l, got, want)
+			}
+			checked++
+		}
+	}
+	if checked < 100 {
+		t.Fatalf("checked %d changed lines, want a document with many", checked)
+	}
+}
