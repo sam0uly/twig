@@ -6,8 +6,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"samouly.fun/twig/internal/diff"
 )
@@ -351,14 +354,53 @@ func workSig(root, path string) string {
 	return strconv.FormatInt(info.Size(), 10) + ":" + strconv.FormatInt(info.ModTime().UnixNano(), 10)
 }
 
-// diffFile builds (or returns cached) the diff of one snapshot entry.
-func (rc *repoContext) diffFile(f *snapFile, staged bool, opts Options) (*diff.File, error) {
+// diffJob is one file's diff with both sides already read and the cache
+// consulted: the parts that touch the repository are done, so the generation
+// itself can run on any goroutine.
+type diffJob struct {
+	// key is the cache key the finished diff is stored under.
+	key string
+	// file is a cache hit, which leaves nothing to generate.
+	file *diff.File
+	// cost is the work the generation will take: both sides' bytes.
+	cost int
+
+	path        string
+	kind        diff.ChangeKind
+	oldText     string
+	newText     string
+	opts        diff.GenerateOptions
+	staged      bool
+	oldPath     string
+	modeChanged bool
+}
+
+// build generates the diff a job describes.
+func (j diffJob) build() *diff.File {
+	file := diff.Generate(j.path, j.kind, j.oldText, j.newText, j.opts)
+	file.OldPath = j.path
+	file.NewPath = j.path
+	if j.staged && j.oldPath != "" {
+		file.OldPath = j.oldPath
+	}
+	if j.modeChanged && len(file.Hunks) == 0 {
+		file.Lines = append(file.Lines, diff.Line{
+			Kind: diff.NoNewline,
+			Text: "file mode changed",
+		})
+	}
+	return file
+}
+
+// prepareDiff reads both sides of one snapshot entry and answers from the diff
+// cache when the same contents were already diffed.
+func (rc *repoContext) prepareDiff(f *snapFile, staged bool, opts Options) (diffJob, error) {
 	kind := f.unstagedKind
 	if staged {
 		kind = f.stagedKind
 	}
 	if kind == 0 {
-		return nil, fmt.Errorf("%w for %q", ErrNoChange, f.path)
+		return diffJob{}, fmt.Errorf("%w for %q", ErrNoChange, f.path)
 	}
 
 	oldOID, newOID := f.indexOID, ""
@@ -371,48 +413,103 @@ func (rc *repoContext) diffFile(f *snapFile, staged bool, opts Options) (*diff.F
 		newSide = workSig(rc.root, f.path)
 	}
 
-	key := fmt.Sprintf("%s|%s|%d|%t|%s|%t|%d", oldOID, newSide, opts.Context,
-		opts.IgnoreWhitespace, f.path, staged, kind)
-	if cached, ok := rc.diffs.get(key); ok {
-		return cached, nil
+	j := diffJob{
+		key: fmt.Sprintf("%s|%s|%d|%t|%s|%t|%d", oldOID, newSide, opts.Context,
+			opts.IgnoreWhitespace, f.path, staged, kind),
+		path:        f.path,
+		kind:        kind,
+		opts:        generateOptions(opts),
+		staged:      staged,
+		oldPath:     f.oldPath,
+		modeChanged: f.modeChanged,
+	}
+	if cached, ok := rc.diffs.get(j.key); ok {
+		j.file = cached
+		return j, nil
 	}
 
-	var oldText, newText string
 	var err error
 	if staged {
-		if oldText, err = rc.blob(oldOID); err != nil {
-			return nil, err
+		if j.oldText, err = rc.blob(oldOID); err != nil {
+			return diffJob{}, err
 		}
-		if newText, err = rc.blob(newOID); err != nil {
-			return nil, err
+		if j.newText, err = rc.blob(newOID); err != nil {
+			return diffJob{}, err
 		}
 	} else {
-		if oldText, err = rc.blob(oldOID); err != nil {
-			return nil, err
+		if j.oldText, err = rc.blob(oldOID); err != nil {
+			return diffJob{}, err
 		}
 		if kind == diff.Deleted {
-			newText = ""
-		} else if newText, err = rc.worktreeContent(f.path); err != nil {
+			j.newText = ""
+		} else if j.newText, err = rc.worktreeContent(f.path); err != nil {
 			// An unreadable file is an error, not an empty file: showing the
 			// whole content as deleted would be a lie.
-			return nil, fmt.Errorf("read %q: %w", f.path, err)
+			return diffJob{}, fmt.Errorf("read %q: %w", f.path, err)
 		}
 	}
+	j.cost = len(j.oldText) + len(j.newText)
+	return j, nil
+}
 
-	file := diff.Generate(f.path, kind, oldText, newText, generateOptions(opts))
-	file.OldPath = f.path
-	file.NewPath = f.path
-	if staged && f.oldPath != "" {
-		file.OldPath = f.oldPath
+// diffFile builds (or returns cached) the diff of one snapshot entry.
+func (rc *repoContext) diffFile(f *snapFile, staged bool, opts Options) (*diff.File, error) {
+	j, err := rc.prepareDiff(f, staged, opts)
+	if err != nil {
+		return nil, err
 	}
-	if f.modeChanged && len(file.Hunks) == 0 {
-		file.Lines = append(file.Lines, diff.Line{
-			Kind: diff.NoNewline,
-			Text: "file mode changed",
-		})
+	if j.file != nil {
+		return j.file, nil
 	}
-	rc.diffs.put(key, file)
+	file := j.build()
+	rc.diffs.put(j.key, file)
 	return file, nil
+}
+
+// buildJobs generates prepared diffs, keeping the order they came in and
+// spending the cores on the largest first so one huge file does not finish
+// alone after everything else.
+func (rc *repoContext) buildJobs(jobs []diffJob) []*diff.File {
+	files := make([]*diff.File, len(jobs))
+	work := make([]int, 0, len(jobs))
+	for i := range jobs {
+		if jobs[i].file != nil {
+			files[i] = jobs[i].file
+			continue
+		}
+		work = append(work, i)
+	}
+	sort.Slice(work, func(a, b int) bool { return jobs[work[a]].cost > jobs[work[b]].cost })
+
+	workers := min(runtime.GOMAXPROCS(0), len(work))
+	if workers <= 1 {
+		for _, i := range work {
+			files[i] = jobs[i].build()
+			rc.diffs.put(jobs[i].key, files[i])
+		}
+		return files
+	}
+
+	next := make(chan int, len(work))
+	for _, i := range work {
+		next <- i
+	}
+	close(next)
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				file := jobs[i].build()
+				rc.diffs.put(jobs[i].key, file)
+				files[i] = file
+			}
+		}()
+	}
+	wg.Wait()
+	return files
 }
 
 // statusFiles diffs one column of the snapshot.
