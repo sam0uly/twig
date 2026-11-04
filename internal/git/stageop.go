@@ -3,6 +3,8 @@ package git
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"samouly.fun/twig/internal/diff"
 	"samouly.fun/twig/internal/stage"
@@ -184,6 +186,13 @@ func DiscardLines(path string, sel *stage.Selection, shown []diff.Line) (StageRe
 	if err != nil {
 		return StageResult{}, refusal(path, "cannot merge this selection", err)
 	}
+	// The preview check covers what the reader agreed to. This covers the
+	// window between loading the state and writing it back, where another
+	// process can land a save that the blend knows nothing about: writing here
+	// would replace those newer bytes with a mix built from the older ones.
+	if err := verifyWorktreeUnchanged(st); err != nil {
+		return StageResult{}, err
+	}
 	if err := WriteWorktreeContent(st, []byte(content)); err != nil {
 		return StageResult{}, err
 	}
@@ -195,6 +204,36 @@ func DiscardLines(path string, sel *stage.Selection, shown []diff.Line) (StageRe
 		State:   st,
 		Content: content,
 	}, nil
+}
+
+// verifyWorktreeUnchanged reads the file again at the write boundary and
+// compares it with the bytes the blend was built from. It is a content check,
+// so a save that leaves this selection's lines alone is still refused: the
+// blend would write the whole file back, and the reader never saw the rest.
+func verifyWorktreeUnchanged(st StageState) error {
+	rc, err := open()
+	if err != nil {
+		return err
+	}
+	full := filepath.Join(rc.root, filepath.FromSlash(st.Path))
+	now, err := os.ReadFile(full)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		if st.WorkKind != diff.Deleted {
+			return fmt.Errorf("%w: %s is gone", ErrStale, st.Path)
+		}
+		return nil
+	case err != nil:
+		return err
+	case st.WorkKind == diff.Deleted:
+		// It was gone when the state was loaded and is back now, so the bytes
+		// about to be written are not the ones the reader was shown.
+		return fmt.Errorf("%w: %s was recreated", ErrStale, st.Path)
+	}
+	if string(now) != st.RawWorkText {
+		return fmt.Errorf("%w: %s changed while it was being written", ErrStale, st.Path)
+	}
+	return nil
 }
 
 // ErrStale is wrapped when the file changed between the preview and the write, so

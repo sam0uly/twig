@@ -343,3 +343,48 @@ func TestDiscardRefusesAStalePreview(t *testing.T) {
 		t.Fatalf("worktree holds %q, want %q", got, want)
 	}
 }
+
+// TestDiscardRefusesAWriteRacedEdit covers the gap the preview check cannot:
+// the state is read, then another process saves before the blend reaches the
+// disk. Writing then would replace those newer bytes with a mix built from the
+// older ones, so the write boundary re-reads the file.
+func TestDiscardRefusesAWriteRacedEdit(t *testing.T) {
+	h := newRepoHarness(t)
+	h.write("f.txt", "one\ntwo\nthree\n")
+	h.commitAll("base")
+	h.write("f.txt", "one\nTWO\nthree\n")
+
+	st, err := LoadStageState("f.txt")
+	if err != nil {
+		t.Fatalf("LoadStageState: %v", err)
+	}
+	if err := verifyWorktreeUnchanged(st); err != nil {
+		t.Fatalf("an unchanged file was refused: %v", err)
+	}
+
+	// The save lands after the state was loaded and before the write.
+	h.write("f.txt", "one\nTWO\nthree\nfour\n")
+	if err := verifyWorktreeUnchanged(st); !errors.Is(err, ErrStale) {
+		t.Fatalf("a raced write was not refused: %v", err)
+	}
+
+	// The same goes the other way: a file that was deleted and came back.
+	h.write("gone.txt", "a\n")
+	h.commitAll("base file")
+	if err := os.Remove(filepath.Join(h.dir, "gone.txt")); err != nil {
+		t.Fatal(err)
+	}
+	invalidate()
+	gone, err := LoadStageState("gone.txt")
+	if err != nil {
+		t.Fatalf("LoadStageState: %v", err)
+	}
+	if err := verifyWorktreeUnchanged(gone); err != nil {
+		t.Fatalf("a still deleted file was refused: %v", err)
+	}
+	h.write("gone.txt", "b\n")
+	invalidate()
+	if err := verifyWorktreeUnchanged(gone); !errors.Is(err, ErrStale) {
+		t.Fatalf("a recreated file was not refused: %v", err)
+	}
+}
