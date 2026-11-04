@@ -203,13 +203,16 @@ func (m Model) itemAt(row int) Item {
 		if l.Kind != diff.Addition && l.Kind != diff.Deletion {
 			continue
 		}
-		key, ok := stage.LineOf(l)
-		if !ok {
-			continue
-		}
-		return Item{Kind: ItemLine, Hunk: stage.HunkOf(f, key), Line: l}
+		// The hunk is the last header above the row, which the layout already knows.
+		// Asking the diff would walk and materialise every hunk body on the way.
+		return Item{Kind: ItemLine, Hunk: m.hunkOfRow(row), Line: l}
 	}
 	return Item{}
+}
+
+// hunkOfRow names the hunk a row falls in: the last header above it, or -1.
+func (m Model) hunkOfRow(row int) int {
+	return sort.SearchInts(m.hunks, row) - 1
 }
 
 // CursorItem is the object under the cursor.

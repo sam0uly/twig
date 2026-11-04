@@ -276,23 +276,3 @@ func AllSelection(f *diff.File) *Selection {
 	}
 	return sel
 }
-
-// HunkOf reports which hunk holds a line, or -1. The diffview asks this to
-// turn a cursor row into the hunk under it.
-func HunkOf(f *diff.File, l Line) int {
-	for i := range f.Hunks {
-		h, ok := f.HunkAt(i)
-		if !ok {
-			continue
-		}
-		for _, row := range h.Lines {
-			switch {
-			case l.Side == Pre && row.Kind == diff.Deletion && row.Old == l.Num:
-				return i
-			case l.Side == Post && row.Kind == diff.Addition && row.New == l.Num:
-				return i
-			}
-		}
-	}
-	return -1
-}
