@@ -9,58 +9,47 @@ import (
 	"time"
 )
 
-// GenerateOptions controls how a diff is generated between two file
-// contents.
+// GenerateOptions controls how a diff is generated between two file contents.
 type GenerateOptions struct {
 	// Context is the number of unchanged lines shown around hunks.
 	Context int
-	// IgnoreWhitespace collapses whitespace when comparing lines; the
-	// original text is still displayed.
+	// IgnoreWhitespace collapses whitespace when comparing lines; the text is still
+	// displayed as it is.
 	IgnoreWhitespace bool
 }
 
-// pageRows is the number of rows above which a diff keeps a run-length encoded
-// plan and rebuilds pages on demand instead of holding every rendered line.
+// pageRows is the row count above which a diff keeps a run-length encoded plan.
 const pageRows = 4096
 
 const (
-	// generateBudget bounds how long one file's diff may take. Past it the
-	// remaining unmatched regions are reported as wholesale replacements, which
-	// is always a valid script: the field's diff tools bound their work the same
-	// way (difftastic's byte and graph limits, diff-match-patch's timeout).
+	// generateBudget bounds how long one file's diff may take: past it the remaining
+	// regions are reported as wholesale replacements, which is always valid.
 	generateBudget = 2 * time.Second
 
-	// exactRows is the largest region that gets an exact Myers script. Above it
-	// the region is anchored first, and only its gaps are diffed exactly.
+	// exactRows is the largest region that gets an exact Myers script; above it the
+	// region is anchored first.
 	exactRows = 4096
 
-	// anchorBlock is the granularity of the anchoring pre-pass, in lines. A
-	// block that occurs exactly once on each side is a safe anchor, which is
-	// the Bentley-McIlroy idea and what git calls patience/histogram matching.
+	// anchorBlock is the granularity of the anchoring pre-pass, in lines: a block that
+	// occurs once on each side is a safe anchor (Bentley-McIlroy).
 	anchorBlock = 64
 
-	// maxPlanLines is the largest line count a plan can address: runs store
-	// their source lines in int32 fields.
+	// maxPlanLines is the largest line count a plan can address: runs use int32.
 	maxPlanLines = math.MaxInt32 - 1
 )
 
-// lineSeed seeds the per-process line hashing. The seed is random so a crafted
-// input cannot force collisions; nothing is persisted, so it need not be stable.
+// lineSeed seeds the per-process line hashing, randomly so a crafted input cannot
+// force collisions. Nothing is persisted, so it need not be stable.
 var lineSeed = maphash.MakeSeed()
 
-// Generate produces a File diff directly from two file contents, bypassing
-// patch text entirely. It is the engine used by the go-git backend: line level
-// differences come from anchored Myers, and word level highlights are annotated
-// right after, so the whole pipeline is a single pass with no intermediate
-// patch parsing. A diff with more rows than pageRows keeps a run-length encoded
-// plan and rebuilds pages as they are painted.
+// Generate produces a File diff from two file contents, with no patch text in
+// between: differences come from anchored Myers, word highlights are annotated right
+// after, and a diff with more rows than pageRows keeps a plan and pages it.
 func Generate(path string, kind ChangeKind, oldText, newText string, opts GenerateOptions) *File {
 	return generate(path, kind, oldText, newText, opts, pageRows)
 }
 
-// generate is Generate with an explicit page limit. A limit of zero keeps every
-// diff paged and a huge one keeps it resident, which is how the tests compare
-// the two representations of the same input.
+// generate is Generate with an explicit page limit; zero pages every diff.
 func generate(path string, kind ChangeKind, oldText, newText string, opts GenerateOptions, pageLimit int) (f *File) {
 	f = &File{
 		OldPath: path,
@@ -68,8 +57,7 @@ func generate(path string, kind ChangeKind, oldText, newText string, opts Genera
 		Kind:    kind,
 	}
 
-	// A diff engine bug must never take the whole viewer down: degrade to a
-	// one-line notice instead of letting a panic escape.
+	// A diff engine bug must never take the viewer down: degrade to a notice.
 	defer func() {
 		if r := recover(); r != nil {
 			f.Binary = false
@@ -90,23 +78,93 @@ func generate(path string, kind ChangeKind, oldText, newText string, opts Genera
 	return f
 }
 
-// build runs the diff and lays the result out in whichever representation keeps
-// memory proportional to the change rather than to the file.
+// build runs the diff and keeps memory proportional to the change, not the file.
 func build(f *File, old, new text, opts GenerateOptions, pageLimit int) {
-	// A file that only gained or only lost lines has exactly one hunk and needs
-	// no matching at all: interning millions of lines to discover that is the
-	// expensive half of a whole-file addition, so it is skipped outright.
+	// A file that only gained or lost lines has one hunk and needs no matching, which
+	// would intern every line to discover nothing.
 	if old.n() == 0 || new.n() == 0 {
 		install(f, wholeFilePlan(old, new), pageLimit)
 		return
 	}
 
+	// Content that only grew or shrank at its end needs no matching: its head is the
+	// same, so a file something is appending to costs a scan instead of a diff.
+	if delta, ok := tailEdit(old, new); ok {
+		install(f, tailPlan(old, new, delta, max(0, opts.Context)), pageLimit)
+		return
+	}
+
+	buildEdits(f, old, new, opts, pageLimit)
+}
+
+// buildEdits is the general path: match the two sides, then page the result.
+func buildEdits(f *File, old, new text, opts GenerateOptions, pageLimit int) {
 	edits := lineDiff(old, new, opts.IgnoreWhitespace, time.Now().Add(generateBudget))
 	windows := hunkWindows(edits, old, new, max(0, opts.Context))
 	if len(windows) == 0 {
 		return
 	}
 	install(f, buildPlan(old, new, edits, windows), pageLimit)
+}
+
+// tailEdit reports how many lines content gained at its end: positive for a tail
+// append, negative for a tail cut. A last line without its terminator is not a tail
+// edit, since the bytes after it extend that line rather than add one.
+func tailEdit(old, new text) (int, bool) {
+	if !strings.HasSuffix(old.s, "\n") {
+		return 0, false
+	}
+	if strings.HasPrefix(new.s, old.s) {
+		return new.n() - old.n(), true
+	}
+	if !strings.HasSuffix(new.s, "\n") || !strings.HasPrefix(old.s, new.s) {
+		return 0, false
+	}
+	return -(old.n() - new.n()), true
+}
+
+// tailPlan is the plan of a tail edit: the context lines above it, then the whole
+// run of added or removed lines as one hunk.
+func tailPlan(old, new text, delta, context int) *plan {
+	p := &plan{old: old, new: new, headers: make([]string, 0, 1), hunks: make([]int32, 0, 1)}
+	if delta == 0 {
+		return p
+	}
+	// The change sits after the shorter side, so that is what can be context.
+	common := min(old.n(), new.n())
+	ctx := min(max(0, context), common)
+
+	p.ops = append(p.ops, op{kind: opHeader})
+	if ctx > 0 {
+		p.ops = append(p.ops, op{
+			kind:     opEqual,
+			oldStart: int32(common - ctx),
+			oldLen:   int32(ctx),
+			newStart: int32(common - ctx),
+			newLen:   int32(ctx),
+		})
+	}
+	// Starts are 1-based where a count is not zero, as the general path leaves them.
+	var oldStart, newStart int
+	if ctx > 0 {
+		oldStart, newStart = common-ctx+1, common-ctx+1
+	} else if delta > 0 {
+		newStart = old.n() + 1
+	} else {
+		oldStart = new.n() + 1
+	}
+	if delta > 0 {
+		p.ops = append(p.ops, op{kind: opInsert, newStart: int32(old.n()), newLen: int32(delta)})
+		p.headers = append(p.headers, hunkHeader(oldStart, ctx, newStart, ctx+delta))
+		p.adds = delta
+	} else {
+		p.ops = append(p.ops, op{kind: opDelete, oldStart: int32(new.n()), oldLen: int32(-delta)})
+		p.headers = append(p.headers, hunkHeader(oldStart, ctx-delta, newStart, ctx))
+		p.dels = -delta
+	}
+	p.hunks = append(p.hunks, 0)
+	p.buildPrefix()
+	return p
 }
 
 // install attaches a plan to the file in the representation it deserves.
@@ -117,8 +175,7 @@ func install(f *File, p *plan, pageLimit int) {
 	f.Additions, f.Deletions = p.adds, p.dels
 	f.Hunks = p.hunkSkeletons()
 
-	// A run stores its source lines in int32 fields, so a file with more lines
-	// than that keeps rendered lines instead.
+	// A run stores source lines in int32 fields: beyond that, keep rendered lines.
 	plannable := p.old.n() <= maxPlanLines && p.new.n() <= maxPlanLines
 	if p.rows() > pageLimit && plannable {
 		f.page = p
@@ -128,8 +185,7 @@ func install(f *File, p *plan, pageLimit int) {
 	f.attachHunks()
 }
 
-// wholeFilePlan is the plan of a file that exists on only one side: one hunk,
-// one run. It is O(1) work no matter how many lines the file has.
+// wholeFilePlan is the plan of a file that exists on one side: one hunk, one run.
 func wholeFilePlan(old, new text) *plan {
 	p := &plan{old: old, new: new, headers: make([]string, 0, 1), hunks: make([]int32, 0, 1)}
 	switch {
@@ -174,23 +230,17 @@ const (
 	editDelete
 )
 
-// edit is one step of the line-level difference: a kind plus the two source
-// line cursors, which stay 32 bit so a multi-million line script stays small.
+// edit is one step of the difference: a kind plus the two source line cursors, kept
+// 32 bit so a multi-million line script stays small.
 type edit struct {
 	kind   editKind
 	oldIdx int32 // index into the old text for equal/delete
 	newIdx int32 // index into the new text for equal/insert
 }
 
-// lineDiff computes the edit script between two indexed texts. It trims the
-// common ends, then diffs the middle by anchoring: identical blocks of lines are
-// matched first (Bentley-McIlroy; the idea git credits as patience/histogram),
-// and only the unmatched gaps get an exact Myers script. Work and memory are
-// therefore proportional to the change, not to the file, and a region with no
-// anchors is split until it is small enough to diff exactly.
-// diffState carries everything one file's diff needs across its regions: the two
-// sources, a line hash per line (computed once, so a recursive split never
-// rehashes the file), and the work budget.
+// diffState carries what one file's diff needs across its regions: the sources, a
+// line hash per line (computed once, so a recursive split never rehashes), and the
+// work budget.
 type diffState struct {
 	old, new text
 	oldH     []uint64 // nil when the file is small enough to hash inline
@@ -200,12 +250,9 @@ type diffState struct {
 	out      []edit
 }
 
-// lineDiff computes the edit script between two indexed texts. It trims the
-// common ends, then diffs the middle by anchoring: identical blocks of lines are
-// matched first (Bentley-McIlroy; the idea git credits as patience/histogram),
-// and only the unmatched gaps get an exact Myers script. Work and memory are
-// therefore proportional to the change, not to the file, and a region with no
-// anchors is split until it is small enough to diff exactly.
+// lineDiff computes the edit script between two indexed texts: it trims the common
+// ends, then anchors the middle (Bentley-McIlroy), so work is proportional to the
+// change and only the gaps get an exact Myers script.
 func lineDiff(old, new text, ignoreWS bool, deadline time.Time) []edit {
 	p := 0
 	for p < old.n() && p < new.n() && sameLine(old.line(p), new.line(p), ignoreWS) {
@@ -223,8 +270,7 @@ func lineDiff(old, new text, ignoreWS bool, deadline time.Time) []edit {
 		st.out = append(st.out, edit{kind: editEqual, oldIdx: int32(i), newIdx: int32(i)})
 	}
 
-	// Hash the middle once. A split recurses over the same lines many times, and
-	// hashing them each time is what dominates a large rewrite.
+	// Hash the middle once: a split recurses over the same lines many times.
 	ahi, bhi := old.n()-sfx, new.n()-sfx
 	if ahi-p > exactRows || bhi-p > exactRows {
 		st.oldH = hashLines(old, p, ahi, ignoreWS)
@@ -366,7 +412,13 @@ func (st *diffState) coarse(alo, ahi, blo, bhi int) {
 // bounded Myers match, and let it fall back to anchoring an intractable region
 // on unique lines.
 func (st *diffState) exact(alo, ahi, blo, bhi int) {
-	a, b := st.ids(alo, ahi, blo, bhi)
+	a, b, shared := st.ids(alo, ahi, blo, bhi)
+	if !shared {
+		// Nothing on one side appears on the other: the only script is a wholesale
+		// replacement, and matching would be work with a known answer.
+		st.coarse(alo, ahi, blo, bhi)
+		return
+	}
 	for _, e := range diffIDs(a, b) {
 		e.oldIdx += int32(alo)
 		e.newIdx += int32(blo)
@@ -377,8 +429,9 @@ func (st *diffState) exact(alo, ahi, blo, bhi int) {
 // ids interns the lines of two ranges into dense ids keyed by their hash and
 // verified against the line it came from, so a collision moves to the next probe
 // slot instead of quietly equating two different lines. Unlike a string-keyed
-// map the keys are eight bytes and no source line is retained.
-func (st *diffState) ids(alo, ahi, blo, bhi int) ([]int32, []int32) {
+// map the keys are eight bytes and no source line is retained. It also reports
+// whether the two ranges share a line at all.
+func (st *diffState) ids(alo, ahi, blo, bhi int) (x, y []int32, shared bool) {
 	byKey := make(map[uint64]int32, (ahi-alo)+(bhi-blo))
 	texts := make([]string, 0, (ahi-alo)+(bhi-blo))
 
@@ -404,17 +457,23 @@ func (st *diffState) ids(alo, ahi, blo, bhi int) ([]int32, []int32) {
 		return s
 	}
 
-	x := make([]int32, ahi-alo)
+	x = make([]int32, ahi-alo)
 	for i := range x {
 		line := alo + i
 		x[i] = get(st.hashOld(line), norm(st.old.line(line)))
 	}
-	y := make([]int32, bhi-blo)
+	// The ids the old side introduced are the ones below this count: an id at or
+	// above it can only come from the new side.
+	oldIDs := int32(len(texts))
+	y = make([]int32, bhi-blo)
 	for i := range y {
 		line := blo + i
 		y[i] = get(st.hashNew(line), norm(st.new.line(line)))
+		if y[i] < oldIDs {
+			shared = true
+		}
 	}
-	return x, y
+	return x, y, shared
 }
 
 // lineKey is the map key for the probe-th candidate of a line hash.
@@ -853,6 +912,35 @@ func buildPlan(old, new text, edits []edit, windows []hunkWindow) *plan {
 
 		var oldStart, newStart, oldCount, newCount int
 		runs = runs[:0]
+		// A change group is drawn deletions first, then additions. The edit
+		// script can hand them over interleaved (an oversized region is split
+		// in halves, and each half emits its own deletions then its own
+		// additions), which reads as alternating blocks instead of one
+		// rewritten one. Grouping the run keeps the rows canonical.
+		var change []edit
+		flush := func() {
+			for _, e := range change {
+				if e.kind != editDelete {
+					continue
+				}
+				if n := len(runs); n > 0 && runs[n-1].kind == opDelete {
+					runs[n-1].oldLen++
+				} else {
+					runs = append(runs, op{kind: opDelete, oldStart: e.oldIdx, newStart: e.newIdx, oldLen: 1})
+				}
+			}
+			for _, e := range change {
+				if e.kind == editDelete {
+					continue
+				}
+				if n := len(runs); n > 0 && runs[n-1].kind == opInsert {
+					runs[n-1].newLen++
+				} else {
+					runs = append(runs, op{kind: opInsert, oldStart: e.oldIdx, newStart: e.newIdx, newLen: 1})
+				}
+			}
+			change = change[:0]
+		}
 		for aligned < w.end && ei < len(edits) {
 			e := edits[ei]
 			ei++
@@ -863,6 +951,7 @@ func buildPlan(old, new text, edits []edit, windows []hunkWindow) *plan {
 
 			switch e.kind {
 			case editEqual:
+				flush()
 				if oldStart == 0 {
 					oldStart = int(e.oldIdx) + 1
 				}
@@ -883,24 +972,17 @@ func buildPlan(old, new text, edits []edit, windows []hunkWindow) *plan {
 					oldStart = int(e.oldIdx) + 1
 				}
 				oldCount++
-				if n := len(runs); n > 0 && runs[n-1].kind == opDelete {
-					runs[n-1].oldLen++
-				} else {
-					runs = append(runs, op{kind: opDelete, oldStart: e.oldIdx, newStart: e.newIdx, oldLen: 1})
-				}
+				change = append(change, e)
 
 			default:
 				if newStart == 0 {
 					newStart = int(e.newIdx) + 1
 				}
 				newCount++
-				if n := len(runs); n > 0 && runs[n-1].kind == opInsert {
-					runs[n-1].newLen++
-				} else {
-					runs = append(runs, op{kind: opInsert, oldStart: e.oldIdx, newStart: e.newIdx, newLen: 1})
-				}
+				change = append(change, e)
 			}
 		}
+		flush()
 
 		p.headers = append(p.headers, hunkHeader(oldStart, oldCount, newStart, newCount))
 		p.ops[header] = op{kind: opHeader, oldStart: int32(len(p.headers) - 1)}

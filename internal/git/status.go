@@ -116,16 +116,28 @@ func DiffTargets(targets []DiffTarget, opts Options) ([]*diff.File, error) {
 		return nil, err
 	}
 
-	files := make([]*diff.File, 0, len(targets))
-	for _, t := range targets {
-		var f *diff.File
-		if sf, ok := snap.fileFor(t.Path, t.Staged); ok {
-			f, _ = rc.diffFile(sf, t.Staged, opts)
+	files := make([]*diff.File, len(targets))
+	// Reading both sides is a stat and a read per file, done here so nothing
+	// touches the repository off this goroutine. The diffs themselves are the
+	// expensive part and are independent, so they are built on the cores.
+	jobs := make([]diffJob, len(targets))
+	for i, t := range targets {
+		sf, ok := snap.fileFor(t.Path, t.Staged)
+		if !ok {
+			files[i] = unavailable(t.Path)
+			continue
 		}
-		if f == nil {
-			f = unavailable(t.Path)
+		if jobs[i], err = rc.prepareDiff(sf, t.Staged, opts); err != nil {
+			files[i] = unavailable(t.Path)
 		}
-		files = append(files, f)
+	}
+	for i, f := range rc.buildJobs(jobs) {
+		if files[i] == nil {
+			files[i] = f
+		}
+		if files[i] == nil {
+			files[i] = unavailable(targets[i].Path)
+		}
 	}
 	return files, nil
 }
