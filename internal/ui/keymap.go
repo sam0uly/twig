@@ -221,11 +221,11 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("l/→", "scroll right"),
 		),
 		PageUp: key.NewBinding(
-			key.WithKeys("b", "pgup"),
+			key.WithKeys("b", "pgup", "ctrl+u"),
 			key.WithHelp("b/pgup", "page up"),
 		),
 		PageDown: key.NewBinding(
-			key.WithKeys("f", "pgdown"),
+			key.WithKeys("f", "pgdown", "d", "ctrl+d"),
 			key.WithHelp("f/pgdn", "page down"),
 		),
 		ToggleWrap: key.NewBinding(

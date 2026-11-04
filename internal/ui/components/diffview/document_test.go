@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
 
@@ -387,5 +388,127 @@ func TestCursorToBandLandsInTheBlock(t *testing.T) {
 	}
 	if got := m.CursorRow(); got < band || got >= m.BandRow(want+1) {
 		t.Fatalf("cursor on row %d, want inside the block at %d", got, band)
+	}
+}
+
+// TestHunkNavigationTakesTheCursor: ] and [ used to scroll the window and leave
+// the cursor behind, so the next keystroke acted on a row the reader could not
+// see. The cursor goes to the hunk, and in a document that means across blocks.
+func TestHunkNavigationTakesTheCursor(t *testing.T) {
+	files := []*diff.File{
+		docTestFile("a.txt", 40, "FIRST"),
+		docTestFile("b.txt", 40, "SECOND"),
+	}
+	m := New(false, styles.New())
+	m.SetSize(80, 12)
+	m.SetSmooth(false)
+	m.SetSelectable(true)
+	m.SetCursorFocus(true)
+	m.SetDocument(func(i int) *diff.File { return files[i] })
+	m.AppendBlocksSided(files, make([]BlockSide, len(files)))
+
+	m.GotoTop()
+	if !m.HasCursor() {
+		t.Fatal("no cursor at the top")
+	}
+
+	m.NextHunk()
+	idx := m.CurrentHunkIndex()
+	if idx < 0 || idx >= len(m.hunks) {
+		t.Fatalf("hunk index %d for %d hunks", idx, len(m.hunks))
+	}
+	if got, want := m.CursorRow(), m.hunks[idx]; got != want {
+		t.Fatalf("cursor on row %d, want the hunk header at %d", got, want)
+	}
+	first := m.hunks[idx]
+
+	// The next hunk is in the other block: the cursor has to cross into it.
+	m.NextHunk()
+	idx = m.CurrentHunkIndex()
+	if idx < 0 || idx >= len(m.hunks) {
+		t.Fatalf("hunk index %d for %d hunks", idx, len(m.hunks))
+	}
+	second := m.hunks[idx]
+	if second <= first {
+		t.Fatalf("the second hunk at %d is not past the first at %d", second, first)
+	}
+	if got := m.CursorRow(); got != second {
+		t.Fatalf("cursor on row %d, want the hunk header at %d", got, second)
+	}
+	if second < m.BandRow(1) {
+		t.Fatalf("the second hunk at %d is still in the first block", second)
+	}
+
+	m.PrevHunk()
+	if got := m.CursorRow(); got != first {
+		t.Fatalf("prev hunk put the cursor on row %d, want %d", got, first)
+	}
+}
+
+// TestGotoBottomLandsOnTheLastChange: the last block of a document is not
+// materialised until something asks for it, and a row whose block is evicted
+// answers nothing, so G used to stop on a hunk header in the middle of the
+// document.
+func TestGotoBottomLandsOnTheLastChange(t *testing.T) {
+	const n = 12
+	files := make([]*diff.File, n)
+	for i := range files {
+		files[i] = docTestFile(fmt.Sprintf("f%d.txt", i+1), 40, "LAST")
+	}
+	m := New(false, styles.New())
+	m.SetSize(80, 16)
+	m.SetSelectable(true)
+	m.SetDocument(func(i int) *diff.File { return files[i] })
+	m.AppendBlocksSided(files, make([]BlockSide, n))
+
+	m.GotoBottom()
+	if !m.HasCursor() {
+		t.Fatal("no cursor after G")
+	}
+	row := m.CursorRow()
+	if want := m.lastItemRow(); row != want {
+		t.Fatalf("cursor on row %d, want the last row that acts at %d", row, want)
+	}
+	if row < m.BandRow(n-1) {
+		t.Fatalf("cursor on row %d, want it in the last block at %d", row, m.BandRow(n-1))
+	}
+	if !m.cursorInWindow() {
+		t.Fatalf("the last row at %d is off the window at %d", row, m.YOffset())
+	}
+}
+
+// TestGotoBottomGlidesToTheEnd: the end of a document is far away, so G is the
+// move most likely to be cut short by a glide that stops halfway.
+func TestGotoBottomGlidesToTheEnd(t *testing.T) {
+	const n = 12
+	files := make([]*diff.File, n)
+	for i := range files {
+		files[i] = docTestFile(fmt.Sprintf("f%d.txt", i+1), 40, "LAST")
+	}
+	m := New(true, styles.New())
+	m.SetSize(80, 16)
+	m.SetSelectable(true)
+	m.SetDocument(func(i int) *diff.File { return files[i] })
+	m.AppendBlocksSided(files, make([]BlockSide, n))
+	m.ensureContent()
+
+	m.GotoBottom()
+	if !m.anim {
+		t.Fatal("G did not start a glide")
+	}
+	at := time.Now()
+	for i := 0; i < 400 && m.anim; i++ {
+		at = at.Add(frameInterval)
+		next, _ := m.Update(scrollFrameMsg{seq: m.animSeq, at: at})
+		m = next
+	}
+	if m.anim {
+		t.Fatal("the glide never settled")
+	}
+	if got, want := m.YOffset(), m.maxScroll(); got != want {
+		t.Fatalf("the glide stopped at %d, want the end of the diff at %d", got, want)
+	}
+	if !m.cursorInWindow() {
+		t.Fatalf("the cursor at %d is off the window at %d", m.CursorRow(), m.YOffset())
 	}
 }

@@ -225,6 +225,56 @@ func (m Model) nextItemRow(from, dir int) int {
 	return -1
 }
 
+// lastItemRow finds the last actionable row in the document, or -1.
+func (m Model) lastItemRow() int {
+	for row := m.nrows() - 1; row >= 0; row-- {
+		if m.itemAt(row).Kind != ItemNone {
+			return row
+		}
+	}
+	return -1
+}
+
+// moveByPage moves the cursor a screenful, the way j and k move it a line. With a
+// range anchored the selection is extended by the same amount.
+func (m *Model) moveByPage(rows int) {
+	dir, steps := 1, rows
+	if rows < 0 {
+		dir, steps = -1, -rows
+	}
+	if !m.HasCursor() && !m.PlaceCursor() {
+		return
+	}
+	// A page walks over rows the document has not built yet, and a row whose
+	// block is evicted answers nothing: without these blocks the cursor would
+	// stop on a band or a hunk header instead of the line under it.
+	m.materialiseSpan(m.cursor, m.cursor+dir*m.vpHeight())
+	if m.RangeActive() {
+		m.ExtendCursor(dir * steps)
+		return
+	}
+	m.MoveCursor(dir * steps)
+}
+
+// materialiseSpan builds every block the rows between two positions fall into,
+// which is the span of a screen: the work a paint would do anyway.
+func (m *Model) materialiseSpan(from, to int) {
+	if m.doc == nil || len(m.fileBands) == 0 {
+		return
+	}
+	lo, hi := min(from, to), max(from, to)
+	for i, start := range m.fileBands {
+		end := m.nrows() - 1
+		if i+1 < len(m.fileBands) {
+			end = m.fileBands[i+1] - 1
+		}
+		if end < lo || start > hi {
+			continue
+		}
+		m.rowAt(start)
+	}
+}
+
 // firstItemRow finds the first actionable row at or after from.
 func (m Model) firstItemRow(from int) int {
 	for row := max(0, from); row < m.nrows(); row++ {
@@ -498,10 +548,78 @@ func (m *Model) scrollCursorIntoView() {
 	line := m.displayLineOf(m.cursor)
 	switch {
 	case line < y:
-		m.vp.SetYOffset(line)
+		m.glideTo(line)
 	case line >= y+h:
-		m.vp.SetYOffset(line - h + 1)
+		m.glideTo(line - h + 1)
 	}
+}
+
+// cursorInWindow reports whether the row the cursor names is on screen.
+func (m Model) cursorInWindow() bool {
+	if m.cursor < 0 {
+		return false
+	}
+	line := m.displayLineOf(m.cursor)
+	y := m.vp.YOffset()
+	return line >= y && line < y+m.vpHeight()
+}
+
+// firstItemBetween finds the first actionable row whose display line is in
+// [top, bottom), searching from the top down when dir is forward.
+func (m Model) firstItemBetween(top, bottom, dir int) int {
+	if dir > 0 {
+		for row := m.rowAtDisplay(top); row < m.nrows() && m.displayLineOf(row) < bottom; row++ {
+			if m.itemAt(row).Kind != ItemNone {
+				return row
+			}
+		}
+		return -1
+	}
+	// Search from the row that starts last inside the window, so a row whose
+	// display line begins above the window is not mistaken for the bottom one.
+	for row := min(m.rowAtDisplay(bottom), m.nrows()) - 1; row >= 0; row-- {
+		if m.displayLineOf(row) < top {
+			return -1
+		}
+		if m.itemAt(row).Kind != ItemNone {
+			return row
+		}
+	}
+	return -1
+}
+
+// rowAtDisplay is the first row that starts at or below a display line.
+func (m Model) rowAtDisplay(line int) int {
+	if !m.vp.SoftWrap {
+		return max(0, line)
+	}
+	return sort.Search(m.nrows(), func(i int) bool { return m.displayLineOf(i) >= line })
+}
+
+// keepCursorInView keeps a scroll that names no row honest: the cursor names what a
+// keystroke acts on, so it is pulled to the nearest actionable row in the window.
+// With a range anchored the window comes back instead, since the selection is not
+// the scroll's to change.
+func (m *Model) keepCursorInView() {
+	if !m.Selectable() || !m.HasCursor() || m.cursorInWindow() {
+		return
+	}
+	if m.RangeActive() {
+		m.scrollCursorIntoView()
+		return
+	}
+	top := m.vp.YOffset()
+	bottom := top + m.vpHeight()
+	dir := 1
+	if m.displayLineOf(m.cursor) < top {
+		dir = -1
+	}
+	if row := m.firstItemBetween(top, bottom, dir); row >= 0 {
+		m.setCursor(row)
+		return
+	}
+	// Nothing on screen can be acted on: bring the cursor's own rows back.
+	m.scrollCursorIntoView()
 }
 
 // Selection is the set of changed lines the cursor names: the file on a band, the
