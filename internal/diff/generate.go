@@ -78,23 +78,93 @@ func generate(path string, kind ChangeKind, oldText, newText string, opts Genera
 	return f
 }
 
-// build runs the diff and lays the result out in whichever representation keeps
-// memory proportional to the change rather than to the file.
+// build runs the diff and keeps memory proportional to the change, not the file.
 func build(f *File, old, new text, opts GenerateOptions, pageLimit int) {
-	// A file that only gained or only lost lines has exactly one hunk and needs
-	// no matching at all: interning millions of lines to discover that is the
-	// expensive half of a whole-file addition, so it is skipped outright.
+	// A file that only gained or lost lines has one hunk and needs no matching, which
+	// would intern every line to discover nothing.
 	if old.n() == 0 || new.n() == 0 {
 		install(f, wholeFilePlan(old, new), pageLimit)
 		return
 	}
 
+	// Content that only grew or shrank at its end needs no matching: its head is the
+	// same, so a file something is appending to costs a scan instead of a diff.
+	if delta, ok := tailEdit(old, new); ok {
+		install(f, tailPlan(old, new, delta, max(0, opts.Context)), pageLimit)
+		return
+	}
+
+	buildEdits(f, old, new, opts, pageLimit)
+}
+
+// buildEdits is the general path: match the two sides, then page the result.
+func buildEdits(f *File, old, new text, opts GenerateOptions, pageLimit int) {
 	edits := lineDiff(old, new, opts.IgnoreWhitespace, time.Now().Add(generateBudget))
 	windows := hunkWindows(edits, old, new, max(0, opts.Context))
 	if len(windows) == 0 {
 		return
 	}
 	install(f, buildPlan(old, new, edits, windows), pageLimit)
+}
+
+// tailEdit reports how many lines content gained at its end: positive for a tail
+// append, negative for a tail cut. A last line without its terminator is not a tail
+// edit, since the bytes after it extend that line rather than add one.
+func tailEdit(old, new text) (int, bool) {
+	if !strings.HasSuffix(old.s, "\n") {
+		return 0, false
+	}
+	if strings.HasPrefix(new.s, old.s) {
+		return new.n() - old.n(), true
+	}
+	if !strings.HasSuffix(new.s, "\n") || !strings.HasPrefix(old.s, new.s) {
+		return 0, false
+	}
+	return -(old.n() - new.n()), true
+}
+
+// tailPlan is the plan of a tail edit: the context lines above it, then the whole
+// run of added or removed lines as one hunk.
+func tailPlan(old, new text, delta, context int) *plan {
+	p := &plan{old: old, new: new, headers: make([]string, 0, 1), hunks: make([]int32, 0, 1)}
+	if delta == 0 {
+		return p
+	}
+	// The change sits after the shorter side, so that is what can be context.
+	common := min(old.n(), new.n())
+	ctx := min(max(0, context), common)
+
+	p.ops = append(p.ops, op{kind: opHeader})
+	if ctx > 0 {
+		p.ops = append(p.ops, op{
+			kind:     opEqual,
+			oldStart: int32(common - ctx),
+			oldLen:   int32(ctx),
+			newStart: int32(common - ctx),
+			newLen:   int32(ctx),
+		})
+	}
+	// Starts are 1-based where a count is not zero, as the general path leaves them.
+	var oldStart, newStart int
+	if ctx > 0 {
+		oldStart, newStart = common-ctx+1, common-ctx+1
+	} else if delta > 0 {
+		newStart = old.n() + 1
+	} else {
+		oldStart = new.n() + 1
+	}
+	if delta > 0 {
+		p.ops = append(p.ops, op{kind: opInsert, newStart: int32(old.n()), newLen: int32(delta)})
+		p.headers = append(p.headers, hunkHeader(oldStart, ctx, newStart, ctx+delta))
+		p.adds = delta
+	} else {
+		p.ops = append(p.ops, op{kind: opDelete, oldStart: int32(new.n()), oldLen: int32(-delta)})
+		p.headers = append(p.headers, hunkHeader(oldStart, ctx-delta, newStart, ctx))
+		p.dels = -delta
+	}
+	p.hunks = append(p.hunks, 0)
+	p.buildPrefix()
+	return p
 }
 
 // install attaches a plan to the file in the representation it deserves.
@@ -342,7 +412,13 @@ func (st *diffState) coarse(alo, ahi, blo, bhi int) {
 // bounded Myers match, and let it fall back to anchoring an intractable region
 // on unique lines.
 func (st *diffState) exact(alo, ahi, blo, bhi int) {
-	a, b := st.ids(alo, ahi, blo, bhi)
+	a, b, shared := st.ids(alo, ahi, blo, bhi)
+	if !shared {
+		// Nothing on one side appears on the other: the only script is a wholesale
+		// replacement, and matching would be work with a known answer.
+		st.coarse(alo, ahi, blo, bhi)
+		return
+	}
 	for _, e := range diffIDs(a, b) {
 		e.oldIdx += int32(alo)
 		e.newIdx += int32(blo)
@@ -353,8 +429,9 @@ func (st *diffState) exact(alo, ahi, blo, bhi int) {
 // ids interns the lines of two ranges into dense ids keyed by their hash and
 // verified against the line it came from, so a collision moves to the next probe
 // slot instead of quietly equating two different lines. Unlike a string-keyed
-// map the keys are eight bytes and no source line is retained.
-func (st *diffState) ids(alo, ahi, blo, bhi int) ([]int32, []int32) {
+// map the keys are eight bytes and no source line is retained. It also reports
+// whether the two ranges share a line at all.
+func (st *diffState) ids(alo, ahi, blo, bhi int) (x, y []int32, shared bool) {
 	byKey := make(map[uint64]int32, (ahi-alo)+(bhi-blo))
 	texts := make([]string, 0, (ahi-alo)+(bhi-blo))
 
@@ -380,17 +457,23 @@ func (st *diffState) ids(alo, ahi, blo, bhi int) ([]int32, []int32) {
 		return s
 	}
 
-	x := make([]int32, ahi-alo)
+	x = make([]int32, ahi-alo)
 	for i := range x {
 		line := alo + i
 		x[i] = get(st.hashOld(line), norm(st.old.line(line)))
 	}
-	y := make([]int32, bhi-blo)
+	// The ids the old side introduced are the ones below this count: an id at or
+	// above it can only come from the new side.
+	oldIDs := int32(len(texts))
+	y = make([]int32, bhi-blo)
 	for i := range y {
 		line := blo + i
 		y[i] = get(st.hashNew(line), norm(st.new.line(line)))
+		if y[i] < oldIDs {
+			shared = true
+		}
 	}
-	return x, y
+	return x, y, shared
 }
 
 // lineKey is the map key for the probe-th candidate of a line hash.
