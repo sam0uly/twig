@@ -84,6 +84,14 @@ type Styles struct {
 	searchHi    lipgloss.Style
 	searchHiSel lipgloss.Style
 
+	// Staging affordances. None of these may paint a background across the
+	// line: the diff wash and the syntax colours are what the reader is
+	// looking at while deciding.
+	cursorBar   lipgloss.Style
+	stageMark   lipgloss.Style
+	pendingMark lipgloss.Style
+	hunkEdge    lipgloss.Style
+
 	scrollTrack lipgloss.Style
 	scrollThumb lipgloss.Style
 
@@ -184,6 +192,16 @@ func New() Styles {
 	s.diffBinary = lipgloss.NewStyle().Foreground(tone.Zest).Italic(true)
 	// Split-view filler for the side that has no line on a paired row.
 	s.diffFill = lipgloss.NewStyle().Foreground(tone.Iron)
+
+	// Staging affordances: a solid bar for the cursor, a quiet edge for hunk
+	// extent, and a bright mark for a pending selection. The bar is a glyph in a
+	// bright colour rather than a background swap: a coloured space disappears
+	// on any terminal that does not paint backgrounds, and the cursor has to be
+	// the most obvious thing on its row.
+	s.cursorBar = lipgloss.NewStyle().Foreground(tone.Zest).Bold(true)
+	s.stageMark = lipgloss.NewStyle().Foreground(tone.Julep).Bold(true)
+	s.pendingMark = lipgloss.NewStyle().Foreground(tone.Zest).Bold(true)
+	s.hunkEdge = lipgloss.NewStyle().Foreground(tone.Iron)
 
 	// Search highlights.
 	s.searchHi = lipgloss.NewStyle().
@@ -506,6 +524,18 @@ func (s Styles) SyntaxWord(kind int, class syntax.Class) lipgloss.Style {
 
 // DiffFill returns the style for empty split-view cells.
 func (s Styles) DiffFill() lipgloss.Style { return s.diffFill }
+
+// CursorBar returns the solid bar that marks the staging cursor.
+func (s Styles) CursorBar() lipgloss.Style { return s.cursorBar }
+
+// StageMark returns the glyph style for a line that is being staged.
+func (s Styles) StageMark() lipgloss.Style { return s.stageMark }
+
+// PendingMark returns the glyph style for a marked but unapplied line.
+func (s Styles) PendingMark() lipgloss.Style { return s.pendingMark }
+
+// HunkEdge returns the quiet style for hunk boundary glyphs.
+func (s Styles) HunkEdge() lipgloss.Style { return s.hunkEdge }
 
 // ModalBorder returns the dialog frame style.
 func (s Styles) ModalBorder() lipgloss.Style { return s.modalBorder }

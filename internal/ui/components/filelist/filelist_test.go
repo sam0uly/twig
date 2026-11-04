@@ -145,7 +145,7 @@ func TestTreeToggleKeepsSelection(t *testing.T) {
 	m := New(30, 20, styles.New())
 	m.SetSize(30, 20)
 	m.SetFiles(nil, treeSample())
-	m.SelectPath("internal/ui/view.go", false)
+	m.SelectSide("internal/ui/view.go", false)
 
 	m.SetTree(true)
 	if f, _ := m.SelectedFile(); f.Path != "internal/ui/view.go" {
@@ -181,7 +181,7 @@ func TestSelectedOrdinalSkipsHeadersAndDirs(t *testing.T) {
 	m.SetFiles(nil, treeSample())
 	m.SetTree(true)
 
-	m.SelectPath("internal/diff/myers.go", false)
+	m.SelectSide("internal/diff/myers.go", false)
 	if got := m.SelectedOrdinal(); got != 4 {
 		t.Fatalf("ordinal = %d, want 4", got)
 	}
@@ -310,9 +310,10 @@ func TestFilterRendersWithoutATitleGap(t *testing.T) {
 	}
 }
 
-// TestStagedAndEditedSection checks a file staged and then edited again gets
-// its own section instead of appearing in both lists.
-func TestStagedAndEditedSection(t *testing.T) {
+// TestAPartlyStagedFileIsListedTwice checks the listing rule that removed the
+// "which half am I looking at" problem: a file staged and then edited again
+// appears under both sections, once per diff it has.
+func TestAPartlyStagedFileIsListedTwice(t *testing.T) {
 	m := New(40, 16, styles.New())
 	m.SetSize(40, 16)
 	m.SetFiles(
@@ -321,18 +322,83 @@ func TestStagedAndEditedSection(t *testing.T) {
 	)
 
 	view := ansi.Strip(m.View())
-	for _, want := range []string{"Staged and edited", "Staged changes", "Unstaged changes", "both.go", "staged.go", "loose.go"} {
+	for _, want := range []string{"Staged changes", "Unstaged changes", "both.go", "staged.go", "loose.go"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("listing missing %q:\n%s", want, view)
 		}
 	}
-	// both.go is staged and edited: one row, in the first section, and it must
-	// not show up again under unstaged changes.
-	if got := strings.Count(view, "both.go"); got != 1 {
-		t.Fatalf("both.go appears %d times, want once:\n%s", got, view)
+	// One row per diff, so both.go is in both sections.
+	if got := strings.Count(view, "both.go"); got != 2 {
+		t.Fatalf("both.go appears %d times, want once per side:\n%s", got, view)
 	}
-	edited := strings.Index(view, "Staged and edited")
-	if next := strings.Index(view, "Staged changes"); edited > next {
-		t.Fatalf("sections are out of order:\n%s", view)
+	staged := strings.Index(view, "Staged changes")
+	un := strings.Index(view, "Unstaged changes")
+	if staged > un {
+		t.Fatalf("sections are out of order, want staged first:\n%s", view)
+	}
+	// A row knows its own side, which is what the pane loads.
+	m.SelectSide("both.go", true)
+	if _, staged := m.SelectedFile(); !staged {
+		t.Fatal("the staged row does not report the staged side")
+	}
+	m.SelectSide("both.go", false)
+	if _, staged := m.SelectedFile(); staged {
+		t.Fatal("the unstaged row does not report the worktree side")
+	}
+}
+
+// TestShrunkListingKeepsAValidSelection: when the file on screen is reverted it
+// leaves the listing, and the cursor can be left past the end. A listing with
+// files must always have one selected, or the pane has nothing to show.
+func TestShrunkListingKeepsAValidSelection(t *testing.T) {
+	m := New(30, 20, styles.New())
+	m.SetSize(30, 20)
+	m.SetFiles(nil, treeSample())
+
+	// Select the last file, then take away everything below the first row.
+	m.SelectSide("internal/diff/myers.go", false)
+	m.SetFiles(nil, []git.FileStatus{{Path: "README.md", Letter: "M"}})
+
+	// SelectedFile's bool is the row's staging state, not "is anything
+	// selected", so the assertion is on the path.
+	got, _ := m.SelectedFile()
+	if got.Path == "" {
+		t.Fatalf("nothing selected after the listing shrank (index %d)", m.files.Index())
+	}
+	if got.Path != "README.md" {
+		t.Fatalf("selected %q, want README.md", got.Path)
+	}
+}
+
+// TestSelectSideNeverCrossesSides: a partly staged file is listed twice, so a
+// selection that asks for one side must not land on the other. Getting this
+// wrong makes the next keystroke stage the diff the reader is not looking at.
+func TestSelectSideNeverCrossesSides(t *testing.T) {
+	m := New(40, 20, styles.New())
+	m.SetFiles(
+		[]git.FileStatus{{Path: "both.go", Letter: "M"}},
+		[]git.FileStatus{{Path: "both.go", Letter: "M"}},
+	)
+	if !m.SelectSide("both.go", true) {
+		t.Fatal("the staged row was not found")
+	}
+	if _, staged := m.SelectedFile(); !staged {
+		t.Fatal("selecting the staged side put the cursor on the worktree row")
+	}
+	if !m.SelectSide("both.go", false) {
+		t.Fatal("the worktree row was not found")
+	}
+	if _, staged := m.SelectedFile(); staged {
+		t.Fatal("selecting the worktree side put the cursor on the staged row")
+	}
+
+	// A side that is not listed is reported missing, and the cursor is left
+	// where it was rather than moved to the other diff of the same path.
+	m.SetFiles(nil, []git.FileStatus{{Path: "both.go", Letter: "M"}})
+	if m.SelectSide("both.go", true) {
+		t.Fatal("reported a staged row for a file that is only unstaged")
+	}
+	if _, staged := m.SelectedFile(); staged {
+		t.Fatal("the cursor landed on a side that does not exist")
 	}
 }

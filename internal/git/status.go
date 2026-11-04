@@ -68,6 +68,20 @@ func sortStatus(s []FileStatus) {
 	sort.Slice(s, func(i, j int) bool { return s[i].Path < s[j].Path })
 }
 
+// WorktreePath resolves a repository-relative path to one the filesystem can
+// open. git reports paths relative to the work tree root, which is not where the
+// process started when twig runs in a subdirectory.
+func WorktreePath(path string) string {
+	if path == "" || filepath.IsAbs(path) {
+		return path
+	}
+	rc, err := open()
+	if err != nil {
+		return path
+	}
+	return filepath.Join(rc.root, filepath.FromSlash(path))
+}
+
 // ProjectName returns the repository name: the base name of the work tree
 // root.
 func ProjectName() string {
@@ -263,7 +277,7 @@ func (rc *repoContext) fileDiff(path string, staged bool, opts Options) (*diff.F
 	}
 	f, ok := snap.fileFor(path, staged)
 	if !ok {
-		return nil, fmt.Errorf("no change for %q", path)
+		return nil, fmt.Errorf("%w for %q", ErrNoChange, path)
 	}
 	return rc.diffFile(f, staged, opts)
 }
@@ -271,9 +285,23 @@ func (rc *repoContext) fileDiff(path string, staged bool, opts Options) (*diff.F
 // ErrCommitMessageTooShort is returned when a commit message is empty.
 var ErrCommitMessageTooShort = errors.New("commit message is empty")
 
+// CommitOptions tunes how a commit is made.
+type CommitOptions struct {
+	// Amend replaces the previous commit instead of adding one.
+	Amend bool
+}
+
 // CommitChanges commits the staged changes with the given message and
 // returns the new commit hash.
 func CommitChanges(message string) (string, error) {
+	return CommitWith(message, CommitOptions{})
+}
+
+// CommitWith commits the staged changes, optionally amending the previous
+// commit. The message travels as an argument, so git's own cleanup rules apply
+// and the user's editor is never involved: the message is the one in twig's
+// box, and nothing rewrites it behind the reader's back.
+func CommitWith(message string, opts CommitOptions) (string, error) {
 	if message == "" {
 		return "", ErrCommitMessageTooShort
 	}
@@ -282,7 +310,11 @@ func CommitChanges(message string) (string, error) {
 		return "", err
 	}
 
-	if _, err := rc.git("commit", "-q", "-m", message); err != nil {
+	args := []string{"commit", "-q", "-m", message}
+	if opts.Amend {
+		args = append(args, "--amend")
+	}
+	if _, _, err := runGitWrite(rc.root, nil, args...); err != nil {
 		return "", fmt.Errorf("commit: %w", err)
 	}
 

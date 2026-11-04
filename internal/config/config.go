@@ -39,7 +39,34 @@ type Config struct {
 	SplitView bool `json:"split-view"`
 	// Syntax colours diff lines by token class.
 	Syntax bool `json:"syntax"`
+	// Stage offers the partial staging cursor in the diff pane. Turning it off
+	// leaves the pane a plain reader.
+	Stage bool `json:"stage"`
+	// StageApply is when a keystroke reaches the index: "instant" applies each
+	// decision at once, "select" marks lines and applies them together.
+	StageApply string `json:"stage-apply"`
+	// DiscardConfirm is the smallest thing a discard asks about: "line",
+	// "hunk", "file" or "never".
+	DiscardConfirm string `json:"discard-confirm"`
 }
+
+// The two ways a staging decision reaches the index.
+const (
+	// StageApplyInstant applies every keystroke as it is pressed, which is what
+	// git itself does and what makes a mistake a single undo away.
+	StageApplyInstant = "instant"
+	// StageApplySelect marks lines and applies the marks in one go, which is
+	// the shape a careful review pass wants.
+	StageApplySelect = "select"
+)
+
+// How small a thing a discard asks about.
+const (
+	DiscardConfirmLine  = "line"
+	DiscardConfirmHunk  = "hunk"
+	DiscardConfirmFile  = "file"
+	DiscardConfirmNever = "never"
+)
 
 // Default returns the built-in default configuration.
 func Default() Config {
@@ -57,6 +84,9 @@ func Default() Config {
 		LogLimit:         200,
 		SplitView:        false,
 		Syntax:           true,
+		Stage:            true,
+		StageApply:       StageApplyInstant,
+		DiscardConfirm:   DiscardConfirmLine,
 	}
 }
 
@@ -102,6 +132,16 @@ func Load(path string) (Config, error) {
 	// several, and a huge one would make every save feel late.
 	if cfg.WatchDebounce != 0 {
 		cfg.WatchDebounce = max(min(cfg.WatchDebounce, 2000), 10)
+	}
+	switch cfg.StageApply {
+	case StageApplyInstant, StageApplySelect:
+	default:
+		cfg.StageApply = StageApplyInstant
+	}
+	switch cfg.DiscardConfirm {
+	case DiscardConfirmLine, DiscardConfirmHunk, DiscardConfirmFile, DiscardConfirmNever:
+	default:
+		cfg.DiscardConfirm = DiscardConfirmLine
 	}
 
 	return cfg, nil

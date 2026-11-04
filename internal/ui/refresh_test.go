@@ -29,7 +29,7 @@ func longDiff(marker string) *diff.File {
 func TestRefreshKeepsTheReaderInPlace(t *testing.T) {
 	m := testModel(120, 30)
 	m.files.SetFiles(nil, []git.FileStatus{{Path: "a.go", Letter: "M"}})
-	m.files.SelectPath("a.go", false)
+	m.files.SelectSide("a.go", false)
 
 	first := longDiff("new")
 	m.view.SetFile(first)
@@ -103,7 +103,7 @@ func TestStatusLoadStartsWatcher(t *testing.T) {
 func TestAllChangesRefreshRestoresTheAnchor(t *testing.T) {
 	m := testModel(120, 30)
 	m.files.SetFiles(nil, []git.FileStatus{{Path: "a.go", Letter: "M"}})
-	m.files.SelectPath("a.go", false)
+	m.files.SelectSide("a.go", false)
 
 	first := longDiff("new")
 	m.view.SetDocument(func(int) *diff.File { return first })

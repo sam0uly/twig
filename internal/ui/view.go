@@ -12,6 +12,8 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 
+	"samouly.fun/twig/internal/config"
+	"samouly.fun/twig/internal/diff"
 	"samouly.fun/twig/internal/git"
 	"samouly.fun/twig/internal/ui/components/composer"
 	"samouly.fun/twig/internal/ui/components/filelist"
@@ -23,8 +25,7 @@ func (m model) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
-	// Regaining focus is the cheapest moment to catch up: whatever happened
-	// while twig was in the background is one status run away.
+	// Regaining focus is the cheapest moment to catch up.
 	v.ReportFocus = true
 	v.WindowTitle = "twig"
 	// The whole app paints on CharmTone Pepper.
@@ -42,6 +43,8 @@ func (m model) render() string {
 		return m.errorView()
 	case stateCompose:
 		return m.composeModal()
+	case stateConfirm:
+		return m.confirmModal()
 	default:
 		return m.pageView()
 	}
@@ -65,9 +68,8 @@ func (m model) errorView() string {
 	return "\n" + indent(s, 3)
 }
 
-// pageView renders a tab page: header bar, panes, footer bar, and — like
-// glow — the help view below the footer bar. When there is nothing to browse
-// an animated welcome screen takes the place of the panes.
+// pageView renders a tab page: header, panes, footer, and the help view below the
+// footer. With nothing to browse an animated welcome screen takes the panes' place.
 func (m model) pageView() string {
 	body := m.bodyView()
 	if m.showWelcome() {
@@ -88,8 +90,7 @@ func (m model) pageView() string {
 	return b.String()
 }
 
-// headerView renders the persistent top bar: gradient logo, project title,
-// branch fill and the Files/Commits segments on the right.
+// headerView renders the top bar: logo, project title, branch and tab segments.
 func (m model) headerView() string {
 	st := m.styles
 
@@ -98,14 +99,12 @@ func (m model) headerView() string {
 		{Label: "2 Commits", Active: m.files.Tab() == filelist.TabCommits},
 	}
 
-	// The branch and view label is its own segment, with the statistics
-	// flanking it: additions on the left, deletions on the right.
+	// The branch label is its own segment, with the statistics flanking it.
 	var center string
 	if label := m.branch; label != "" {
 		center = st.HeaderBranch().Render(" " + label + " · " + m.src.Describe() + " ")
 		if m.d != nil {
-			// No plain space between the segments: their own padding is the
-			// only gap, so the backgrounds stay continuous.
+			// No plain space between segments: their padding is the only gap.
 			center = st.HeaderAdds().Render("+"+strconv.Itoa(m.d.Additions)) +
 				center +
 				st.HeaderDels().Render("-"+strconv.Itoa(m.d.Deletions))
@@ -117,8 +116,7 @@ func (m model) headerView() string {
 
 	logoText := " Twig "
 	if name := m.project; name != "" {
-		// The pill owns the logo, the divider dot and the project name so
-		// they read as one continuous segment.
+		// The pill owns the logo, the divider and the project name.
 		logoText = " Twig · " + name + " "
 	}
 
@@ -129,20 +127,17 @@ func (m model) headerView() string {
 	})
 }
 
-// logoStops are the two colors of the logo pill: it starts on Hazy and ends
-// on Salmon.
+// logoStops are the two colors of the logo pill.
 var logoStops = []color.Color{tone.Hazy, tone.Salmon}
 
-// gradientPill renders text as a solid chip whose background runs through the
-// given stops, with dark letters so the segment reads as one block instead of
-// a gradient string floating on the app background.
+// gradientPill renders text as a chip whose background runs through the stops, with
+// dark letters so the segment reads as one block.
 func gradientPill(text string, stops ...color.Color) string {
 	runes := []rune(text)
 	if len(runes) == 0 {
 		return ""
 	}
-	// The background runs through the stops left to right; every letter is
-	// written in Salt, the same foreground the rest of the top bar uses.
+	// The background runs through the stops left to right, in Salt.
 	backgrounds := blendStops(len(runes), stops)
 
 	var b strings.Builder
@@ -156,12 +151,9 @@ func gradientPill(text string, stops ...color.Color) string {
 	return b.String()
 }
 
-// gradientText renders text with a horizontal gradient foreground across the
-// given CharmTone stops. It paints on the app background, so the letters keep
-// full contrast instead of sitting on a saturated block.
+// gradientText renders text with a gradient foreground across the stops.
 
-// blendStops spreads a set of colors evenly over n steps, interpolating
-// between consecutive stops.
+// blendStops spreads a set of colors evenly over n steps.
 func blendStops(n int, stops []color.Color) []color.Color {
 	if n <= 0 || len(stops) == 0 {
 		return nil
@@ -196,8 +188,8 @@ func blendColor(from, to color.Color, t float64) color.Color {
 	return color.NRGBA{R: lerp(fr, tr), G: lerp(fg, tg), B: lerp(fb, tb), A: 0xff}
 }
 
-// bodyView renders the pane split for the active tab. Either sidebar can be
-// hidden; the main pane then takes the freed space.
+// bodyView renders the pane split for the active tab; a hidden sidebar gives its
+// space to the main pane.
 func (m model) bodyView() string {
 	var panes []string
 	if m.showLeft {
@@ -210,8 +202,8 @@ func (m model) bodyView() string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, panes...)
 }
 
-// mainPane renders the main content pane: the diff of the current selection,
-// with the search bar line pinned to its bottom while active.
+// mainPane renders the diff of the selection, with the search bar pinned below it
+// while active.
 func (m model) mainPane() string {
 	var content string
 	if !m.loaded || (m.view.Empty() && (m.loading() || m.allLoading)) {
@@ -232,8 +224,7 @@ func (m model) mainPane() string {
 			m.search.View(m.mainRect.Dx()-2, matchMsg),
 		)
 	} else if m.searchApplied && m.view.SearchTerm() != "" {
-		// Applied searches stay visible, muted, until esc clears them. The
-		// count keeps the same quiet green the live input uses.
+		// Applied searches stay visible, muted, until esc clears them.
 		label := m.styles.Subtle().Render(" Search: " + m.view.SearchTerm() + " ")
 		count := m.styles.SemiDimGreenFg(fmt.Sprintf(" %d matches", m.view.MatchCount()))
 		line := ansi.Truncate(label+count, max(1, m.mainRect.Dx()-2), "…")
@@ -246,9 +237,8 @@ func (m model) loading() bool {
 	return m.view.Empty() && !m.loaded
 }
 
-// pane wraps content in a soft-serve-style bordered pane whose border color
-// reflects focus. Content is clipped to the pane body so the chrome (footer
-// bar, help view) can never be pushed off-screen by overflowing content.
+// pane wraps content in a bordered pane whose border color reflects focus, clipping
+// to the body so the chrome is never pushed off-screen.
 func (m model) pane(content string, focused bool, rect uv.Rectangle) string {
 	st := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder())
@@ -265,20 +255,18 @@ func (m model) pane(content string, focused bool, rect uv.Rectangle) string {
 		Render(content)
 }
 
-// footerView renders the persistent bottom bar with per-state segments.
+// footerView renders the bottom bar with per-state segments.
 func (m model) footerView() string {
 	st := m.styles
 
 	info := statusbar.Info{
 		Message: m.message,
 	}
-	// a push goes over the network and can take seconds: the spinner is the
-	// only thing on screen that says it is still working
+	// A push goes over the network: the spinner says it is still working.
 	if m.pushing {
 		info.Message = m.pushNotice()
 	}
-	// the footer says when refreshing has fallen back to polling, so a slow
-	// update is never a mystery
+	// The footer says when refreshing fell back to polling.
 	info.Watch = m.refreshMode()
 
 	switch m.files.Tab() {
@@ -308,16 +296,13 @@ func (m model) footerView() string {
 	return m.status.FooterView(info)
 }
 
-// pushNotice is the footer text shown while a push runs. The spinner is
-// stripped of its own colour on purpose: the footer paints the whole message
-// segment with one background, and a reset embedded in the middle would end
-// that background at the spinner instead of at the end of the segment.
+// pushNotice is the footer text shown while a push runs. The spinner's own colour is
+// stripped: the footer paints the segment with one background.
 func (m model) pushNotice() string {
 	return ansi.Strip(m.spinner.View()) + " pushing…"
 }
 
-// viewModeLabel is appended to the footer info pill so the active diff
-// layout is always visible.
+// viewModeLabel is appended to the footer pill so the layout is visible.
 func (m model) viewModeLabel() string {
 	if m.view.Split() {
 		return " split"
@@ -325,9 +310,8 @@ func (m model) viewModeLabel() string {
 	return ""
 }
 
-// composeModal renders the commit dialog over the current page. The page is
-// dimmed cell by cell (colors are scaled down, not replaced) and the dialog is
-// drawn on top at the center, like a web modal over a scrim.
+// composeModal renders the commit dialog over the dimmed page, at the centre, like a
+// web modal over a scrim.
 func (m model) composeModal() string {
 	base := m.pageView()
 	modal, inputRect := m.composeDialogParts()
@@ -341,9 +325,7 @@ func (m model) composeModal() string {
 	dimCanvas(canvas, 0.45)
 	lipgloss.NewLayer(modal).Draw(canvas, uv.Rect(x, y, modalW, modalH))
 
-	// The textarea's own ANSI resets can leave cells transparent; repaint the
-	// editor rectangle so it is a full, unbroken panel whether or not the
-	// user has typed anything.
+	// The textarea's ANSI resets leave cells transparent: repaint the rectangle.
 	paintCanvasRect(canvas, uv.Rect(
 		x+inputRect.Min.X, y+inputRect.Min.Y, inputRect.Dx(), inputRect.Dy(),
 	), m.styles.ModalInput().GetBackground())
@@ -351,8 +333,7 @@ func (m model) composeModal() string {
 	return fitBlock(canvas.Render(), max(1, m.width), max(1, m.height))
 }
 
-// paintCanvasRect fills transparent cells inside a rectangle with a
-// background color, leaving styled cells untouched.
+// paintCanvasRect fills transparent cells inside a rectangle, leaving styled ones.
 func paintCanvasRect(c *lipgloss.Canvas, r uv.Rectangle, bg color.Color) {
 	if bg == nil {
 		return
@@ -368,6 +349,97 @@ func paintCanvasRect(c *lipgloss.Canvas, r uv.Rectangle, bg color.Color) {
 			c.SetCell(x, y, filled)
 		}
 	}
+}
+
+// confirmModal draws the discard dialog over the dimmed page.
+func (m model) confirmModal() string {
+	base := m.pageView()
+	modal := m.confirmDialog()
+	mw, mh := lipgloss.Width(modal), lipgloss.Height(modal)
+
+	x := max(0, (m.width-mw)/2)
+	y := max(0, (m.height-mh)/2)
+
+	canvas := lipgloss.NewCanvas(max(1, m.width), max(1, m.height))
+	canvas.Compose(lipgloss.NewLayer(base))
+	dimCanvas(canvas, 0.45)
+	lipgloss.NewLayer(modal).Draw(canvas, uv.Rect(x, y, mw, mh))
+	return fitBlock(canvas.Render(), max(1, m.width), max(1, m.height))
+}
+
+// confirmDialog shows the exact lines a discard would throw away: the answer is the
+// lines, not a sentence about them.
+func (m model) confirmDialog() string {
+	innerW := m.confirmInnerWidth()
+	boxW := innerW + 4
+	dialog := m.styles.ModalPanel()
+	border := m.styles.ModalBorder()
+
+	row := func(text string) string {
+		text = ansi.Truncate(text, innerW, "…")
+		pad := max(0, innerW-ansi.StringWidth(text))
+		return border.Render("│") + " " + dialog.Render(text+strings.Repeat(" ", pad)) + " " + border.Render("│")
+	}
+
+	cs := m.confirm
+	n := cs.sel.Len()
+	unit := "lines"
+	if n == 1 {
+		unit = "line"
+	}
+	title := "Discard " + itoa(n) + " " + unit
+
+	// The position rides on the path row: a scrolled preview must not read as the whole
+	// discard.
+	path := ansi.Truncate(cs.path, innerW, "…")
+	if len(cs.lines) > m.confirmRows() {
+		last := min(len(cs.lines), cs.off+m.confirmRows())
+		pos := itoa(cs.off+1) + "–" + itoa(last) + "/" + itoa(len(cs.lines))
+		path = ansi.Truncate(cs.path, max(0, innerW-ansi.StringWidth(pos)-1), "…")
+		gap := max(1, innerW-ansi.StringWidth(path)-ansi.StringWidth(pos))
+		path += strings.Repeat(" ", gap) + pos
+	}
+
+	// The preview paints edge to edge, so a line reads as one discarded row.
+	previewRow := func(l diff.Line) string {
+		w := innerW + 1
+		// Tabs are expanded before measuring.
+		text := expandTabs(l.Text)
+		// The preview scrolls, so a clipped line carries no ellipsis.
+		text = ansi.TruncateLeft(text, cs.x, "…")
+		text = ansi.Truncate(text, w, "")
+		pad := max(0, w-ansi.StringWidth(text))
+		style := m.styles.DiffContext()
+		switch l.Kind {
+		case diff.Addition:
+			style = m.styles.DiffAdd()
+		case diff.Deletion:
+			style = m.styles.DiffDel()
+		}
+		return border.Render("│") + " " + style.Render(text+strings.Repeat(" ", pad)) + border.Render("│")
+	}
+	lines := make([]string, 0, m.confirmRows()+confirmChrome)
+	lines = append(lines, m.dialogTop(title, boxW))
+	lines = append(lines, row(m.styles.Subtle().Render(path)), row(""))
+	for _, l := range cs.lines[min(cs.off, len(cs.lines)):min(cs.off+m.confirmRows(), len(cs.lines))] {
+		lines = append(lines, previewRow(l))
+	}
+	lines = append(lines, row(""), row(m.styles.ModalHint().Render("z restores it")))
+	lines = append(lines, m.confirmBottom(boxW))
+	return strings.Join(lines, "\n")
+}
+
+// confirmBottom draws the dialog's footer with its two answers.
+func (m model) confirmBottom(boxW int) string {
+	border := m.styles.ModalBorder()
+	hints := m.styles.ModalKeycap().Render("enter") + " " +
+		m.styles.ModalHint().Render("discard") +
+		m.styles.ModalHint().Render("   ") +
+		m.styles.ModalKeycap().Render("esc") + " " +
+		m.styles.ModalHint().Render("keep") + " "
+	hints = ansi.Truncate(hints, max(1, boxW-4), "…")
+	dashes := max(0, boxW-3-lipgloss.Width(hints))
+	return border.Render("╰─") + hints + border.Render(strings.Repeat("─", dashes)+"╯")
 }
 
 // composeDialog renders the dialog on its own.
@@ -397,8 +469,16 @@ func (m model) composeDialogParts() (string, uv.Rectangle) {
 			title = "Commit " + itoa(len(staged)) + " staged files"
 		}
 	}
+	if m.amend {
+		// Amending is a different commit, not a checkbox on this one: say so
+		// where the reader is looking.
+		title = "Amend HEAD"
+		if len(staged) > 0 {
+			title += " + " + itoa(len(staged)) + " staged"
+		}
+	}
 
-	editor := m.compose
+	editor := *m.compose
 	editor.SetBackground(inputBG)
 	// The cursor line shares the panel color: the editor must read as one
 	// solid block, with only the cursor itself marking the caret.
@@ -462,6 +542,9 @@ func (m model) dialogBottom(boxW int) string {
 	border := m.styles.ModalBorder()
 	hints := m.styles.ModalKeycap().Render("ctrl+s") + " " +
 		m.styles.ModalHint().Render("commit") +
+		m.styles.ModalHint().Render("   ") +
+		m.styles.ModalKeycap().Render("ctrl+a") + " " +
+		m.styles.ModalHint().Render("amend") +
 		m.styles.ModalHint().Render("   ") +
 		m.styles.ModalKeycap().Render("esc") + " " +
 		m.styles.ModalHint().Render("cancel") + " "
@@ -616,36 +699,38 @@ func (m model) helpHeight() int {
 func (m model) helpColumns() []helpColumn {
 	if m.files.Tab() == filelist.TabCommits {
 		c1 := newHelpColumn(
-			"k/↑", "up",
 			"j/↓", "down",
+			"k/↑", "up",
+			"g", "top",
+			"G", "bottom",
+			"[", "prev hunk",
+			"]", "next hunk",
+			"J", "next file",
+			"K", "prev file",
+		)
+		c2 := newHelpColumn(
 			"enter", "open commit",
 			"tab", "next pane",
 			"S-tab", "prev pane",
 			"esc", "back",
-		)
-		c2 := newHelpColumn(
-			"g/home", "top",
-			"G/end", "bottom",
-			"[", "prev hunk",
-			"]", "next hunk",
-			"y", "yank patch",
-			"Y", "yank hunk",
-		)
-		c3 := newHelpColumn(
-			"/", "search",
+			"1/2", "tabs",
+			"/", "find",
 			"n", "next match",
 			"N", "prev match",
+		)
+		c3 := newHelpColumn(
+			"y", "yank patch",
+			"Y", "yank hunk",
 			"v", "split view",
-			"m", "smooth scroll",
 			"w", "wrap",
 			"Z", "ignore ws",
 			"c", "context",
+			"m", "smooth",
+			"r", "refresh",
 		)
 		c4 := newHelpColumn(
 			"C", "commit",
 			"P", "push",
-			"r", "refresh",
-			"1/2", "tabs",
 		)
 		c5 := newHelpColumn(
 			"H/L", "sidebars",
@@ -655,37 +740,63 @@ func (m model) helpColumns() []helpColumn {
 		return []helpColumn{c1, c2, c3, c4, c5}
 	}
 
+	// The Files tab is where the diff is written to the index, so the staging
+	// keys get a column of their own. Everything that works is listed: a key
+	// that only appears in the README is a key the reader has to remember.
 	c1 := newHelpColumn(
-		"k/↑", "up",
 		"j/↓", "down",
-		"enter", "open diff",
+		"k/↑", "up",
+		"g", "top",
+		"G", "bottom",
+		"[", "prev hunk",
+		"]", "next hunk",
+		"J", "next file",
+		"K", "prev file",
+		"1/2", "tabs",
+	)
+	c2 := newHelpColumn(
+		"enter", "open",
 		"tab", "next pane",
 		"S-tab", "prev pane",
 		"esc", "back",
-	)
-	c2 := newHelpColumn(
 		"/", "find",
-		"s", "stage",
+		"n", "next match",
+		"N", "prev match",
+		"y", "yank patch",
+		"Y", "yank hunk",
+	)
+	c3 := newHelpColumn(
+		"space", "stage here",
+		"V", "select range",
+		"z", "undo",
+		"x", "discard",
+		"s", "stage file",
 		"u", "unstage",
 		"C", "commit",
+	)
+	if m.cfg.StageApply == config.StageApplySelect {
+		// The apply key only exists in select mode, so it is only listed
+		// there: a reference that mentions a key which does nothing is worse
+		// than a shorter one.
+		c3 = append(c3, helpEntry{key: "enter", val: "apply marks"})
+	}
+	c4 := newHelpColumn(
+		"v", "split view",
+		"w", "wrap",
+		"Z", "ignore ws",
+		"c", "context",
+		"m", "smooth",
+		"t", "tree view",
+		"a", "all changes",
 		"P", "push",
 		"r", "refresh",
 	)
-	c3 := newHelpColumn(
-		"J", "next file",
-		"K", "prev file",
-		"t", "tree view",
-		"a", "all changes",
-		"v", "split view",
-		"m", "smooth scroll",
-		"1/2", "tabs",
-	)
-	c4 := newHelpColumn(
+	c5 := newHelpColumn(
 		"H/L", "sidebars",
 		"?", "hide help",
 		"q", "quit",
 	)
-	return []helpColumn{c1, c2, c3, c4}
+	return []helpColumn{c1, c2, c3, c4, c5}
 }
 
 // indent pads every non-empty line, like glow's indent helper.

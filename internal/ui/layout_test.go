@@ -16,7 +16,6 @@ import (
 	"samouly.fun/twig/internal/config"
 	"samouly.fun/twig/internal/diff"
 	"samouly.fun/twig/internal/git"
-	"samouly.fun/twig/internal/ui/components/diffview"
 	"samouly.fun/twig/internal/ui/components/filelist"
 	"samouly.fun/twig/internal/ui/styles"
 )
@@ -179,7 +178,7 @@ func TestNeighbourPrefetchCachesDiffs(t *testing.T) {
 		{Path: "b.go", Letter: "M"},
 		{Path: "c.go", Letter: "M"},
 	})
-	m.files.SelectPath("b.go", false)
+	m.files.SelectSide("b.go", false)
 
 	next, cmd := m.prefetchNeighbors()
 	if cmd == nil {
@@ -229,7 +228,7 @@ func TestArrowKeysScrollTheDiff(t *testing.T) {
 	left := tea.KeyPressMsg{Code: tea.KeyLeft}
 	right := tea.KeyPressMsg{Code: tea.KeyRight}
 
-	m.view, _ = m.view.Update(right)
+	m.applyView(right)
 	if x := m.view.XOffset(); x == 0 {
 		t.Fatal("right arrow did not scroll the diff horizontally")
 	}
@@ -596,7 +595,7 @@ func TestHunkKeysWorkFromTheSidebar(t *testing.T) {
 	m := testModel(100, 20)
 	// Hunk navigation scrolls immediately in this test, and the view is
 	// short enough that there is somewhere to scroll to.
-	m.view = diffview.New(false, m.styles)
+	m.view = newDiffview(false, m.styles)
 	m.view.SetSize(80, 8)
 	m.view.SetFile(diff.Generate("a.go", diff.Modified,
 		"a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\n",
@@ -788,7 +787,7 @@ func TestAllChangesBuildsAggregateAndJumps(t *testing.T) {
 	})
 	m.focus = focusSidebar
 	// Start on the last file so its band is somewhere below the first screen.
-	m.files.SelectPath("c.go", false)
+	m.files.SelectSide("c.go", false)
 
 	next, cmd := m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	m = next.(model)
@@ -844,7 +843,7 @@ func TestAllChangesStreamsChunks(t *testing.T) {
 	})
 	m.focus = focusSidebar
 	// Select the last file: its band only exists once the final chunk lands.
-	m.files.SelectPath("c.go", false)
+	m.files.SelectSide("c.go", false)
 
 	next, cmd := m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	m = next.(model)
@@ -1489,7 +1488,7 @@ func TestCommitRowClickSelectsTheCommit(t *testing.T) {
 		if got.focus != focusSidebar {
 			t.Fatalf("row %d: focus = %v, want the sidebar", row, got.focus)
 		}
-		c, ok := (&got.files).SelectedCommit()
+		c, ok := got.files.SelectedCommit()
 		if !ok || c.Hash != "bbbb2222" {
 			t.Fatalf("row %d: selected commit = %+v, want the second", row, c)
 		}
@@ -1499,11 +1498,11 @@ func TestCommitRowClickSelectsTheCommit(t *testing.T) {
 	}
 
 	// a click inside the sidebar but past the last row changes nothing
-	before, _ := (&m.files).SelectedCommit()
+	before, _ := m.files.SelectedCommit()
 	click := tea.MouseClickMsg{X: m.sideRect.Min.X + 2, Y: m.sideRect.Min.Y + 1 + 40}
 	next, _ := m.Update(click)
 	afterModel := next.(model)
-	after, _ := (&afterModel.files).SelectedCommit()
+	after, _ := afterModel.files.SelectedCommit()
 	if after.Hash != before.Hash {
 		t.Fatalf("an empty row moved the commit cursor to %+v", after)
 	}

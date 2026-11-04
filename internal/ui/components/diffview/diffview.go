@@ -1,9 +1,7 @@
-// Package diffview renders a single file's diff as a glow-style pager:
-// full-bleed viewport, glow line numbers, and Zed/VS Code-style word-level
-// diff highlighting baked into ANSI-rendered lines, with search matches
-// layered on top. Diffs can be shown as one-column (unified) or as two
-// side-by-side columns (split), and the pager draws its own vertical and
-// horizontal scrollbars. Large scroll jumps animate with harmonica.
+// Package diffview renders one file's diff as a pager: a full-bleed viewport
+// with its own scrollbars, word-level highlights and search matches, unified or
+// side by side. A large diff becomes a virtual document, so only the rows around
+// the window are built.
 package diffview
 
 import (
@@ -25,28 +23,24 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"samouly.fun/twig/internal/diff"
+	"samouly.fun/twig/internal/stage"
 	"samouly.fun/twig/internal/syntax"
 	"samouly.fun/twig/internal/ui/styles"
 )
 
 const (
 	frameInterval = time.Second / 60
-	// baseSpringFreq is how stiff the scroll spring is for a short step, in
-	// radians per second. It rises with the distance still to travel, so a
-	// line step glides gently while a page jump gets there quickly.
+	// baseSpringFreq is the stiffness of the scroll spring for a short step, in
+	// radians per second; it rises with the distance left, so long jumps arrive fast.
 	baseSpringFreq = 26.0
-	// maxSpringFreq caps that rise, keeping long jumps fast without turning
-	// them into a cut.
+	// maxSpringFreq caps that rise, so a long jump stays quick without becoming a cut.
 	maxSpringFreq = 60.0
-	// smallStepRows is the distance a scroll input may move before it is worth
-	// animating. A line or a wheel tick lands immediately: gliding them makes
-	// the view feel behind the keyboard.
+	// smallStepRows is the distance a scroll may move before gliding is worth it: a
+	// line or a wheel tick lands at once, or the view feels behind the keyboard.
 	smallStepRows = 3
-	// scrollbarSize is the space reserved on the right and at the bottom of
-	// the pane for the scrollbars, in cells.
+	// scrollbarSize is the cells reserved at the right and the bottom for scrollbars.
 	scrollbarSize = 1
-	// maxCachedRows bounds the memoised row cache; past it the cache stops
-	// growing rather than holding a whole huge file.
+	// maxCachedRows bounds the memoised row cache.
 	maxCachedRows = 1 << 16
 )
 
@@ -56,35 +50,29 @@ type Match struct {
 	Start, End int
 }
 
-// gutterState holds what the viewport gutter needs to know. It is shared by
-// pointer with the viewport's gutter callback: the callback is captured once
-// when the viewport is created, so it must never be bound to a Model copy
-// (Model is passed by value all over Bubble Tea).
+// gutterState is what the viewport gutter needs to draw a row. The gutter
+// callback is captured once, when the viewport is created, so this is shared by
+// pointer: a Model copy would never see later changes.
 type gutterState struct {
 	file  *diff.File
 	notes int
 	show  bool
 	split bool
-	// header is 1 when the file header row is rendered above the diff, 0 for
-	// an aggregate document (a commit), where the path is empty.
+	// header is 1 when a file header row is drawn above the diff, 0 for a commit
+	// document.
 	header int
-	// numW is the cells reserved per side for a line number. It grows with
-	// the digits of the longest line, so seven-digit numbers cannot push the
-	// row wider than the gutter and wrap the pane.
+	// numW is the cells reserved per side for a line number.
 	numW int
-	// lineFor resolves a document row to its diff line for the virtual
-	// multi-file view, where rows no longer map onto one file's lines.
+	// lineFor resolves a document row to its diff line, for the virtual document.
 	lineFor func(row int) (diff.Line, bool)
 }
 
-// contentRow is one rendered row. Unified mode uses one line per row; split
-// mode pairs a deleted line with an added one.
+// contentRow is one rendered row: one line unified, a deleted/added pair in split.
 type contentRow struct {
 	// pre marks rows whose text is already rendered (notes, file header).
 	pre  bool
 	text string
-	// fullWidth rows span both columns even in split mode (hunk headers,
-	// "\ No newline" markers).
+	// fullWidth rows span both columns even in split mode (hunk headers, markers).
 	fullWidth bool
 	line      diff.Line
 	flat      int
@@ -95,9 +83,8 @@ type contentRow struct {
 	leftFlat, rightFlat int
 }
 
-// rowCache memoises styled rows for one rendering mode, so a scroll frame only
-// styles the rows entering the window. Model is passed by value all over
-// Bubble Tea, so the cache is shared through a pointer.
+// rowCache memoises styled rows for one mode, so a scroll frame only styles the
+// rows entering the window. Shared by pointer, since Model is copied by value.
 type rowCache struct {
 	rows        map[int]string
 	xoff, width int
@@ -113,31 +100,29 @@ type Model struct {
 	vp     viewport.Model
 	styles styles.Styles
 	file   *diff.File
-	// doc is the virtual multi-file document, nil when a single file is
-	// shown. It owns the row layout in that case; rows/plain stay empty.
+	// doc is the virtual multi-file document, nil when one file is shown.
 	doc   *blockDoc
 	gut   *gutterState
 	cache *rowCache
 
 	notes []string // metadata lines above the diff
-	// noteRows is those lines wrapped to the viewport width, with notePlain
-	// their searchable text. A long commit description takes as many rows as
-	// it needs instead of being clipped.
+	// noteRows is those lines wrapped to the viewport width, notePlain their
+	// searchable text.
 	noteRows  []string
 	notePlain []string
 	rows      []contentRow
 	indexed   int      // rows already folded into hunks, bands and width
 	laid      int      // document lines already laid out as rows
 	rendered  []string // ANSI-rendered content lines
-	// blank is the row placeholder buffer handed to the viewport. It is
-	// reused across rebuilds: a three-million row document must not allocate
-	// sixteen megabytes every time the window resizes.
+	// wrapPrefix[i] is the display line row i starts at when soft wrap is on.
+	wrapPrefix []int
+	// blank is the row placeholder buffer handed to the viewport, reused across
+	// rebuilds.
 	blank     []string
 	plain     []string // plain text, search coordinates
 	hunks     []int    // rendered-line indexes of hunk headers
 	fileBands []int    // rendered-line indexes of per-file bands
-	// hunkBlock and hunkLocal map a global hunk index back to its block, so
-	// the current hunk's patch can be rebuilt from a virtual document.
+	// hunkBlock and hunkLocal map a global hunk index back to its block.
 	hunkBlock []int32
 	hunkLocal []int32
 	// hunkCur is the hunk targeted by the last hunk jump, or -1.
@@ -148,13 +133,28 @@ type Model struct {
 	term     string
 	matches  []Match
 	matchIdx int
-	// searchSeq numbers the running search so the background scan's results
-	// can be dropped when it has been replaced or cleared.
+	// searchSeq numbers the running search so late results can be dropped.
 	searchSeq int
-	// folded is a lazily built, ASCII-lowercased mirror of plain. Folding
-	// byte-for-byte keeps match offsets valid and lets search use
-	// strings.Index instead of scanning character by character.
+	// folded is an ASCII-lowercased mirror of plain, so search can use strings.Index
+	// and match offsets stay valid.
 	folded []string
+
+	// cursor is the row the staging cursor sits on, or -1 before it is placed; anchor
+	// is the other end of a range, or -1. pending is the mark set select mode applies
+	// in one go, markPath the file it belongs to, since a selection names lines and
+	// not files. selectable says staging is available here, cursorOn that this pane
+	// holds the keys.
+	cursor     int
+	anchor     int
+	pending    *stage.Selection
+	markPath   string
+	selectable bool
+	selectMode bool
+	cursorOn   bool
+	// fileStaged is which half of the file on screen this pane shows; blockStaged
+	// carries one for each block of a document, where a file can appear twice.
+	fileStaged  bool
+	blockStaged []bool
 
 	smooth  bool
 	spring  harmonica.Spring
@@ -163,30 +163,25 @@ type Model struct {
 	target  float64
 	anim    bool
 	animSeq int
-	// lastFrame is when the previous animation frame ran, so the spring can
-	// advance by wall-clock time instead of a fixed assumption.
+	// lastFrame is when the previous frame ran, so the spring advances by real time.
 	lastFrame time.Time
 
-	// syn is the token index of each file the view has drawn, built on first
-	// paint and dropped when the setting changes. syntaxOn gates the whole
-	// feature so the off path is exactly the pre-syntax renderer.
+	// syn is the token index of each drawn file, built on first paint; syntaxOn gates
+	// the feature so the off path is the plain renderer.
 	syn      map[rowSource]*syntax.Index
 	syntaxOn bool
 
 	split bool
 	wrap  bool
-	// rx is the compiled regular expression when the search term looks like
-	// one, so patterns work without a separate mode.
+	// rx is the compiled regular expression when the term looks like one.
 	rx              *regexp.Regexp
 	width, height   int
 	showLineNumbers bool
 }
 
-// scrollFrameMsg drives smooth scroll animation frames. The sequence number
-// makes stale frames from a superseded animation harmless: exactly one chain
-// of ticks can be alive at a time. The timestamp lets the spring advance by
-// the real elapsed time, so a slow frame stretches the delay but not the
-// motion.
+// scrollFrameMsg drives one animation frame. The sequence number makes stale
+// frames from a superseded animation harmless; the timestamp gives the spring the
+// real elapsed time.
 type scrollFrameMsg struct {
 	seq int
 	at  time.Time
@@ -221,6 +216,9 @@ func New(smooth bool, st styles.Styles) Model {
 		spring:          harmonica.NewSpring(frameInterval.Seconds(), baseSpringFreq, 1.0),
 		showLineNumbers: true,
 		hunkCur:         -1,
+		cursor:          -1,
+		anchor:          -1,
+		pending:         stage.NewSelection(),
 	}
 }
 
@@ -230,8 +228,7 @@ func (m *Model) SetStyles(st styles.Styles) {
 	m.rebuild()
 }
 
-// SetSyntax turns token colouring on or off and drops the indexes either way, so
-// the next paint rebuilds what the setting now asks for.
+// SetSyntax turns token colouring on or off and drops the indexes either way.
 func (m *Model) SetSyntax(on bool) {
 	if m.syntaxOn == on {
 		return
@@ -241,8 +238,7 @@ func (m *Model) SetSyntax(on bool) {
 	m.rebuild()
 }
 
-// SetSize resizes the viewport. Scrollbars live inside the given box, so the
-// viewport gets one column and one row less.
+// SetSize resizes the viewport; the scrollbars live inside the given box.
 func (m *Model) SetSize(width, height int) {
 	changed := m.width != width
 	m.width, m.height = width, height
@@ -254,37 +250,49 @@ func (m *Model) SetSize(width, height int) {
 	}
 }
 
-// bars reports whether the scrollbars are shown. Wrapped text never scrolls
-// horizontally and already uses the full width, so bars are hidden there.
+// bars reports whether the scrollbars are shown.
 func (m Model) bars() bool { return !m.vp.SoftWrap && m.width >= 3 && m.height >= 3 }
 
 func (m Model) vpWidth() int {
-	if !m.bars() {
-		return max(1, m.width)
+	w := m.width
+	if m.bars() {
+		w -= scrollbarSize
 	}
-	return max(1, m.width-scrollbarSize)
+	// Wrapped rows carry the staging bar inside them; the unwrapped path paints it
+	// outside the row cache and rowBudget accounts for it instead.
+	if m.vp.SoftWrap && m.barWidth() > 0 {
+		w -= m.barWidth()
+	}
+	return max(1, w)
+}
+
+// rowBudget is the cells a row's content may fill: the viewport minus the staging
+// bar that paintRow prepends.
+func (m Model) rowBudget() int {
+	if m.vp.SoftWrap {
+		// vpWidth already took the bar off.
+		return m.vpWidth()
+	}
+	return max(1, m.vpWidth()-m.barWidth())
 }
 
 func (m Model) vpHeight() int {
 	if !m.bars() {
 		return max(1, m.height)
 	}
-	// The bottom bar only takes a row when there is something to scroll
-	// horizontally.
+	// The bottom bar only takes a row when there is something to scroll sideways.
 	if m.hscroll() {
 		return max(1, m.height-scrollbarSize)
 	}
 	return max(1, m.height)
 }
 
-// hscroll reports whether the content is wider than the viewport, i.e.
-// whether the horizontal scrollbar is needed at all.
+// hscroll reports whether the horizontal scrollbar is needed at all.
 func (m Model) hscroll() bool {
-	return m.bars() && m.contentWidth > m.vpWidth()
+	return m.bars() && m.contentWidth > m.rowBudget()
 }
 
-// SetWrap toggles soft wrapping. Wrapping is disabled in split mode, where
-// the two columns already make lines narrow.
+// SetWrap toggles soft wrapping, which split mode disables.
 func (m *Model) SetWrap(wrap bool) {
 	if m.wrap == wrap {
 		return
@@ -343,12 +351,11 @@ func (m *Model) SetFile(f *diff.File) {
 	m.setFlat(f)
 }
 
-// hugeFileLines is where a single diff switches to the virtual layout. Below
-// it the flat row slice is cheaper than the indirection.
+// hugeFileLines is where a single diff switches to the virtual layout.
 const hugeFileLines = 50_000
 
-// setFlat lays the diff out as one flat row slice, the layout used for every
-// ordinary file and the reference the virtual layout has to match.
+// setFlat lays the diff out as one flat row slice, the reference the virtual
+// layout has to match.
 func (m *Model) setFlat(f *diff.File) {
 	m.doc = nil
 	m.gut.lineFor = nil
@@ -358,6 +365,9 @@ func (m *Model) setFlat(f *diff.File) {
 	m.matches = nil
 	m.matchIdx = -1
 	m.hunkCur = -1
+	m.pruneSyntax()
+	m.resetCursor()
+	m.blank = m.blank[:0] // a new document needs an exact line count
 	m.cancelAnim()
 	m.setContent()
 	m.vp.GotoTop()
@@ -401,6 +411,7 @@ func (m *Model) SetLines(f *diff.File) {
 	m.matches = nil
 	m.matchIdx = -1
 	m.hunkCur = -1
+	m.pruneSyntax()
 	m.cancelAnim()
 	m.rows = m.rows[:0]
 	m.plain = m.plain[:0]
@@ -500,8 +511,7 @@ func (m Model) lineAt(i int) string {
 }
 
 // SetDocument replaces the view with a virtual multi-file document. load
-// materialises block i's diff on demand: only a small window of blocks keeps
-// its rows, every other block stays layout only.
+// materialises block i's diff on demand: only a window of blocks keeps its rows.
 func (m *Model) SetDocument(load func(i int) *diff.File) {
 	m.doc = newBlockDoc(load)
 	m.gut.file = nil
@@ -511,7 +521,10 @@ func (m *Model) SetDocument(load func(i int) *diff.File) {
 	m.matches = nil
 	m.matchIdx = -1
 	m.hunkCur = -1
+	m.pruneSyntax()
+	m.resetCursor()
 	m.cancelAnim()
+	m.blank = m.blank[:0] // a new document needs an exact line count
 	m.rows = m.rows[:0]
 	m.plain = m.plain[:0]
 	m.rendered = nil
@@ -519,6 +532,7 @@ func (m *Model) SetDocument(load func(i int) *diff.File) {
 	m.fileBands = m.fileBands[:0]
 	m.hunkBlock = m.hunkBlock[:0]
 	m.hunkLocal = m.hunkLocal[:0]
+	m.blockStaged = m.blockStaged[:0]
 	m.doc.setMode(m.split)
 	m.rebuildDoc()
 	m.vp.GotoTop()
@@ -526,7 +540,10 @@ func (m *Model) SetDocument(load func(i int) *diff.File) {
 
 // AppendBlocks adds the next files to the virtual document. Their layout is
 // recorded immediately, their rows only while they stay in the view window.
-func (m *Model) AppendBlocks(files []*diff.File) {
+func (m *Model) AppendBlocks(files []*diff.File) { m.appendBlocks(files, nil) }
+
+// appendBlocks is AppendBlocks with the band label of each block.
+func (m *Model) appendBlocks(files []*diff.File, tags []string) {
 	if m.doc == nil || len(files) == 0 {
 		return
 	}
@@ -535,10 +552,36 @@ func (m *Model) AppendBlocks(files []*diff.File) {
 	if m.hasFileHeader() {
 		pre++
 	}
-	m.doc.add(files, pre)
+	before, preCount := m.doc.nblocks(), m.doc.preCount()
+	m.doc.add(files, pre, tags)
 	m.doc.setMode(m.split)
-	m.rebuildNav()
+	if before == 0 || preCount != pre {
+		// The first blocks, or the rows above them moved: rebuild the whole nav.
+		m.rebuildNav()
+	} else {
+		// Streaming a chunk must not re-walk the blocks before it.
+		m.appendNav(before)
+	}
 	m.rebuildDoc()
+}
+
+// appendNav records the hunk and band entries for the blocks added since from.
+func (m *Model) appendNav(from int) {
+	n := m.doc.nblocks()
+	for i := max(0, from); i < n; i++ {
+		start, hunks := m.doc.layout(i)
+		for j, rel := range hunks {
+			m.hunks = append(m.hunks, start+rel)
+			m.hunkBlock = append(m.hunkBlock, int32(i))
+			m.hunkLocal = append(m.hunkLocal, int32(j))
+		}
+		// A band is a file, not a block: a single-file document is laid out
+		// in many blocks, and every one of them would otherwise act on the
+		// whole file from a row nobody would call a file header.
+		if i == 0 || !m.doc.single() {
+			m.fileBands = append(m.fileBands, start)
+		}
+	}
 }
 
 // rebuildNav recomputes the hunk and band lists from the document layout.
@@ -556,12 +599,13 @@ func (m *Model) rebuildNav() {
 			m.hunkBlock = append(m.hunkBlock, int32(i))
 			m.hunkLocal = append(m.hunkLocal, int32(j))
 		}
-		m.fileBands = append(m.fileBands, start)
+		if i == 0 || !m.doc.single() {
+			m.fileBands = append(m.fileBands, start)
+		}
 	}
 }
 
-// rebuildDoc refreshes everything derived from the document layout: the hunk
-// and band lists, the content width and the row count.
+// rebuildDoc refreshes everything derived from the layout: nav, width, rows.
 func (m *Model) rebuildDoc() {
 	m.cache.reset()
 	m.updateGutterWidth()
@@ -570,8 +614,7 @@ func (m *Model) rebuildDoc() {
 	m.pushContent()
 }
 
-// DocBlocks reports how many blocks a virtual document holds and how many of
-// them currently carry rows.
+// DocBlocks reports how many blocks a document holds and how many carry rows.
 func (m Model) DocBlocks() (blocks, materialised int) {
 	if m.doc == nil {
 		return 0, 0
@@ -580,10 +623,8 @@ func (m Model) DocBlocks() (blocks, materialised int) {
 }
 
 // Update processes animation frames and forwards everything else to the
-// viewport. With smooth scrolling on, a discrete step (a scroll key or a wheel
-// tick) moves the animation target instead of the viewport, so every way of
-// moving through a diff glides and repeated presses accumulate instead of
-// restarting from wherever the spring happened to be.
+// viewport. With smooth scrolling on, a discrete step moves the animation target
+// instead of the viewport, so every way of moving glides and presses accumulate.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	if frame, ok := msg.(scrollFrameMsg); ok {
 		if frame.seq != m.animSeq {
@@ -632,12 +673,14 @@ func (m Model) maxScroll() int {
 	return max(0, m.nrows()-m.vpHeight())
 }
 
-// View renders the visible window with its scrollbars. Painting is
-// O(viewport), not O(file): only the rows in view are styled, which keeps
-// navigation instant on diffs with hundreds of thousands of lines.
+// View renders the visible window with its scrollbars. Painting is O(viewport),
+// not O(file): only the rows in view are styled.
 func (m Model) View() string {
 	if !m.bars() {
-		return m.vp.View()
+		if m.barWidth() == 0 {
+			return m.vp.View()
+		}
+		return m.wrapWithBar()
 	}
 
 	w, h := m.vpWidth(), m.vpHeight()
@@ -721,20 +764,16 @@ func (m Model) MatchCount() int { return len(m.matches) }
 // SearchTerm returns the active search term, if any.
 func (m Model) SearchTerm() string { return m.term }
 
-// SearchResultsMsg carries the complete match list of a background search.
-// Seq identifies the search it belongs to, so results from a superseded or
-// cancelled search are recognised and dropped instead of painted.
+// SearchResultsMsg carries the complete match list of a background search. Seq
+// identifies the search it belongs to, so stale results are dropped.
 type SearchResultsMsg struct {
 	Seq     int
 	Term    string
 	Matches []Match
 }
 
-// Search starts a two-phase search: the rows in view are scanned first, so
-// highlights appear on the current screen without waiting, and the whole
-// document is then scanned in the background, delivered as SearchResultsMsg.
-// It returns how many matches the first phase found and the command that
-// finishes the scan.
+// Search scans the rows in view first, so highlights appear at once, then the
+// whole document in the background, delivered as SearchResultsMsg.
 func (m *Model) Search(term string) (int, tea.Cmd) {
 	m.term = term
 	m.rx = searchRegexp(term)
@@ -768,8 +807,7 @@ func (m Model) scanWindow(term string, from, to int) []Match {
 }
 
 // scanAllCmd scans the whole document off the UI goroutine. A single paged file
-// scans its own sources, which is what keeps a search over millions of rows
-// cheap; everything else folds line by line.
+// scans its sources; everything else folds line by line.
 func (m Model) scanAllCmd(term string) tea.Cmd {
 	if m.nlines() == 0 {
 		return nil
@@ -798,11 +836,8 @@ func (m Model) scanAllCmd(term string) tea.Cmd {
 	return scanLinesCmd(m.nlines(), m.lineAt, m.foldedFor(), term, seq, m.lineBase())
 }
 
-// sourceMatches finds term in document lines [from, to) of a single paged file
-// document by searching the diff's own sources. The rows above the document are
-// scanned line by line; the diff rows come from the sources, mapped back to
-// document lines. It reports false when the document cannot answer that way, or
-// when the term needs the rendered text.
+// sourceMatches finds term in document lines [from, to) by searching a paged file's
+// own sources, which keeps a search over millions of rows cheap.
 func (m Model) sourceMatches(term string, from, to int) ([]Match, bool) {
 	if m.doc == nil || m.doc.src == nil || !m.doc.src.Paged() {
 		return nil, false
@@ -810,8 +845,8 @@ func (m Model) sourceMatches(term string, from, to int) ([]Match, bool) {
 	return sourceMatches(m.doc.src, len(m.doc.pre), m.doc.preTxt, m.lineBase(), term, from, to)
 }
 
-// sourceMatches is the scan behind sourceMatches, split out so a background scan
-// can hold only the values it needs and never touch the model.
+// sourceMatches is the scan behind sourceMatches, split out so it never touches the
+// model.
 func sourceMatches(src *diff.File, pre int, preTxt []string, base int, term string, from, to int) ([]Match, bool) {
 	var out []Match
 	lo, hi := max(0, from), min(to, pre)
@@ -834,10 +869,8 @@ func sourceMatches(src *diff.File, pre int, preTxt []string, base int, term stri
 	return out, true
 }
 
-// lineBase converts a document line index into the flat index the rows use.
-// A flat document's plain slice already includes the notes and the header, so
-// the two coincide; a virtual document indexes lines from zero, so its rows
-// start len(notes)+1 further along.
+// lineBase converts a document line index into the flat index the rows use: the two
+// coincide for a flat document, a virtual one starts after the notes and header.
 func (m Model) lineBase() int {
 	if m.doc != nil {
 		return m.doc.flatBase()
@@ -845,8 +878,7 @@ func (m Model) lineBase() int {
 	return 0
 }
 
-// visibleLineRange is the span of lines the first phase scans: whatever the
-// rows in view cover.
+// visibleLineRange is the span of lines the rows in view cover.
 func (m Model) visibleLineRange() (int, int) {
 	if m.doc != nil {
 		return m.doc.lineRange(m.vp.YOffset(), m.vpHeight())
@@ -855,8 +887,7 @@ func (m Model) visibleLineRange() (int, int) {
 	return from, min(m.nlines(), from+m.vpHeight())
 }
 
-// foldedFor returns the lowercase mirror when one is built for a flat
-// document. A virtual document has no mirror and folds line by line.
+// foldedFor returns the lowercase mirror of a flat document, if built.
 func (m Model) foldedFor() []string {
 	if m.doc != nil {
 		return nil
@@ -865,8 +896,7 @@ func (m Model) foldedFor() []string {
 }
 
 // ApplySearchResults installs the completed match list and jumps to the first
-// match at or below the current position. It reports false when the results
-// belong to a search that has been replaced or cleared.
+// match at or below the current position.
 func (m *Model) ApplySearchResults(msg SearchResultsMsg) bool {
 	if msg.Seq != m.searchSeq || msg.Term != m.term || m.term == "" {
 		return false
@@ -883,8 +913,7 @@ func (m *Model) ApplySearchResults(msg SearchResultsMsg) bool {
 	return true
 }
 
-// ensureFolded builds the ASCII-lowercase mirror used by the fast scanner when
-// it is missing or stale.
+// ensureFolded builds the ASCII-lowercase mirror the fast scanner uses.
 func (m *Model) ensureFolded() {
 	if m.doc != nil {
 		m.folded = nil
@@ -899,11 +928,8 @@ func (m *Model) ensureFolded() {
 	}
 }
 
-// scanLines collects the matches of term in lines[from:to]. text returns the
-// text of a line; folded is an optional lowercase mirror of the whole document
-// (nil means fold each line as it is scanned, which is what a virtual document
-// needs since it does not keep every line in memory). lineBase is added to the
-// line index so the matches come back in row coordinates.
+// scanLines collects the matches of term in lines[from:to] in row coordinates;
+// folded is an optional lowercase mirror of the whole document.
 func scanLines(count int, text func(int) string, folded []string, term string, from, to, lineBase int) []Match {
 	from = max(0, from)
 	to = min(to, count)
@@ -919,8 +945,7 @@ func scanLines(count int, text func(int) string, folded []string, term string, f
 		var out []Match
 
 		if folded != nil {
-			// Flat document: the mirror is built once, so every line is a
-			// plain string search.
+			// Flat document: the mirror is built once, so every line is a plain search.
 			for i := from; i < to && i < len(folded); i++ {
 				line := folded[i]
 				for at := 0; at <= len(line)-len(lower); {
@@ -936,8 +961,8 @@ func scanLines(count int, text func(int) string, folded []string, term string, f
 			return out
 		}
 
-		// Virtual document: no mirror, so fold into a scratch buffer and
-		// search it. This keeps a scan of millions of lines allocation-free.
+		// Virtual document: fold into a scratch buffer, which keeps the scan
+		// allocation-free.
 		lowerB := []byte(lower)
 		var scratch []byte
 		for i := from; i < to; i++ {
@@ -964,10 +989,8 @@ func scanLines(count int, text func(int) string, folded []string, term string, f
 	return out
 }
 
-// searchRegexp compiles term as a case-insensitive pattern when it contains
-// anything that reads as a regular expression. A plain word stays a plain
-// substring search, which is what the fast paths are built for. A pattern that
-// does not compile falls back to the literal search instead of failing.
+// searchRegexp compiles term as a case-insensitive pattern when it reads as one.
+// A plain word stays a substring search; a bad pattern falls back to literal.
 func searchRegexp(term string) *regexp.Regexp {
 	if !strings.ContainsAny(term, `\.+*?()[]{}^$|`) {
 		return nil
@@ -1020,8 +1043,7 @@ func scanLinesCmd(count int, text func(int) string, folded []string, term string
 	}
 }
 
-// indexAll recomputes the match list for the active term. It never scrolls, so
-// a document can grow while a search is running without moving the view.
+// indexAll recomputes the match list without scrolling.
 func (m *Model) indexAll() {
 	m.matches = nil
 	if m.term == "" {
@@ -1042,8 +1064,7 @@ func (m *Model) reindex() {
 	m.indexAll()
 }
 
-// foldASCII lowers ASCII letters without changing byte offsets, so spans map
-// back onto the original text.
+// foldASCII lowers ASCII letters without changing byte offsets.
 func foldASCII(s string) string {
 	needs := false
 	for i := 0; i < len(s); i++ {
@@ -1120,9 +1141,7 @@ func (m Model) nearestMatch(from int) int {
 	return len(m.matches) - 1
 }
 
-// rowForLine maps a match's flat line index onto the row that paints it. In a
-// flat document the two coincide; a virtual document has no notes or header
-// row, and its blocks are prefix-summed, so the mapping has to be asked for.
+// rowForLine maps a flat line index onto the row that paints it.
 func (m Model) rowForLine(flat int) int {
 	if m.doc != nil {
 		return m.doc.rowForLine(flat - m.lineBase())
@@ -1130,8 +1149,8 @@ func (m Model) rowForLine(flat int) int {
 	return flat
 }
 
-// ScrollTo scrolls smoothly (or directly) to the given rendered-line offset.
-// The returned command drives the animation when smooth scrolling is on.
+// ScrollTo glides (or jumps) to a rendered-line offset and returns the command
+// that drives the animation.
 func (m *Model) ScrollTo(line int) tea.Cmd {
 	line = max(0, min(line, m.maxScroll()))
 	if !m.smooth {
@@ -1153,24 +1172,47 @@ func (m *Model) ScrollTo(line int) tea.Cmd {
 	return tickScroll(m.animSeq)
 }
 
-// JumpTo scrolls immediately, cancelling any animation in flight. Selection
-// driven navigation uses this so holding an arrow key never leaves the pane
-// easing after the key is released.
 func (m *Model) JumpTo(line int) {
 	m.cancelAnim()
+	m.ensureContent()
 	m.vp.SetYOffset(max(0, line))
 }
 
-// Anchor returns where the reader is: the flat line at the top of the
-// viewport. A refresh that replaces the content with SetFileAt puts them back
-// there, so saving a file does not throw away their place in a long diff. A
-// flat document has no line index, so plain rows serve, and JumpToLine hands
-// the value straight back.
+// SetScroll puts the top of the viewport at a row, clamped to the document, which
+// is how a reload puts the reader back.
+func (m *Model) SetScroll(row int) {
+	m.cancelAnim()
+	m.vp.SetYOffset(max(0, min(row, max(0, m.nrows()-1))))
+}
+
+// Anchor is where the reader is: the flat line at the top of the viewport, which a
+// refresh replays with SetFileAt. A flat document has no line index, so rows serve.
 func (m Model) Anchor() int {
 	if m.doc != nil {
 		return m.doc.lineAtRow(m.vp.YOffset()) + m.lineBase()
 	}
 	return m.vp.YOffset()
+}
+
+// TopLine is the diff line painted at the top of the pane, the reader's place in the
+// content rather than in the rows: staging removes rows above them.
+func (m Model) TopLine() int {
+	if m.doc != nil {
+		return m.Anchor()
+	}
+	idx := m.vp.YOffset() - m.gut.header - len(m.noteRows)
+	if m.file == nil {
+		return max(0, idx)
+	}
+	return max(0, min(idx, m.file.NLines()-1))
+}
+
+// rowForDiffLine is the row that paints a diff line.
+func (m Model) rowForDiffLine(line int) int {
+	if m.doc != nil {
+		return m.doc.rowForLine(line - m.lineBase())
+	}
+	return line + m.gut.header + len(m.noteRows)
 }
 
 // SetFileAt shows f with the viewport on flat line, without animating.
@@ -1183,9 +1225,6 @@ func (m *Model) SetFileAt(f *diff.File, line int) {
 func (m *Model) JumpToLine(line int) {
 	m.JumpTo(m.rowForLine(max(0, line)))
 }
-
-// CancelScroll stops any running scroll animation.
-func (m *Model) CancelScroll() { m.cancelAnim() }
 
 // GotoBottom scrolls to the end of the diff.
 func (m *Model) GotoBottom() tea.Cmd {
@@ -1200,6 +1239,9 @@ func (m *Model) GotoBottom() tea.Cmd {
 	m.animSeq++
 	return tickScroll(m.animSeq)
 }
+
+// CancelScroll stops any running scroll animation.
+func (m *Model) CancelScroll() { m.cancelAnim() }
 
 func (m *Model) cancelAnim() {
 	m.anim = false
@@ -1246,9 +1288,8 @@ func tickScroll(seq int) tea.Cmd {
 	})
 }
 
-// NextHunk scrolls to the next hunk header, if any. The first press from
-// above the first hunk lands on that hunk; later presses step through the
-// rest.
+// NextHunk moves to the next hunk header. The first press from above the first
+// hunk lands on that hunk.
 func (m *Model) NextHunk() tea.Cmd {
 	next := m.CurrentHunkIndex() + 1
 	if next < 0 || next >= len(m.hunks) {
@@ -1277,8 +1318,8 @@ func (m *Model) JumpToBand(i int) tea.Cmd {
 	return m.ScrollTo(m.fileBands[i])
 }
 
-// JumpToBandNow jumps to the per-file band immediately. Sidebar navigation
-// uses this so rapid selection changes never queue animations.
+// JumpToBandNow jumps to a band immediately, so rapid selection changes never
+// queue animations.
 func (m *Model) JumpToBandNow(i int) {
 	if i < 0 || i >= len(m.fileBands) {
 		return
@@ -1287,14 +1328,11 @@ func (m *Model) JumpToBandNow(i int) {
 	m.JumpTo(m.fileBands[i])
 }
 
-// HasBand reports whether the i-th per-file band has been laid out. A document
-// that streams in only knows its bands up to the last block received.
+// HasBand reports whether band i has been laid out yet.
 func (m Model) HasBand(i int) bool { return i >= 0 && i < len(m.fileBands) }
 
-// CurrentHunkIndex returns the index of the hunk currently in view, or -1.
-// A hunk targeted by NextHunk/PrevHunk wins while its header is still on
-// screen, so the last hunk in a short file (which cannot scroll to the top)
-// is still the one reported.
+// CurrentHunkIndex returns the hunk a keystroke acts on, or -1: the one the cursor
+// is in, or without a cursor the one at the top of the window.
 func (m Model) CurrentHunkIndex() int {
 	cur := m.vp.YOffset()
 	if m.hunkCur >= 0 && m.hunkCur < len(m.hunks) {
@@ -1331,8 +1369,7 @@ func (m Model) CurrentHunkPatch() string {
 	return m.file.HunkPatch(idx)
 }
 
-// buildRows lays out the content rows and their searchable plain text for
-// the current rendering mode.
+// buildRows lays out the content rows and their searchable text for this mode.
 func (m *Model) buildRows() {
 	m.rows = m.rows[:0]
 	m.plain = m.plain[:0]
@@ -1354,9 +1391,7 @@ func (m *Model) buildRows() {
 	}
 }
 
-// appendRows lays out the document lines from index from onwards, keeping the
-// rows already built for the lines before it. flat indexes stay stable because
-// the sign-inclusive prefix is constant.
+// appendRows lays out lines from index from onwards, keeping the rows before it.
 func (m *Model) appendRows(from int) {
 	if m.file == nil || from >= m.file.NLines() {
 		return
@@ -1382,8 +1417,7 @@ func (m *Model) appendRows(from int) {
 	m.laid = from + len(lines)
 }
 
-// splitRows pairs deletion and addition runs into side-by-side rows, leaving
-// context lines on both sides and keeping hunk headers full width.
+// splitRows pairs deletion and addition runs into side-by-side rows.
 func splitRows(lines []diff.Line, base int) []contentRow {
 	rows := make([]contentRow, 0, len(lines))
 
@@ -1435,8 +1469,7 @@ func splitRows(lines []diff.Line, base int) []contentRow {
 	return rows
 }
 
-// setContent lays out the rows for the current mode and refreshes the
-// viewport index.
+// setContent lays out the rows for this mode and refreshes the viewport index.
 func (m *Model) setContent() {
 	m.refreshNoteRows()
 	if m.doc != nil {
@@ -1447,10 +1480,8 @@ func (m *Model) setContent() {
 	m.rebuild()
 }
 
-// rebuild refreshes the search index, navigation stops, content width and the
-// viewport's line count. In wrap mode it renders every row, because wrapped
-// height depends on the text; otherwise the viewport only needs the count and
-// rows are styled lazily in View.
+// rebuild refreshes the search index, navigation stops, content width and the line
+// count. Wrap mode renders every row, since wrapped height depends on the text.
 func (m *Model) rebuild() {
 	m.refreshNoteRows()
 	m.gut.header = 0
@@ -1472,15 +1503,16 @@ func (m *Model) rebuild() {
 
 	m.hunks = m.hunks[:0]
 	m.fileBands = m.fileBands[:0]
+	m.hunkBlock = m.hunkBlock[:0]
+	m.hunkLocal = m.hunkLocal[:0]
 	m.contentWidth = 0
 	m.indexed = 0
 	m.indexRows()
 	m.pushContent()
 }
 
-// indexRows folds the rows laid out since the last pass into the navigation
-// stops and the content width. Appending blocks to a document only adds rows
-// at the end, so the extension path runs this over the tail alone.
+// indexRows folds the rows laid out since the last pass into the navigation stops
+// and the content width; appending only adds rows at the end.
 func (m *Model) indexRows() {
 	for i := m.indexed; i < len(m.rows); i++ {
 		r := m.rows[i]
@@ -1495,15 +1527,29 @@ func (m *Model) indexRows() {
 	m.indexed = len(m.rows)
 }
 
-// pushContent hands the row count to the viewport. Non-wrapped mode feeds
-// blank lines and styles the window on demand.
+// contentSyncStep is how far the viewport's line count may lag the document.
+const contentSyncStep = 1024
+
+// pushContent hands the row count to the viewport; non-wrapped mode feeds blank
+// lines and styles the window on demand.
 func (m *Model) pushContent() {
 	if m.vp.SoftWrap {
 		n := m.nrows()
 		rendered := make([]string, n)
-		for i := 0; i < n; i++ {
-			rendered[i] = m.renderRow(i, m.rowAt(i))
+		width := max(1, m.vp.Width())
+		// A wrapped row is several display lines tall, so each records where it starts.
+		if cap(m.wrapPrefix) < n+1 {
+			m.wrapPrefix = make([]int, n+1)
+		} else {
+			m.wrapPrefix = m.wrapPrefix[:n+1]
 		}
+		lines := 0
+		for i := 0; i < n; i++ {
+			m.wrapPrefix[i] = lines
+			rendered[i] = m.renderRow(i, m.rowAt(i))
+			lines += max(1, (ansi.StringWidth(rendered[i])+width-1)/width)
+		}
+		m.wrapPrefix[n] = lines
 		m.rendered = rendered
 		m.vp.SetContentLines(rendered)
 		for _, l := range rendered {
@@ -1513,29 +1559,34 @@ func (m *Model) pushContent() {
 	}
 
 	m.rendered = nil
-	// The viewport only needs the line count for scrolling; View styles the
-	// window itself. The first line carries the content width so the
-	// viewport still clamps horizontal scrolling correctly, and it is never
-	// painted in this mode.
+	// The viewport only needs the line count; the first line carries the content width
+	// so horizontal scrolling still clamps, and it is never painted here.
 	n := m.nrows()
+	// SetContentLines walks every line, so syncing on each chunk is quadratic; a count
+	// slightly behind is enough to scroll by, and SyncContent makes it exact.
+	if len(m.blank) > 0 && n > len(m.blank) && n-len(m.blank) < contentSyncStep {
+		return
+	}
 	if cap(m.blank) < n {
 		m.blank = make([]string, n)
 	}
 	m.blank = m.blank[:n]
-	clear(m.blank)
+	// Only the first entry ever carries anything: clearing the slice would cost the
+	// document per chunk.
+	if n > 0 && m.blank[0] != "" {
+		m.blank[0] = ""
+	}
 	if n > 0 && m.contentWidth > m.vpWidth() {
 		m.blank[0] = strings.Repeat(" ", m.contentWidth)
 	}
 	m.vp.SetContentLines(m.blank)
-	// The horizontal bar only takes a row when it is needed, so the viewport
-	// height has to follow both the size and the content width.
+	// The horizontal bar only takes a row when needed, so the height follows both.
 	m.vp.SetWidth(m.vpWidth())
 	m.vp.SetHeight(m.vpHeight())
 }
 
-// ExtendFile swaps in the same document with more blocks appended at the end,
-// keeping the rows already laid out, the scroll position and the active
-// search. A document that streams in therefore never jumps under the reader.
+// ExtendFile appends blocks, keeping the rows already laid out, the scroll position
+// and the search, so a document never jumps under the reader.
 func (m *Model) ExtendFile(f *diff.File) {
 	if m.file == nil || f == nil {
 		m.SetFile(f)
@@ -1560,9 +1611,7 @@ func (m *Model) ExtendFile(f *diff.File) {
 }
 
 // rowWidth is one row's contribution to the content width, which drives the
-// horizontal scrollbar. Styling never changes cell width. In split mode the
-// two columns stay fixed and the text inside each column scrolls, so the
-// reported width is the viewport plus the longest overflow of either side.
+// horizontal scrollbar.
 func (m Model) rowWidth(r contentRow) int {
 	if m.split {
 		colW := m.vpWidth() / 2
@@ -1609,12 +1658,13 @@ func (m Model) visibleLines(w, h int) []string {
 	for i := start; i < end; i++ {
 		line, ok := m.cache.rows[i]
 		if !ok {
-			line = m.paintRow(i, w)
+			line = m.paintRow(i)
 			if len(m.cache.rows) < maxCachedRows {
 				m.cache.rows[i] = line
 			}
 		}
-		out = append(out, line)
+		// The cursor bar is prepended outside the cache: it changes with a keystroke.
+		out = append(out, m.barAt(i)+line)
 	}
 	for len(out) < h {
 		out = append(out, strings.Repeat(" ", w))
@@ -1622,41 +1672,41 @@ func (m Model) visibleLines(w, h int) []string {
 	return out
 }
 
-// paintRow styles, clips and pads one row at its place in the window. The
-// result depends only on the row, the viewport width and the horizontal
-// offset, which is what the row cache keys on.
-func (m Model) paintRow(i, w int) string {
+// paintRow styles, clips and pads one row. The result depends only on the row, the
+// width and the horizontal offset, which is what the cache keys on.
+func (m Model) paintRow(i int) string {
 	gutW := 0
 	if m.showLineNumbers && !m.split {
 		gutW = m.gut.cells()
 	}
-	contentW := max(0, w-gutW)
+	contentW := max(0, m.rowBudget()-gutW)
 	x := m.vp.XOffset()
 
-	text := m.renderRow(i, m.rowAt(i))
-	switch {
-	case m.split:
-		// Each column already scrolled its own text; only oversized
-		// full-width rows (hunk headers) need clipping.
-		if ansi.StringWidth(text) > w {
-			text = ansi.Cut(text, 0, w)
+	var text string
+	if m.split {
+		// Split columns are laid out to the width they are given, so the bar comes out of
+		// the budget instead of overflowing.
+		text = m.splitRow(i, contentW)
+	} else {
+		text = m.renderRow(i, m.rowAt(i))
+		switch {
+		case x > 0:
+			text = ansi.Cut(text, x, x+contentW)
+		case ansi.StringWidth(text) > contentW:
+			text = ansi.Cut(text, 0, contentW)
 		}
-	case x > 0:
-		text = ansi.Cut(text, x, x+contentW)
-	case ansi.StringWidth(text) > contentW:
-		text = ansi.Cut(text, 0, contentW)
 	}
 
+	// The bar is prepended by visibleLines, so this depends only on document and width.
 	line := gutterText(m.gut, viewport.GutterContext{Index: i, TotalLines: m.nrows()}) + text
-	if pad := w - ansi.StringWidth(line); pad > 0 {
+	if pad := m.rowBudget() - ansi.StringWidth(line); pad > 0 {
 		line += strings.Repeat(" ", pad)
 	}
 	return line
 }
 
-// spansFor returns the match run of one line. matches are kept sorted by line,
-// so painting a row costs a binary search instead of a map with an entry per
-// match (which is millions of entries on a big document).
+// spansFor returns the match run of one line; matches are sorted, so this is a
+// binary search instead of a map.
 func (m Model) spansFor(line int) []Match {
 	i := sort.Search(len(m.matches), func(k int) bool { return m.matches[k].Line >= line })
 	if i >= len(m.matches) || m.matches[i].Line != line {
@@ -1676,15 +1726,14 @@ func (m Model) renderRow(row int, r contentRow) string {
 	case r.fullWidth:
 		return m.renderLine(row, r.line, r.flat)
 	default:
-		return m.renderSplitRow(row, r)
+		return m.renderSplitRow(row)
 	}
 }
 
 func (m Model) renderHeader(f *diff.File) string {
 	if m.split {
-		// Split mode gets a header per column: old path on the left, new
-		// path on the right, each with the change counts.
-		w := m.vpWidth()
+		// Split mode gets a header per column, with the change counts.
+		w := m.rowBudget()
 		leftW := w / 2
 		rightW := w - leftW
 		return m.headerSide(pathOr(f.OldPath, f), f, leftW) +
@@ -1948,6 +1997,21 @@ func (m Model) tokens(row int, l diff.Line) []uint32 {
 	return nil
 }
 
+// pruneSyntax drops the token indexes of files that are no longer on screen.
+// They are keyed by the file they were built from, and every reload builds a new
+// one, so an index kept past its document is weight nothing will ask for again.
+// The caps bound the map already; this keeps it at the working set instead.
+func (m *Model) pruneSyntax() {
+	if len(m.syn) == 0 {
+		return
+	}
+	for src := range m.syn {
+		if src.file != m.file {
+			delete(m.syn, src)
+		}
+	}
+}
+
 // indexFor returns the token index of a row's source, building it on first use.
 // A diff laid out as a virtual document is never indexed: its rows are generated
 // on demand, and tokenising millions of them whole would cost more than the diff
@@ -2026,10 +2090,26 @@ func buildIndex(src rowSource) *syntax.Index {
 }
 
 // renderSplitRow renders a pair of lines as two columns.
-func (m Model) renderSplitRow(row int, r contentRow) string {
-	w := m.vpWidth()
-	leftW := w / 2
-	rightW := w - leftW
+func (m Model) renderSplitRow(row int) string {
+	return m.splitRow(row, m.rowBudget())
+}
+
+// splitRow renders one split-mode row into width cells, whatever kind it is: a
+// pre-rendered header already fills the width, a full-width row (a hunk header)
+// is one line, and everything else is a pair of columns.
+func (m Model) splitRow(row, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	r := m.rowAt(row)
+	switch {
+	case r.pre:
+		return ansi.Truncate(r.text, width, "")
+	case r.fullWidth:
+		return m.renderLine(row, r.line, r.flat)
+	}
+	leftW := width / 2
+	rightW := width - leftW
 	return m.renderSide(row, r.left, r.leftFlat, r.hasLeft, leftW, true) +
 		m.renderSide(row, r.right, r.rightFlat, r.hasRight, rightW, false)
 }
@@ -2108,7 +2188,7 @@ func (m Model) padLine(out string, base lipgloss.Style) string {
 	if !hasBackground(base) {
 		return out
 	}
-	target := m.vpWidth()
+	target := m.rowBudget()
 	if m.showLineNumbers && !m.split {
 		target -= m.gut.cells()
 	}
@@ -2174,13 +2254,11 @@ func boundarySet(lo, hi int, words []diff.Span, matches []Match) []int {
 	return set
 }
 
-// gutterText renders the left line-number gutter. The state is read through
-// a shared pointer so the callback always sees the current file and mode.
-// updateGutterWidth sizes the number columns from the document's tallest line
-// number, so the gutter never overflows into the content.
 // hasFileHeader reports whether the file header row is part of the layout.
 func (m Model) hasFileHeader() bool { return m.file != nil && m.file.Path() != "" }
 
+// updateGutterWidth sizes the number columns from the document's tallest line
+// number, so the gutter never overflows into the content.
 func (m *Model) updateGutterWidth() {
 	lines := m.nlines()
 	if m.doc != nil {
@@ -2198,6 +2276,8 @@ func (g *gutterState) numCells() int { return max(4, g.numW) }
 // cells is the total width of the two number columns and their gaps.
 func (g *gutterState) cells() int { return 2*g.numCells() + 2 }
 
+// gutterText renders the left line-number gutter. The state is read through a
+// shared pointer, so the callback always sees the current file and mode.
 func gutterText(g *gutterState, info viewport.GutterContext) string {
 	if g.split {
 		return ""
