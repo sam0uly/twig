@@ -282,6 +282,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// The staging cursor is an affordance, not a mode: offered where staging is
 	// possible, and kept across the reload an operation triggers.
 	nm.syncStaging()
+	// A key that moved the cursor also moved the window, and that move glides: the
+	// frame command has to go out with this update or the animation never runs.
+	if glide := nm.view.TakeScrollCmd(); glide != nil {
+		cmd = tea.Batch(cmd, glide)
+	}
 	return nm, cmd
 }
 
@@ -1374,9 +1379,23 @@ func (m model) updateFocus(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Cycle):
 			return m.cycleFocus(false)
 		case key.Matches(msg, m.keys.Top):
-			return m, m.view.ScrollTo(0)
+			m.dropAnchor()
+			return m, m.view.GotoTop()
 		case key.Matches(msg, m.keys.Bottom):
+			m.dropAnchor()
 			return m, m.view.GotoBottom()
+		case key.Matches(msg, m.keys.PageDown):
+			if !m.view.Selectable() {
+				return m.forwardMain(msg)
+			}
+			m.dropAnchor()
+			return m, m.view.PageDown()
+		case key.Matches(msg, m.keys.PageUp):
+			if !m.view.Selectable() {
+				return m.forwardMain(msg)
+			}
+			m.dropAnchor()
+			return m, m.view.PageUp()
 		case key.Matches(msg, m.keys.Search):
 			cmd := m.search.Activate()
 			m.setSize()
@@ -1464,10 +1483,11 @@ func (m model) followSelection(extra tea.Cmd) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
 	// In the all-changes view the pane already holds every diff: following a
-	// selection just scrolls to that file's band.
+	// selection moves the cursor into that file's block and glides the window
+	// there, so the sidebar and the pane name the same file.
 	if m.allChanges && m.files.Tab() == filelist.TabFiles {
 		if fs, _ := m.files.SelectedFile(); fs.Path != "" {
-			m.view.JumpToBandNow(m.files.SelectedOrdinal() - 1)
+			m.view.GotoBand(m.files.SelectedOrdinal() - 1)
 		}
 		return m, extra
 	}

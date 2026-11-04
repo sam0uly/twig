@@ -163,6 +163,9 @@ type Model struct {
 	target  float64
 	anim    bool
 	animSeq int
+	// scrollCmd is the frame command of a glide a cursor move started: a cursor
+	// movement has no command to return it in, so the caller takes it here.
+	scrollCmd tea.Cmd
 	// lastFrame is when the previous frame ran, so the spring advances by real time.
 	lastFrame time.Time
 
@@ -639,22 +642,28 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	m.vp, cmd = m.vp.Update(msg)
 	after := m.vp.YOffset()
 
-	if !m.smooth || !scroll || after == before {
+	// Only a message that moved the window may touch the cursor: a stray one arriving
+	// during a glide would drag the cursor and cancel the animation halfway.
+	if !scroll || after == before {
+		return m, cmd
+	}
+
+	if !m.smooth {
+		m.keepCursorInView()
 		return m, cmd
 	}
 
 	step := float64(after - before)
 	if m.anim {
-		// Retarget the running animation: the target collects the steps while
-		// the viewport keeps following the spring. The step is undone on the
-		// viewport so the frame does not jump ahead of the spring.
+		// Retarget the running animation; the step is undone on the viewport so the frame
+		// does not jump ahead of the spring, and the cursor is left alone.
 		m.target = m.clampTarget(m.target + step)
 		m.vp.SetYOffset(before)
 		return m, cmd
 	}
 	if math.Abs(step) < smallStepRows {
-		// Arrow keys and wheel ticks land now instead of gliding; the
-		// viewport already moved, so there is nothing to do.
+		// Arrow keys and wheel ticks land now; only the cursor has to catch up.
+		m.keepCursorInView()
 		return m, cmd
 	}
 
@@ -1128,7 +1137,13 @@ func (m *Model) showMatch() {
 		return
 	}
 	mt := m.matches[m.matchIdx]
+	before := m.vp.YOffset()
 	m.vp.EnsureVisible(m.rowForLine(mt.Line), mt.Start, mt.End)
+	if after := m.vp.YOffset(); after != before {
+		// EnsureVisible scrolls sideways, which is wanted; the vertical part glides.
+		m.vp.SetYOffset(before)
+		m.glideTo(after)
+	}
 }
 
 // nearestMatch is the first match at or below row from.
@@ -1226,28 +1241,26 @@ func (m *Model) JumpToLine(line int) {
 	m.JumpTo(m.rowForLine(max(0, line)))
 }
 
-// GotoBottom scrolls to the end of the diff.
-func (m *Model) GotoBottom() tea.Cmd {
-	if !m.smooth {
-		m.vp.GotoBottom()
-		return nil
-	}
-	m.pos = float64(m.vp.YOffset())
-	m.vel = 0
-	m.target = float64(max(0, m.nrows()))
-	m.anim = true
-	m.animSeq++
-	return tickScroll(m.animSeq)
-}
-
 // CancelScroll stops any running scroll animation.
 func (m *Model) CancelScroll() { m.cancelAnim() }
+
+// glideTo moves the window to a row, gliding when smooth scrolling is on. The frame
+// command is kept for TakeScrollCmd, since a cursor movement cannot return it.
+func (m *Model) glideTo(row int) { m.scrollCmd = m.ScrollTo(row) }
+
+// TakeScrollCmd hands over the command driving the last glide, and forgets it.
+func (m *Model) TakeScrollCmd() tea.Cmd {
+	c := m.scrollCmd
+	m.scrollCmd = nil
+	return c
+}
 
 func (m *Model) cancelAnim() {
 	m.anim = false
 	m.vel = 0
 	m.lastFrame = time.Time{}
 	m.animSeq++
+	m.scrollCmd = nil
 }
 
 func (m *Model) updateScroll(now time.Time) tea.Cmd {
@@ -1255,9 +1268,8 @@ func (m *Model) updateScroll(now time.Time) tea.Cmd {
 		return nil
 	}
 
-	// Advance by the time that actually elapsed, so a slow frame delays the
-	// motion instead of stretching it. A long gap (the app was suspended)
-	// is capped: catching up should not fling the view.
+	// Advance by the time that actually elapsed, capped so a long gap does not fling
+	// the view.
 	dt := now.Sub(m.lastFrame)
 	if m.lastFrame.IsZero() || dt <= 0 {
 		dt = frameInterval
@@ -1266,8 +1278,7 @@ func (m *Model) updateScroll(now time.Time) tea.Cmd {
 	m.lastFrame = now
 
 	m.target = max(0, min(m.target, float64(m.maxScroll())))
-	// Stiffness grows with the distance left, so a one-line step stays soft
-	// and a long jump does not crawl. Rebuilt per frame because the spring
+	// Stiffness grows with the distance left; rebuilt per frame because the spring
 	// bakes its timestep into its coefficients.
 	freq := baseSpringFreq + math.Min(math.Abs(m.target-m.pos)*0.6, maxSpringFreq-baseSpringFreq)
 	m.spring = harmonica.NewSpring(dt.Seconds(), freq, 1.0)
@@ -1276,7 +1287,11 @@ func (m *Model) updateScroll(now time.Time) tea.Cmd {
 	if math.Abs(m.target-m.pos) < 0.02 && math.Abs(m.vel) < 0.5 {
 		m.pos, m.vel, m.anim = m.target, 0, false
 		m.vp.SetYOffset(int(math.Round(m.target)))
-		return nil
+		// A wheel scroll names no row, so once it lands the cursor is brought back on
+		// screen. During the glide it is left alone: dragging it would cancel it.
+		m.keepCursorInView()
+		// Bringing the cursor back is itself a move of the window, and it glides.
+		return m.TakeScrollCmd()
 	}
 	m.vp.SetYOffset(int(math.Round(m.pos)))
 	return tickScroll(m.animSeq)
@@ -1296,18 +1311,93 @@ func (m *Model) NextHunk() tea.Cmd {
 		return nil
 	}
 	m.hunkCur = next
-	return m.ScrollTo(m.hunks[next])
+	return m.goToRow(m.hunks[next])
 }
 
-// PrevHunk scrolls to the previous hunk header, if any.
+// PrevHunk moves to the previous hunk header, if any.
 func (m *Model) PrevHunk() tea.Cmd {
 	cur := m.CurrentHunkIndex()
 	if cur > 0 {
 		m.hunkCur = cur - 1
-		return m.ScrollTo(m.hunks[cur-1])
+		return m.goToRow(m.hunks[cur-1])
 	}
 	m.hunkCur = 0
-	return m.ScrollTo(0)
+	return m.goToRow(0)
+}
+
+// goToRow is how a navigation key moves the pane: with a staging cursor the cursor
+// goes to the row, without one only the window moves.
+func (m *Model) goToRow(row int) tea.Cmd {
+	if !m.Selectable() {
+		return m.ScrollTo(row)
+	}
+	m.setCursor(row)
+	// A jump reads best with its row at the top of the pane.
+	m.glideTo(row)
+	return nil
+}
+
+// PageDown moves the reader a screenful on, and PageUp a screenful back.
+func (m *Model) PageDown() tea.Cmd {
+	if !m.Selectable() {
+		return m.ScrollTo(min(m.vp.YOffset()+m.vpHeight(), m.maxScroll()))
+	}
+	m.moveByPage(m.vpHeight())
+	return nil
+}
+
+// PageUp moves the reader a screenful back.
+func (m *Model) PageUp() tea.Cmd {
+	if !m.Selectable() {
+		return m.ScrollTo(max(0, m.vp.YOffset()-m.vpHeight()))
+	}
+	m.moveByPage(-m.vpHeight())
+	return nil
+}
+
+// GotoTop moves to the first row a keystroke can act on.
+func (m *Model) GotoTop() tea.Cmd {
+	if !m.Selectable() {
+		return m.ScrollTo(0)
+	}
+	// A document materialises only a window of blocks: bring this row's back.
+	m.rowAt(0)
+	if row := m.firstItemRow(0); row >= 0 {
+		m.setCursor(row)
+	}
+	m.glideTo(0)
+	return nil
+}
+
+// GotoBottom moves to the last row a keystroke can act on; the trailing context
+// is not something to act on.
+func (m *Model) GotoBottom() tea.Cmd {
+	if !m.Selectable() {
+		m.ensureContent()
+		return m.scrollToEnd()
+	}
+	m.ensureContent()
+	m.rowAt(max(0, m.nrows()-1))
+	if row := m.lastItemRow(); row >= 0 {
+		m.setCursor(row)
+	}
+	// The last thing to act on is rarely the last row, so the window goes to the end.
+	m.glideTo(m.maxScroll())
+	return nil
+}
+
+// scrollToEnd puts the window at the bottom without touching the cursor.
+func (m *Model) scrollToEnd() tea.Cmd {
+	if !m.smooth {
+		m.vp.GotoBottom()
+		return nil
+	}
+	m.pos = float64(m.vp.YOffset())
+	m.vel = 0
+	m.target = float64(max(0, m.nrows()))
+	m.anim = true
+	m.animSeq++
+	return tickScroll(m.animSeq)
 }
 
 // JumpToBand scrolls smoothly to the per-file band with the given index.
@@ -1328,6 +1418,18 @@ func (m *Model) JumpToBandNow(i int) {
 	m.JumpTo(m.fileBands[i])
 }
 
+// GotoBand moves the cursor into block i and glides the window to it, so the
+// sidebar and the pane agree about which file a keystroke acts on.
+func (m *Model) GotoBand(i int) {
+	if !m.HasBand(i) {
+		return
+	}
+	if m.Selectable() {
+		m.CursorToBand(i)
+	}
+	m.glideTo(max(0, m.fileBands[i]))
+}
+
 // HasBand reports whether band i has been laid out yet.
 func (m Model) HasBand(i int) bool { return i >= 0 && i < len(m.fileBands) }
 
@@ -1335,9 +1437,12 @@ func (m Model) HasBand(i int) bool { return i >= 0 && i < len(m.fileBands) }
 // is in, or without a cursor the one at the top of the window.
 func (m Model) CurrentHunkIndex() int {
 	cur := m.vp.YOffset()
+	if m.HasCursor() {
+		cur = m.cursor
+	}
 	if m.hunkCur >= 0 && m.hunkCur < len(m.hunks) {
 		h := m.hunks[m.hunkCur]
-		if h >= cur && h < cur+m.vpHeight() {
+		if h >= m.vp.YOffset() && h < m.vp.YOffset()+m.vpHeight() {
 			return m.hunkCur
 		}
 	}
