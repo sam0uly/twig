@@ -68,35 +68,11 @@ func (m model) stillChanged(path string, staged bool) bool {
 	return false
 }
 
-// blockSides is the side of each block in a chunk, and the label its band needs. A
-// path the listing holds twice is a file with a change staged and another left in the
-// worktree, so only those blocks say which half they are.
+// blockSides is the side of each block in a chunk, and the label its band needs.
+// Only the two blocks of a partly staged file have to say which half they are.
 func blockSides(cfg config.Config, entries []filelist.Entry, from, n int) []diffview.BlockSide {
 	out := make([]diffview.BlockSide, n)
-	seen := make(map[string]bool, len(entries))
-	doubled := make(map[string]bool, len(entries))
-	for _, e := range entries {
-		if seen[e.Status.Path] {
-			doubled[e.Status.Path] = true
-			continue
-		}
-		seen[e.Status.Path] = true
-	}
-	label := func(staged bool) string {
-		switch cfg.SideLabels {
-		case config.SideLabelsOff:
-			return ""
-		case config.SideLabelsGlyph:
-			if staged {
-				return "  \u25b2"
-			}
-			return "  \u25c6"
-		}
-		if staged {
-			return "  \u00b7 staged"
-		}
-		return "  \u00b7 unstaged"
-	}
+	doubled := duplicatedPaths(entries)
 	for i := range out {
 		if from+i >= len(entries) {
 			continue
@@ -104,10 +80,42 @@ func blockSides(cfg config.Config, entries []filelist.Entry, from, n int) []diff
 		e := entries[from+i]
 		out[i] = diffview.BlockSide{Staged: e.Staged}
 		if doubled[e.Status.Path] {
-			out[i].Tag = label(e.Staged)
+			out[i].Tag = sideTag(cfg.SideLabels, e.Staged)
 		}
 	}
 	return out
+}
+
+// duplicatedPaths names the paths the listing holds more than once.
+func duplicatedPaths(entries []filelist.Entry) map[string]bool {
+	seen := make(map[string]bool, len(entries))
+	doubled := make(map[string]bool)
+	for _, e := range entries {
+		if seen[e.Status.Path] {
+			doubled[e.Status.Path] = true
+			continue
+		}
+		seen[e.Status.Path] = true
+	}
+	return doubled
+}
+
+// sideTag is what a band appends to name its half. The glyph goes in the title, not
+// in a gutter column: the shapes are ambiguous width.
+func sideTag(mode string, staged bool) string {
+	switch mode {
+	case config.SideLabelsOff:
+		return ""
+	case config.SideLabelsGlyph:
+		if staged {
+			return "  ▲"
+		}
+		return "  ◆"
+	}
+	if staged {
+		return "  · staged"
+	}
+	return "  · unstaged"
 }
 
 // dropAnchor forgets the reader's place, which any deliberate movement does.
