@@ -67,11 +67,11 @@ Search and the list filters run as you type, and `esc` clears either.
 | `esc`                     | back to the sidebar                             |
 | `tab` / `shift+tab`       | next / previous pane                            |
 | `j` / `k`, `↑` / `↓`      | move the staging cursor a line                  |
-| `d` / `ctrl+u`, `f` / `b` | scroll the diff                                 |
+| `f` / `b`, `pgdn`/`pgup`  | move it a screenful (`ctrl+d` / `ctrl+u` too)   |
 | `h` / `l`, `←` / `→`      | horizontal scroll (when wrap is off)            |
-| `[` / `]`                 | previous / next hunk                            |
+| `[` / `]`                 | previous / next hunk, cursor and all            |
 | `J` / `K`                 | next / previous file                            |
-| `g` / `G`                 | top / bottom                                    |
+| `g` / `G`                 | first / last row a keystroke can act on         |
 | `t`                       | tree / flat listing                             |
 | `a`                       | all changes in one scroll                       |
 | `H` / `L`                 | left / right sidebar                            |
@@ -90,29 +90,29 @@ Search and the list filters run as you type, and `esc` clears either.
 
 ## Staging
 
-The row under the cursor decides what `space` does: a band stages the file, a hunk
-header the hunk, a changed line that line. `V` anchors a range, `j` / `k` extend it,
-`space` acts on it, `V` or `esc` drops it; a range stays in one file.
+Cursor picks the scope: a band is the file, a hunk header the hunk, a changed line
+that line. `V` selects a range, `j` / `k` extend it, `V` or `esc` drops it, one file
+at a time. View keys move the cursor and glide with `smooth-scroll`; the wheel
+scrolls and drags the cursor back.
 
-A staged file edited again has two diffs and is listed twice, one row per diff, so a
-row shows what `space` acts on and each side stages only itself. In `a` the cursor
-spans every file and the block picks the file.
-
-`space` writes at once and `z` reverses the exact record; with `stage-apply:
-"select"` it marks lines, `enter` applies them, `esc` clears them. Either half of a
-`-old` / `+new` pair brings the other, so a change is never staged halfway.
+A partly staged file is listed twice, one row per diff, so a row shows what `space`
+acts on. In `a` the block picks the file and its two bands name the side
+(`── semi.txt · staged`) or a `side-labels` glyph. `space` writes, `z` reverses;
+`stage-apply: select` marks, `enter` applies, `esc` clears; the `-` and `+` halves of
+a replacement move together.
 
 No patches: twig builds the new content, writes it with
 [`hash-object`][git hash-object] `-w` and records it with
 [`update-index`][git update-index] `--cacheinfo`, so git keeps the lock, the rename
-and the objects ([index format][gitformat-index]). Whole file only: binary, submodule,
-symlink, rename, newline-only, and on discard any file with a
-[clean filter][gitattributes] or line ending conversion.
+and the objects ([index format][gitformat-index]). Whole file only: binary,
+submodule, symlink, rename, newline-only, a diff over 4096 rows (it is
+[paged](#why-its-fast), so its rows are not there to merge a selection against),
+and on discard any file with a [clean filter][gitattributes] or line ending
+conversion.
 
-`x` discards what the cursor names at the same three scopes, after showing those
-lines, scrollable and saying where in the list you are: `enter` discards, `esc` keeps,
-`y` stays yank, `z` undoes it. The lines are re-checked at write time, so a file that
-moved under the dialog is refused, not half-applied.
+`x` discards the same three scopes after showing the lines, scrollable, saying where
+in the list you are: `enter` discards, `esc` keeps, `y` stays yank, `z` undoes it.
+The lines are re-checked at write time, so a moved file is refused, not half-applied.
 
 ## Config
 
@@ -126,6 +126,7 @@ it elsewhere. Every key is optional.
   "wrap": false,
   "line-numbers": true,
   "watch": true,
+  "follow": true,
   "watch-debounce": 120,
   "sidebar-width": 32,
   "show-left-sidebar": false,
@@ -136,7 +137,8 @@ it elsewhere. Every key is optional.
   "syntax": true,
   "stage": true,
   "stage-apply": "instant",
-  "discard-confirm": "line"
+  "discard-confirm": "line",
+  "side-labels": "text"
 }
 ```
 
@@ -148,13 +150,20 @@ choice back. Events come from inotify, kqueue or `ReadDirectoryChangesW`, so a
 save lands in about a tenth of a second; when they cannot carry the view the
 footer says `polling` and a two second pass takes over.
 
+`follow` puts the cursor on the changed line, a third down. Lines match on side,
+number and text: a rewrite counts again, a deletion lands where it was. A burst
+takes the last line of the last file written, every 250 ms; `a` patches one
+block instead of rebuilding; staging and a keypress pause it; `false` redraws in
+place as before.
+
 `syntax` colours diff lines by what a token is: keywords, strings, comments,
 numbers, names. It is on by default, needs no external tool and no grammar
 files, and `false` returns the plain diff wash.
 
 `stage` adds the cursor, `false` gives `j`/`k` back. `stage-apply`: `instant`/`select`.
-`discard-confirm` is the smallest discard that asks: `line`, `hunk` (one line goes), `file`
-(only files), `never`.
+`discard-confirm` is the smallest discard that asks: `line`, `hunk` (one line goes),
+`file` (only files), `never`. `side-labels` in `a`: `text`, `glyph` (`▲` index,
+`◆` worktree), `off`.
 
 ## How it works
 
@@ -234,13 +243,24 @@ valid script. The anchoring is [Bentley–McIlroy]'s, the same idea git credits 
 patience and histogram matching; bounding the work is what [difftastic] and
 [diff-match-patch] do in their own ways.
 
+**Two shapes need no matching.** Content that only grew or shrank at its end is
+one hunk of additions (or deletions) above the last context lines, so a file
+something is appending to costs a scan of the shared head, not a diff. And a
+region whose two sides hold no line in common can only be a wholesale
+replacement: the interning pass already knows, so Myers is skipped. Both are
+exact, not budget-driven, and the rows they produce are the ones the matcher
+would have produced for the same script.
+
 **Ids, runs, documents.** Lines are interned behind a 64-bit [`maphash`]
 fingerprint and checked against the line they came from, so a collision probes
 instead of equating two different lines. A paged diff is a list of runs
 (`Equal`, `Delete`, `Insert`, `Replace`) with their source ranges and a
 [Fenwick] prefix index, so a file added whole is two runs however long it is,
-and a row needs no stored counter. The all-changes view streams blocks, indexes
-them the same way, and builds only the rows near the viewport; searching a paged
+and a row needs no stored counter. A run answers the reverse question too, which
+row paints a given source line, so a cursor placed from a line number costs no
+walk. The all-changes view streams blocks, indexes them the same way, and builds
+only the rows near the viewport; a chunk's diffs are independent and are built on
+every core, with the repository reads kept on one goroutine. Searching a paged
 file scans the two sources and maps a byte offset back to its line.
 
 **Highlighting: tokens, not a tree.** A diff only needs a keyword told from a string,
