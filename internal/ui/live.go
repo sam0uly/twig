@@ -353,6 +353,10 @@ type blockUpdateMsg struct {
 	updates []diffview.BlockUpdate
 	// remembers are the diffs to keep as the new baseline, one per block.
 	remembers []liveSide
+	// gen is the all-changes load these blocks were numbered against. A document
+	// rebuilt while the diffs loaded numbers its blocks differently, so the answer
+	// is dropped rather than patched into the wrong rows.
+	gen int
 	// follow is the line to chase, named against the diff it replaces.
 	follow diff.Line
 	path   string
@@ -389,8 +393,9 @@ func (m model) reloadBlocksCmd(changed []filelist.Entry, follow filelist.Entry) 
 	if len(work) == 0 {
 		return nil
 	}
+	gen := m.allGen
 	return func() tea.Msg {
-		msg := blockUpdateMsg{}
+		msg := blockUpdateMsg{gen: gen}
 		for _, w := range work {
 			f, err := git.FileDiff(w.path, w.staged, opts)
 			if err != nil || f == nil {
@@ -411,6 +416,21 @@ func (m model) reloadBlocksCmd(changed []filelist.Entry, follow filelist.Entry) 
 		}
 		return msg
 	}
+}
+
+// blocksStillMatch reports whether every block an answer wants to patch is still the
+// file the listing holds at that index. A patch that lands one index over would show
+// one file's content under another file's band.
+func (m model) blocksStillMatch(updates []diffview.BlockUpdate) bool {
+	for _, u := range updates {
+		if u.Index < 0 || u.Index >= len(m.allEntries) {
+			return false
+		}
+		if u.File == nil || m.allEntries[u.Index].Status.Path != u.File.Path() {
+			return false
+		}
+	}
+	return true
 }
 
 // sameRows reports whether two listings name the same rows in the same order, which

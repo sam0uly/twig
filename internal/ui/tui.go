@@ -544,7 +544,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case blockUpdateMsg:
-		if !m.allChanges || m.files.Tab() != filelist.TabFiles {
+		if !m.allChanges || m.files.Tab() != filelist.TabFiles || msg.gen != m.allGen {
+			return m, nil
+		}
+		// A block index is the listing's row, and the listing can change while the
+		// diffs load: an answer that names a different file than the row it wants to
+		// patch belongs to a document this one replaced.
+		if !m.blocksStillMatch(msg.updates) {
 			return m, nil
 		}
 		// Patching reflows the blocks below the one that changed, so put the reader back

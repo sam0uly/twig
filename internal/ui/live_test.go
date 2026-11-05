@@ -10,6 +10,7 @@ import (
 	"samouly.fun/twig/internal/diff"
 	"samouly.fun/twig/internal/git"
 	"samouly.fun/twig/internal/stage"
+	"samouly.fun/twig/internal/ui/components/diffview"
 	"samouly.fun/twig/internal/ui/components/filelist"
 )
 
@@ -567,5 +568,46 @@ func TestRememberDiffHoldsFewBaselines(t *testing.T) {
 	}
 	if got := len(m.liveNews); got != maxLiveDiffs+1 {
 		t.Fatalf("%d stat baselines, want one per file", got)
+	}
+}
+
+// TestStaleBlockUpdateIsDropped: a block reload is numbered against the document it
+// was asked for. A rebuild, or a listing that renumbered the rows while the diffs
+// loaded, makes the answer name rows that no longer hold those files, and patching it
+// in would show one file's content under another file's band.
+func TestStaleBlockUpdateIsDropped(t *testing.T) {
+	m := testModel(120, 24)
+	m.allChanges = true
+	m.files.SetFiles(nil, []git.FileStatus{
+		{Path: "a.go", Letter: "M"},
+		{Path: "b.go", Letter: "M"},
+	})
+	m.allEntries = m.files.OrderedEntries()
+	first, second := longDiff("one"), longDiff("two")
+	m.view.SetDocument(func(i int) *diff.File { return []*diff.File{first, second}[i] })
+	m.view.AppendBlocksSided([]*diff.File{first, second}, blockSides(m.cfg, m.allEntries, 0, 2))
+	m.allGen = 4
+
+	adds, dels := m.view.DocCounts()
+	// One changed line, against the two hundred the blocks hold, so a patch is
+	// visible in the counts.
+	fresh := edited(map[int]string{10: "fresh"})
+
+	// The document was rebuilt while the diffs loaded: indexes belong to the old one.
+	next, _ := m.Update(blockUpdateMsg{gen: 3, updates: []diffview.BlockUpdate{{Index: 0, File: fresh}}})
+	if a, d := next.(model).view.DocCounts(); a != adds || d != dels {
+		t.Fatalf("a stale answer patched the document: %d/%d, want %d/%d", a, d, adds, dels)
+	}
+
+	// Current generation, but the index now names another file.
+	next, _ = m.Update(blockUpdateMsg{gen: 4, updates: []diffview.BlockUpdate{{Index: 1, File: fresh}}})
+	if a, d := next.(model).view.DocCounts(); a != adds || d != dels {
+		t.Fatalf("a misdirected answer patched the document: %d/%d, want %d/%d", a, d, adds, dels)
+	}
+
+	// The answer the document is still waiting for is applied.
+	next, _ = m.Update(blockUpdateMsg{gen: 4, updates: []diffview.BlockUpdate{{Index: 0, File: fresh}}})
+	if a, _ := next.(model).view.DocCounts(); a == adds {
+		t.Fatal("the current answer was dropped too")
 	}
 }
