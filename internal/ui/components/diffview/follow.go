@@ -21,6 +21,9 @@ func (m *Model) FollowEditIn(path string, line diff.Line) bool {
 	if line.Kind != diff.Addition && line.Kind != diff.Deletion {
 		return false
 	}
+	if row, ok := m.rowOfChange(path, line); ok {
+		return m.followRow(row)
+	}
 	if row, ok := m.matchRow(path, line, true); ok {
 		return m.followRow(row)
 	}
@@ -28,6 +31,48 @@ func (m *Model) FollowEditIn(path string, line diff.Line) bool {
 		return m.followRow(row)
 	}
 	return false
+}
+
+// rowOfChange places a changed line without walking the document: the diff numbers
+// the line and the layout says which row paints it. It answers -1 when the rows are
+// paired or wrapped, where a line is not a row and the scan is the only way.
+func (m *Model) rowOfChange(path string, line diff.Line) (int, bool) {
+	if m.doc == nil || m.split || m.vp.SoftWrap {
+		return 0, false
+	}
+	block := 0
+	if !m.doc.single() {
+		var ok bool
+		if block, ok = m.blockOf(path); !ok {
+			return 0, false
+		}
+	}
+	f := m.doc.blockFile(block)
+	if f == nil {
+		return 0, false
+	}
+	at := f.RowOf(line)
+	if at < 0 {
+		return 0, false
+	}
+	row := m.doc.rowOfFileRow(block, at)
+	if row < 0 || row >= m.nrows() {
+		return 0, false
+	}
+	// The block may have been evicted: ask for the row so it is there to paint.
+	m.rowAt(row)
+	return row, true
+}
+
+// blockOf names the block a path's diff occupies in a document of files.
+func (m Model) blockOf(path string) (int, bool) {
+	n := m.doc.nblocks()
+	for i := 0; i < n; i++ {
+		if f := m.doc.fileAt(i); f != nil && f.Path() == path {
+			return i, true
+		}
+	}
+	return 0, false
 }
 
 // matchRow finds the row holding the change, by number or by text.
@@ -150,6 +195,9 @@ func (m *Model) FollowEditInBand(band int, path string, line diff.Line) bool {
 	}
 	if band < 0 || band >= len(m.fileBands) {
 		return m.FollowEditIn(path, line)
+	}
+	if row, ok := m.rowOfChange(path, line); ok {
+		return m.followRow(row)
 	}
 	start := max(0, m.fileBands[band])
 	end := m.nrows()

@@ -280,6 +280,52 @@ func (d *blockDoc) fileAt(i int) *diff.File {
 	return d.blocks[i].file
 }
 
+// blockFile is the diff a block paints: the single file of a line document, or the
+// block's own diff in an aggregate.
+func (d *blockDoc) blockFile(i int) *diff.File {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.src != nil {
+		return d.src
+	}
+	if i < 0 || i >= len(d.blocks) {
+		return nil
+	}
+	return d.blocks[i].file
+}
+
+// rowOfFileRow maps a row of a file's diff onto the document row that paints it: the
+// blocks above it, its band, then the rows of the diff. A line document splits one
+// file into blocks, so the row says which block as well as where. It answers -1 when
+// the row falls outside the document.
+func (d *blockDoc) rowOfFileRow(block, row int) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if block < 0 || block >= len(d.blocks) || row < 0 {
+		return -1
+	}
+	if d.src != nil {
+		for i := range d.blocks {
+			b := &d.blocks[i]
+			if row >= b.first && row < b.first+b.lineCount {
+				block, row = i, row-b.first
+				break
+			}
+		}
+	} else {
+		row -= d.blocks[block].first
+	}
+	b := &d.blocks[block]
+	if row < 0 || row >= b.rows[d.mode] {
+		return -1
+	}
+	band := 0
+	if b.sep != nil {
+		band = 1
+	}
+	return d.rowOffset() + d.idx[d.mode].prefix(block) + band + row
+}
+
 // relayout recomputes what derives from the block line counts: starts, totals and
 // the row index. It walks blocks, never rows.
 func (d *blockDoc) relayout() {
