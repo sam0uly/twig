@@ -57,6 +57,13 @@ func (r *rowIndex) add(i, delta int) {
 	}
 }
 
+// reset drops every entry, so a layout whose block sizes changed can be indexed
+// again from the start.
+func (r *rowIndex) reset() {
+	r.rows = r.rows[:0]
+	r.tree = r.tree[:0]
+}
+
 func (r *rowIndex) rebuild() {
 	// Twice the rows it indexes: the spare half keeps the next appends free.
 	size := max(16, 2*(len(r.rows)+1))
@@ -211,6 +218,83 @@ func (d *blockDoc) add(files []*diff.File, base int, tags []string) {
 		d.appendBlock(&b)
 	}
 	d.evict()
+}
+
+// replace swaps in new diffs for blocks already laid out, so a live change updates
+// the files it touched. Every other block keeps its rows.
+func (d *blockDoc) replace(files map[int]*diff.File) bool {
+	if d.src != nil || len(files) == 0 {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	changed := false
+	for i, f := range files {
+		if i < 0 || i >= len(d.blocks) || f == nil {
+			continue
+		}
+		b := &d.blocks[i]
+		b.file = f
+		b.adds, b.dels = f.Additions, f.Deletions
+		b.lineCount = 1 + f.NLines()
+		sep := docSeparator(f, b.tag)
+		b.sep = &sep
+		b.built = [2][]contentRow{}
+		// The replaced block left the window.
+		for j, v := range d.order {
+			if v == i {
+				d.order = append(d.order[:j], d.order[j+1:]...)
+				break
+			}
+		}
+		b.rows[modeUnified], b.rows[modeSplit], b.hunks[modeUnified], b.hunks[modeSplit], b.widest = blockMetrics(b, d.scanLines(b))
+		changed = true
+	}
+	if !changed {
+		return false
+	}
+	d.relayout()
+	d.evict()
+	return true
+}
+
+// counts sums the changed lines the document holds, from each block's own numbers.
+func (d *blockDoc) counts() (adds, dels int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for i := range d.blocks {
+		adds += d.blocks[i].adds
+		dels += d.blocks[i].dels
+	}
+	return adds, dels
+}
+
+// fileAt is the diff a block is showing, or nil.
+func (d *blockDoc) fileAt(i int) *diff.File {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if i < 0 || i >= len(d.blocks) {
+		return nil
+	}
+	return d.blocks[i].file
+}
+
+// relayout recomputes what derives from the block line counts: starts, totals and
+// the row index. It walks blocks, never rows.
+func (d *blockDoc) relayout() {
+	d.idx[modeUnified].reset()
+	d.idx[modeSplit].reset()
+	d.lines = d.rowOffset()
+	d.widest = d.preW
+	for i := range d.blocks {
+		b := &d.blocks[i]
+		b.lineStart = d.lines
+		d.lines += b.lineCount
+		d.widest = max(d.widest, b.widest)
+		d.idx[modeUnified].append(b.rows[modeUnified])
+		d.idx[modeSplit].append(b.rows[modeSplit])
+	}
 }
 
 // appendBlock records one block's layout without building its rows.

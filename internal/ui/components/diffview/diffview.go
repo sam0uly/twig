@@ -617,6 +617,64 @@ func (m *Model) rebuildDoc() {
 	m.pushContent()
 }
 
+// BlockUpdate says which block of a document a fresh diff belongs to.
+type BlockUpdate struct {
+	// Index is the block, in document order, which is the listing's row order.
+	Index int
+	File  *diff.File
+}
+
+// ReplaceBlocks swaps fresh diffs into blocks the document already holds and lays
+// it out again around them, so a live change costs one file. Blocks keep their
+// position, so bands, hunks and the cursor's block stay what they were.
+func (m *Model) ReplaceBlocks(updates []BlockUpdate) bool {
+	if m.doc == nil || len(updates) == 0 {
+		return false
+	}
+	files := make(map[int]*diff.File, len(updates))
+	for _, u := range updates {
+		files[u.Index] = u.File
+	}
+	olds := make([]*diff.File, 0, len(updates))
+	for _, u := range updates {
+		olds = append(olds, m.doc.fileAt(u.Index))
+	}
+	if !m.doc.replace(files) {
+		return false
+	}
+	m.forgetSyntax(olds)
+	// A block's row count can change with its content: recount exactly.
+	m.blank = m.blank[:0]
+	m.rebuildNav()
+	m.rebuildDoc()
+	return true
+}
+
+// forgetSyntax drops the token indexes of diffs the document no longer shows.
+func (m *Model) forgetSyntax(files []*diff.File) {
+	if len(m.syn) == 0 {
+		return
+	}
+	for _, f := range files {
+		if f == nil {
+			continue
+		}
+		for src := range m.syn {
+			if src.file == f {
+				delete(m.syn, src)
+			}
+		}
+	}
+}
+
+// DocCounts is the changed lines the document holds, which the header reports.
+func (m Model) DocCounts() (adds, dels int) {
+	if m.doc == nil {
+		return 0, 0
+	}
+	return m.doc.counts()
+}
+
 // DocBlocks reports how many blocks a document holds and how many carry rows.
 func (m Model) DocBlocks() (blocks, materialised int) {
 	if m.doc == nil {

@@ -512,3 +512,45 @@ func TestGotoBottomGlidesToTheEnd(t *testing.T) {
 		t.Fatalf("the cursor at %d is off the window at %d", m.CursorRow(), m.YOffset())
 	}
 }
+
+// TestReplaceBlocksPatchesInPlace: a live change to one file has to cost one
+// block, not the whole document. The blocks keep their order, the bands below
+// the patched one move by the rows it grew, and the cursor still lands in it.
+func TestReplaceBlocksPatchesInPlace(t *testing.T) {
+	const n = 6
+	files := make([]*diff.File, n)
+	for i := range files {
+		files[i] = docTestFile(fmt.Sprintf("f%d.txt", i+1), 8, "OLD")
+	}
+	m := New(false, styles.New())
+	m.SetSize(80, 20)
+	m.SetSelectable(true)
+	m.SetDocument(func(i int) *diff.File { return files[i] })
+	m.AppendBlocksSided(files, make([]BlockSide, n))
+	m.GotoTop()
+
+	before := m.nrows()
+	band := m.BandRow(3)
+	grown := docTestFile("f4.txt", 30, "NEW")
+	if !m.ReplaceBlocks([]BlockUpdate{{Index: 3, File: grown}}) {
+		t.Fatal("the block was not replaced")
+	}
+	if blocks, _ := m.DocBlocks(); blocks != n {
+		t.Fatalf("%d blocks after the patch, want %d", blocks, n)
+	}
+	if want := before + grown.NLines() - files[3].NLines(); m.nrows() != want {
+		t.Fatalf("document has %d rows after the patch, want %d", m.nrows(), want)
+	}
+	if got, want := m.BandRow(3), band; got != want {
+		t.Fatalf("the patched band moved to %d, want %d", got, want)
+	}
+	if got, want := m.BandRow(4), band+1+grown.NLines(); got != want {
+		t.Fatalf("the next band is at %d, want %d", got, want)
+	}
+	if !m.CursorToBand(3) {
+		t.Fatal("no cursor in the patched block")
+	}
+	if got := m.CursorRow(); got < m.BandRow(3) || got >= m.BandRow(4) {
+		t.Fatalf("cursor on row %d, want inside the patched block at %d", got, m.BandRow(3))
+	}
+}
