@@ -29,8 +29,9 @@ const (
 	// late.
 	defaultQuiet = 120 * time.Millisecond
 	// maxWait bounds the wait for quiet, so a directory being written
-	// continuously still reports progress.
-	maxWait = 2 * time.Second
+	// continuously still reports progress. An agent writing a file twenty
+	// times in a row must not leave the view standing still until it stops.
+	maxWait = 250 * time.Millisecond
 )
 
 // Options configures a Watcher.
@@ -340,7 +341,7 @@ func (w *Watcher) signalLoop() {
 	timer.Stop()
 	defer timer.Stop()
 
-	wait := max(maxWait, 4*w.quiet)
+	wait := max(maxWait, 2*w.quiet)
 	var first time.Time
 	armed := false
 
