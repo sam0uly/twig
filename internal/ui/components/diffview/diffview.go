@@ -719,8 +719,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.vp.SetYOffset(before)
 		return m, cmd
 	}
-	if math.Abs(step) < smallStepRows {
-		// Arrow keys and wheel ticks land now; only the cursor has to catch up.
+	if math.Abs(step) <= smallStepRows {
+		// A line or a wheel tick lands now; only the cursor has to catch up.
 		m.keepCursorInView()
 		return m, cmd
 	}
@@ -1233,7 +1233,7 @@ func (m *Model) ScrollTo(line int) tea.Cmd {
 	m.pos = float64(m.vp.YOffset())
 	m.vel = 0
 	m.target = float64(line)
-	if math.Abs(m.target-m.pos) < smallStepRows {
+	if math.Abs(m.target-m.pos) <= smallStepRows {
 		// Too short to be worth animating: land on it right away.
 		m.cancelAnim()
 		m.vp.SetYOffset(line)
