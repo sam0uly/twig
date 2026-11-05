@@ -30,6 +30,9 @@ type Config struct {
 	SmoothScroll bool `json:"smooth-scroll"`
 	// Watch refreshes the view when the repository changes on disk.
 	Watch bool `json:"watch"`
+	// Follow moves the pane to the line that changed when a live refresh brings
+	// in new content, so a file can be watched while something else edits it.
+	Follow bool `json:"follow"`
 	// WatchDebounce is how long the filesystem must be quiet before a change
 	// counts, in milliseconds. Zero means the built-in default.
 	WatchDebounce int `json:"watch-debounce"`
@@ -94,6 +97,7 @@ func Default() Config {
 		ShowRightSidebar: false,
 		SmoothScroll:     true,
 		Watch:            true,
+		Follow:           true,
 		WatchDebounce:    120,
 		LogLimit:         200,
 		SplitView:        false,

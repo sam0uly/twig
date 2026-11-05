@@ -152,6 +152,28 @@ func (m Model) linesAt(row int) []diff.Line {
 	return []diff.Line{r.line}
 }
 
+// eachLine calls fn for every line a row holds, stopping at the first true. It
+// is linesAt without the slice, for the scans that run over a whole document.
+func (m Model) eachLine(row int, fn func(diff.Line) bool) bool {
+	if row < 0 || row >= m.nrows() {
+		return false
+	}
+	r := m.rowAt(row)
+	if r.pre {
+		return false
+	}
+	if m.split {
+		if r.hasLeft && fn(r.left) {
+			return true
+		}
+		if r.hasRight && fn(r.right) {
+			return true
+		}
+		return false
+	}
+	return fn(r.line)
+}
+
 // hunkAtRow reports the file-local hunk whose header is on this row.
 func (m Model) hunkAtRow(row int) (int, bool) {
 	i := sort.SearchInts(m.hunks, row)

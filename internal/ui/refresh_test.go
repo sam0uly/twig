@@ -22,12 +22,13 @@ func longDiff(marker string) *diff.File {
 		diff.GenerateOptions{Context: 3})
 }
 
-// TestRefreshKeepsTheReaderInPlace covers what a live refresh must not do:
-// move a reader who is halfway down a long diff. The diff cache hands back the
-// same object when the file did not change, so the pane is left alone, and a
-// changed diff is redrawn at the same line.
+// TestRefreshKeepsTheReaderInPlace covers what a live refresh must not do: move
+// a reader who is halfway down a long diff when following is off. The diff cache
+// hands back the same object when the file did not change, so the pane is left
+// alone, and a changed diff is redrawn at the same line.
 func TestRefreshKeepsTheReaderInPlace(t *testing.T) {
 	m := testModel(120, 30)
+	m.cfg.Follow = false
 	m.files.SetFiles(nil, []git.FileStatus{{Path: "a.go", Letter: "M"}})
 	m.files.SelectSide("a.go", false)
 

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"samouly.fun/twig/internal/diff"
@@ -345,6 +346,42 @@ func TestRangeStopsAtTheFileItStartedIn(t *testing.T) {
 	}
 }
 
+// TestFollowEditInStaysInItsFile: in the all-changes document the same text can
+// appear in several files, so following an edit has to land in the file that
+// changed rather than in the first block that matches.
+func TestFollowEditInStaysInItsFile(t *testing.T) {
+	files := []*diff.File{
+		docTestFile("a.go", 20, "SAME TEXT"),
+		docTestFile("b.go", 20, "SAME TEXT"),
+	}
+	loads := 0
+	m := newDocView(t, files, &loads)
+	m.SetSelectable(true)
+
+	line := diff.Line{}
+	for i := range files[1].Hunks {
+		h, ok := files[1].HunkAt(i)
+		if !ok {
+			continue
+		}
+		for _, l := range h.Lines {
+			if l.Kind == diff.Addition {
+				line = l
+			}
+		}
+	}
+	if line.Kind != diff.Addition {
+		t.Fatal("the fixture has no addition")
+	}
+	if !m.FollowEditIn("b.go", line) {
+		t.Fatal("the edit was not found in its own file")
+	}
+	path, ok := m.CursorFile()
+	if !ok || path != "b.go" {
+		t.Fatalf("cursor landed in %q, want b.go", path)
+	}
+}
+
 // TestWrapModeShowsTheCursor: with soft wrap on the viewport paints the rows
 // itself, so the bar has to be part of them, and the width it wraps at has to
 // leave room for it.
@@ -368,15 +405,64 @@ func TestWrapModeShowsTheCursor(t *testing.T) {
 	}
 	// The bar must be on the display line the cursor names, not just somewhere
 	// on the screen: wrapPrefix and the viewport have to agree on how tall a
-	// wrapped row is.
-	lines := strings.Split(strings.TrimSuffix(view, "\n"), "\n")
-	want := m.displayLineOf(m.CursorRow()) - m.YOffset()
-	if want < 0 || want >= len(lines) || !strings.Contains(lines[want], "▌") {
-		t.Fatalf("the bar is not on display line %d, the one the cursor names:\n%s", want, view)
+	// wrapped row is. Scrolling is where the two scales are easiest to get
+	// wrong, so it is checked after the keys that move the window too.
+	checkBar := func(label string) {
+		t.Helper()
+		view := m.View()
+		lines := strings.Split(strings.TrimSuffix(view, "\n"), "\n")
+		want := m.displayLineOf(m.CursorRow()) - m.YOffset()
+		if want < 0 || want >= len(lines) || !strings.Contains(lines[want], "▌") {
+			t.Fatalf("%s: the bar is not on display line %d, the one the cursor names:\n%s",
+				label, want, view)
+		}
 	}
+	m.SetSmooth(false)
+	checkBar("before scrolling")
+	for i := 0; i < 3; i++ {
+		next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+		m = next
+		checkBar("after paging down")
+	}
+	view = m.View()
 	for i, line := range strings.Split(strings.TrimSuffix(view, "\n"), "\n") {
 		if w := lipgloss.Width(line); w != 40 {
 			t.Fatalf("wrapped line %d is %d wide, want 40", i, w)
 		}
+	}
+}
+
+// TestFollowEditInBandStaysInItsBlock: the all-changes view names the block, so
+// the search is that block's rows and the cursor lands in the file that changed
+// even when an identical text sits in a block above it.
+func TestFollowEditInBandStaysInItsBlock(t *testing.T) {
+	files := []*diff.File{
+		docTestFile("a.go", 20, "SAME"),
+		docTestFile("b.go", 20, "SAME"),
+	}
+	loads := 0
+	m := newDocView(t, files, &loads)
+	m.SetSelectable(true)
+
+	var line diff.Line
+	for i := range files[1].Hunks {
+		h, ok := files[1].HunkAt(i)
+		if !ok {
+			continue
+		}
+		for _, l := range h.Lines {
+			if l.Kind == diff.Addition {
+				line = l
+			}
+		}
+	}
+	if line.Kind != diff.Addition {
+		t.Fatal("the fixture has no addition")
+	}
+	if !m.FollowEditInBand(1, "b.go", line) {
+		t.Fatal("the edit was not found in its block")
+	}
+	if path, _ := m.CursorFile(); path != "b.go" {
+		t.Fatalf("cursor landed in %q, want b.go", path)
 	}
 }
