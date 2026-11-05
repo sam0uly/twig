@@ -172,6 +172,10 @@ func snapshotFingerprint(root, stamp string, staged, unstaged []FileStatus) stri
 		if info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(f.Path))); err == nil {
 			h.Write(strconv.AppendInt(buf[:0], info.Size(), 10))
 			h.Write(strconv.AppendInt(buf[:0], info.ModTime().UnixNano(), 10))
+			// Keep the stat with the row: the view needs the same numbers to
+			// tell which file changed, and reading them twice per refresh is
+			// one filesystem sweep too many.
+			unstaged[i].Size, unstaged[i].ModTime = info.Size(), info.ModTime().UnixNano()
 		} else {
 			_, _ = io.WriteString(h, "missing")
 		}

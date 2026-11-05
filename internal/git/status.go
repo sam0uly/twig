@@ -21,6 +21,11 @@ type FileStatus struct {
 	Staged bool
 	// Untracked marks files that are not in the index at all.
 	Untracked bool
+	// Size and ModTime are the worktree file's stat, taken by the same Lstat
+	// that fingerprints the snapshot. ModTime zero means unknown, which is the
+	// case for a row that only has an index side.
+	Size    int64
+	ModTime int64
 }
 
 // DisplayPath is the path as listed; renames read "old → new" like git's own
