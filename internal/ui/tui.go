@@ -103,6 +103,18 @@ type model struct {
 	// anchorWait holds the restore back until the document it named has been replaced,
 	// or the two scrolls fight.
 	anchorWait bool
+	// liveNews is what each path looked like when the viewer last saw it.
+	liveNews map[livePath]*liveFile
+	// allFollow is the file a rebuilt all-changes document opens on, until spent.
+	allFollow       string
+	allFollowStaged bool
+	allFollowLine   diff.Line
+	allFollowOK     bool
+	// allEntries is the listing the all-changes document was built from, which tells a
+	// changed file from a changed set of files.
+	allEntries []filelist.Entry
+	// followBack is the file the reader was on, so a false alarm can be undone.
+	followBack sideRef
 	// advanceList marks a whole-file operation: the reader is moved on to the
 	// next file once the list has been rebuilt.
 	advanceList bool
@@ -297,6 +309,11 @@ func isSpinnerTick(msg tea.Msg) bool {
 }
 
 func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if _, ok := msg.(tea.KeyPressMsg); ok {
+		// A key means the reader is driving: the courtesy of putting them back
+		// on the file a follow took them from no longer applies.
+		m.followBack = sideRef{}
+	}
 	if m.err != nil && m.state == stateFatal {
 		if _, ok := msg.(tea.KeyPressMsg); ok {
 			return m, tea.Quit
@@ -367,6 +384,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.stageAnchor = nil
 			m.anchorWait = false
 			m.reloadPending = false
+			m.clearAllFollow()
 		}
 		// The file on screen can leave the listing entirely, which happens when
 		// an editor reverts it. The pane must let go of it, or pressing space
@@ -384,6 +402,44 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// path did not move: reload it instead of trusting the cursor.
 		if m.lastLoaded.path != "" && m.files.Tab() == filelist.TabFiles {
 			m.reloadPending = true
+		}
+		// A live change anywhere in the listing is worth going to, whichever
+		// file the reader happens to be on. Detection and the "is it still
+		// changed" test work on every changed file, whatever the sidebar is
+		// filtered or folded to.
+		all := m.files.AllEntries()
+		changed := m.changedFiles(all)
+		follow, chase := m.liveFollow(changed)
+		if chase {
+			if m.allChanges && m.files.Tab() == filelist.TabFiles {
+				rows := m.files.OrderedEntries()
+				if sameRows(m.allEntries, rows) {
+					// Every row the listing shows already has a block: patch
+					// the files that changed instead of throwing the whole
+					// document away and streaming it back in.
+					m.files.SelectSide(follow.Status.Path, follow.Staged)
+					m.clearAllFollow()
+					return m, tea.Batch(watchCmd, m.reloadBlocksCmd(changed, follow))
+				}
+				// The set of rows changed, so the document has to be rebuilt.
+				// It opens on the file that changed, and the sidebar has to say
+				// the same thing: panes that disagree read as "it did not work".
+				m.files.SelectSide(follow.Status.Path, follow.Staged)
+				m.allFollow = follow.Status.Path
+				m.allFollowStaged = follow.Staged
+			} else if m.files.Tab() == filelist.TabFiles {
+				// Single file view: select it in the listing so the sidebar says
+				// what the pane is showing, then show it.
+				path, staged := follow.Status.Path, follow.Staged
+				if m.lastLoaded.path != "" && m.lastLoaded.path != path {
+					m.followBack = sideRef{path: m.lastLoaded.path, staged: m.lastLoaded.staged, ok: true}
+				} else {
+					m.followBack = sideRef{}
+				}
+				m.files.SelectSide(path, staged)
+				next, load := m.showFile(path, staged)
+				return next, tea.Batch(load, watchCmd)
+			}
 		}
 		if m.allChanges && m.files.Tab() == filelist.TabFiles {
 			// The rebuild replaces the whole document, so remember the line
@@ -487,6 +543,35 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.view.CursorToBand(idx)
 		return m, nil
 
+	case blockUpdateMsg:
+		if !m.allChanges || m.files.Tab() != filelist.TabFiles || msg.gen != m.allGen {
+			return m, nil
+		}
+		// A block index is the listing's row, and the listing can change while the
+		// diffs load: an answer that names a different file than the row it wants to
+		// patch belongs to a document this one replaced.
+		if !m.blocksStillMatch(msg.updates) {
+			return m, nil
+		}
+		// Patching reflows the blocks below the one that changed, so put the reader back
+		// on their line before the follow gets its say.
+		path, _ := m.view.CursorFile()
+		anchor := m.view.AnchorCursor(path)
+		if !m.view.ReplaceBlocks(msg.updates) {
+			return m, nil
+		}
+		for _, s := range msg.remembers {
+			m.rememberDiff(s.path, s.file, s.staged)
+		}
+		m.allAdds, m.allDels = m.view.DocCounts()
+		m.d = &diff.Diff{Additions: m.allAdds, Deletions: m.allDels}
+		m.view.ClearCursor()
+		m.view.RestoreCursor(anchor)
+		if msg.ok {
+			m.followBlock(msg.path, msg.staged, msg.follow)
+		}
+		return m, nil
+
 	case allChunkMsg:
 		if msg.gen != m.allGen {
 			return m, nil
@@ -497,20 +582,33 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// A failed stream is terminal, and a stuck anchor disables every later follow.
 			m.dropAnchor()
 			m.allRestore = -1
+			m.clearAllFollow()
 			return m, setMessageCmd(m.message)
 		}
 		if !m.allChanges || m.files.Tab() != filelist.TabFiles {
 			m.allLoading = false
 			m.dropAnchor()
 			m.allRestore = -1
+			m.clearAllFollow()
 			return m, nil
 		}
 
 		first := msg.from == 0
 		m.view.AppendBlocksSided(msg.files, blockSides(m.cfg, msg.entries, msg.from, len(msg.files)))
-		for _, f := range msg.files {
+		for i, f := range msg.files {
 			m.allAdds += f.Additions
 			m.allDels += f.Deletions
+			// The block's side comes from the row it was built for: a path can be in the
+			// document twice, once per diff.
+			staged := msg.from+i < len(msg.entries) && msg.entries[msg.from+i].Staged
+			// A live change picked this file: name the line while the old diff is still here
+			// to compare against, then remember the new one. The side must match too.
+			if m.allFollow == f.Path() && m.allFollowStaged == staged && !m.allFollowOK {
+				if line, ok := m.followLine(f.Path(), staged, f); ok {
+					m.allFollowLine, m.allFollowOK = line, true
+				}
+			}
+			m.rememberDiff(f.Path(), f, staged)
 		}
 		m.d = &diff.Diff{Additions: m.allAdds, Deletions: m.allDels}
 
@@ -541,6 +639,11 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.view.JumpToLine(m.allRestore)
 			m.allRestore = -1
 		}
+		if m.allFollowOK {
+			// A live change chose this file, so the document opens on it: that is following.
+			m.followBlock(m.allFollow, m.allFollowStaged, m.allFollowLine)
+		}
+		m.clearAllFollow()
 		return m, nil
 
 	case prefetchedMsg:
@@ -601,16 +704,31 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// the same object when nothing changed; when it did change, the diff is redrawn
 			// where they were reading.
 			if m.view.File() == msg.file {
+				m.rememberDiff(msg.path, msg.file, msg.staged)
 				return m, nil
 			}
 			m.view.SetFileAt(msg.file, m.view.Anchor())
 			m.d = &diff.Diff{Additions: msg.file.Additions, Deletions: msg.file.Deletions}
+			m.followShown(msg.path, msg.staged, msg.file)
+			m.rememberDiff(msg.path, msg.file, msg.staged)
 			return m, nil
 		}
 		m.view.SetNotes(nil)
 		m.view.SetFile(msg.file)
 		m.d = &diff.Diff{Additions: msg.file.Additions, Deletions: msg.file.Deletions}
 		m.lastLoaded.path, m.lastLoaded.staged = msg.path, msg.staged
+		// The pane moved to another file because a live change picked it, or the reader
+		// asked: either way this is what following means.
+		if !m.followShown(msg.path, msg.staged, msg.file) && m.followBack.ok && m.followBack.path != msg.path {
+			// A stat moved, not an edit: put the reader back on their file.
+			back := m.followBack
+			m.followBack = sideRef{}
+			m.lastLoaded.path, m.lastLoaded.staged = "", false
+			next, load := m.showFile(back.path, back.staged)
+			return next, load
+		}
+		m.followBack = sideRef{}
+		m.rememberDiff(msg.path, msg.file, msg.staged)
 		return m, nil
 
 	case commitListMsg:
@@ -1573,6 +1691,7 @@ func (m model) startAllChanges() (tea.Model, tea.Cmd) {
 	entries := m.files.OrderedEntries()
 	opts := m.diffOptions()
 
+	m.allEntries = entries
 	m.allGen++
 	m.allLoading = true
 	m.allPendingJump = false
@@ -2168,6 +2287,7 @@ func (m *model) applyConfig(cfg config.Config) tea.Cmd {
 	if cfg.Context != old.Context || cfg.IgnoreWhitespace != old.IgnoreWhitespace {
 		// The diffs change shape with the options, and a snapshot taken under
 		// the old ones cannot be compared with a diff taken under the new ones.
+		m.forgetDiffs()
 		next, cmd := m.reloadContent()
 		*m = next.(model)
 		return cmd

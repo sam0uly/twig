@@ -57,6 +57,13 @@ func (r *rowIndex) add(i, delta int) {
 	}
 }
 
+// reset drops every entry, so a layout whose block sizes changed can be indexed
+// again from the start.
+func (r *rowIndex) reset() {
+	r.rows = r.rows[:0]
+	r.tree = r.tree[:0]
+}
+
 func (r *rowIndex) rebuild() {
 	// Twice the rows it indexes: the spare half keeps the next appends free.
 	size := max(16, 2*(len(r.rows)+1))
@@ -211,6 +218,129 @@ func (d *blockDoc) add(files []*diff.File, base int, tags []string) {
 		d.appendBlock(&b)
 	}
 	d.evict()
+}
+
+// replace swaps in new diffs for blocks already laid out, so a live change updates
+// the files it touched. Every other block keeps its rows.
+func (d *blockDoc) replace(files map[int]*diff.File) bool {
+	if d.src != nil || len(files) == 0 {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	changed := false
+	for i, f := range files {
+		if i < 0 || i >= len(d.blocks) || f == nil {
+			continue
+		}
+		b := &d.blocks[i]
+		b.file = f
+		b.adds, b.dels = f.Additions, f.Deletions
+		b.lineCount = 1 + f.NLines()
+		sep := docSeparator(f, b.tag)
+		b.sep = &sep
+		b.built = [2][]contentRow{}
+		// The replaced block left the window.
+		for j, v := range d.order {
+			if v == i {
+				d.order = append(d.order[:j], d.order[j+1:]...)
+				break
+			}
+		}
+		b.rows[modeUnified], b.rows[modeSplit], b.hunks[modeUnified], b.hunks[modeSplit], b.widest = blockMetrics(b, d.scanLines(b))
+		changed = true
+	}
+	if !changed {
+		return false
+	}
+	d.relayout()
+	d.evict()
+	return true
+}
+
+// counts sums the changed lines the document holds, from each block's own numbers.
+func (d *blockDoc) counts() (adds, dels int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for i := range d.blocks {
+		adds += d.blocks[i].adds
+		dels += d.blocks[i].dels
+	}
+	return adds, dels
+}
+
+// fileAt is the diff a block is showing, or nil.
+func (d *blockDoc) fileAt(i int) *diff.File {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if i < 0 || i >= len(d.blocks) {
+		return nil
+	}
+	return d.blocks[i].file
+}
+
+// blockFile is the diff a block paints: the single file of a line document, or the
+// block's own diff in an aggregate.
+func (d *blockDoc) blockFile(i int) *diff.File {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.src != nil {
+		return d.src
+	}
+	if i < 0 || i >= len(d.blocks) {
+		return nil
+	}
+	return d.blocks[i].file
+}
+
+// rowOfFileRow maps a row of a file's diff onto the document row that paints it: the
+// blocks above it, its band, then the rows of the diff. A line document splits one
+// file into blocks, so the row says which block as well as where. It answers -1 when
+// the row falls outside the document.
+func (d *blockDoc) rowOfFileRow(block, row int) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if block < 0 || block >= len(d.blocks) || row < 0 {
+		return -1
+	}
+	if d.src != nil {
+		for i := range d.blocks {
+			b := &d.blocks[i]
+			if row >= b.first && row < b.first+b.lineCount {
+				block, row = i, row-b.first
+				break
+			}
+		}
+	} else {
+		row -= d.blocks[block].first
+	}
+	b := &d.blocks[block]
+	if row < 0 || row >= b.rows[d.mode] {
+		return -1
+	}
+	band := 0
+	if b.sep != nil {
+		band = 1
+	}
+	return d.rowOffset() + d.idx[d.mode].prefix(block) + band + row
+}
+
+// relayout recomputes what derives from the block line counts: starts, totals and
+// the row index. It walks blocks, never rows.
+func (d *blockDoc) relayout() {
+	d.idx[modeUnified].reset()
+	d.idx[modeSplit].reset()
+	d.lines = d.rowOffset()
+	d.widest = d.preW
+	for i := range d.blocks {
+		b := &d.blocks[i]
+		b.lineStart = d.lines
+		d.lines += b.lineCount
+		d.widest = max(d.widest, b.widest)
+		d.idx[modeUnified].append(b.rows[modeUnified])
+		d.idx[modeSplit].append(b.rows[modeSplit])
+	}
 }
 
 // appendBlock records one block's layout without building its rows.
