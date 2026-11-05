@@ -34,10 +34,12 @@ func (m *Model) FollowEditIn(path string, line diff.Line) bool {
 }
 
 // rowOfChange places a changed line without walking the document: the diff numbers
-// the line and the layout says which row paints it. It answers -1 when the rows are
-// paired or wrapped, where a line is not a row and the scan is the only way.
+// the line and the layout says which row paints it. It answers false where rows are
+// paired, since a split row is two lines and the scan is the only way to pick one.
+// Wrapping is not such a case: it turns a row into several display lines, which the
+// scroll target accounts for, not the row the line is on.
 func (m *Model) rowOfChange(path string, line diff.Line) (int, bool) {
-	if m.doc == nil || m.split || m.vp.SoftWrap {
+	if m.doc == nil || m.split {
 		return 0, false
 	}
 	block := 0

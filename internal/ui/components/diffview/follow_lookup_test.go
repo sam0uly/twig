@@ -112,3 +112,37 @@ func TestFollowEditLandsOnTheChange(t *testing.T) {
 		t.Fatalf("the cursor is on row %d, not on %+v", m.CursorRow(), last)
 	}
 }
+
+// TestRowOfChangeKeepsWorkingWhenWrapped: soft wrapping turns a row into several
+// display lines, not a line into several rows, so the lookup still answers. Falling
+// back to the scan there costs the whole document on a paged diff, and finds nothing.
+func TestRowOfChangeKeepsWorkingWhenWrapped(t *testing.T) {
+	f := changedFile(20_000, 10)
+	m := newVirtualView(f, 120, 24)
+	m.SetWrap(true)
+	if !m.vp.SoftWrap {
+		t.Fatal("the fixture is not wrapped")
+	}
+
+	lines := changeLines(f)
+	last := lines[len(lines)-1]
+	row, ok := m.rowOfChange("", last)
+	if !ok {
+		t.Fatalf("the lookup gave up on a wrapped document for %+v", last)
+	}
+	m.rowAt(row)
+	if !paints(&m, row, last) {
+		t.Fatalf("row %d does not paint %+v", row, last)
+	}
+}
+
+// TestRowOfChangeStandsDownWhenPaired: split mode draws two lines on one row, so a
+// line number no longer names a row and the scan has to pick it.
+func TestRowOfChangeStandsDownWhenPaired(t *testing.T) {
+	f := changedFile(3_000, 9)
+	m := newFlatView(f, 120, 24)
+	m.SetSplit(true)
+	if _, ok := m.rowOfChange("", changeLines(f)[0]); ok {
+		t.Fatal("the lookup answered for paired rows")
+	}
+}
