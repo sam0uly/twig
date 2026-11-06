@@ -148,16 +148,20 @@ func TestRangeIsDrawnInTheGutter(t *testing.T) {
 	if !m.CursorTo(first) || !m.StartRange() {
 		t.Fatal("could not start a range")
 	}
+	want := m.styles.CursorBar().Render("┃")
+	if got := m.barWidth(); got != 1 {
+		t.Fatalf("staging rail width = %d, want 1", got)
+	}
+	if got := m.barAt(first); got != want {
+		t.Fatalf("cursor rail = %q, want %q", got, want)
+	}
 	if !m.ExtendCursor(second - first) {
 		t.Fatal("the range did not extend")
 	}
 	for _, row := range []int{first + 1, second - 1} {
-		if got := m.barAt(row); !strings.Contains(got, "║") {
-			t.Fatalf("row %d inside the range is not marked: %q", row, got)
+		if got := m.barAt(row); got != want {
+			t.Fatalf("row %d range rail = %q, want %q", row, got, want)
 		}
-	}
-	if got := m.barAt(first + 1); strings.Contains(got, "│") && !strings.Contains(got, "║") {
-		t.Fatalf("the range mark is the hunk mark: %q", got)
 	}
 }
 
@@ -400,7 +404,7 @@ func TestWrapModeShowsTheCursor(t *testing.T) {
 		t.Fatal("no cursor")
 	}
 	view := m.View()
-	if !strings.Contains(view, "▌") {
+	if !strings.Contains(view, "┃") {
 		t.Fatalf("the cursor bar is not painted in wrap mode:\n%s", view)
 	}
 	// The bar must be on the display line the cursor names, not just somewhere
@@ -412,7 +416,7 @@ func TestWrapModeShowsTheCursor(t *testing.T) {
 		view := m.View()
 		lines := strings.Split(strings.TrimSuffix(view, "\n"), "\n")
 		want := m.displayLineOf(m.CursorRow()) - m.YOffset()
-		if want < 0 || want >= len(lines) || !strings.Contains(lines[want], "▌") {
+		if want < 0 || want >= len(lines) || !strings.Contains(lines[want], "┃") {
 			t.Fatalf("%s: the bar is not on display line %d, the one the cursor names:\n%s",
 				label, want, view)
 		}

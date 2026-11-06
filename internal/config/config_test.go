@@ -23,7 +23,7 @@ func TestLoadDefaults(t *testing.T) {
 func TestLoadExplicitFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "twig.json")
-	content := "{\"context\": 10, \"ignore-whitespace\": true, \"sidebar-width\": 40}\n"
+	content := "{\"context\": 10, \"ignore-whitespace\": true, \"borderless\": true, \"sidebar-width\": 40}\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -37,6 +37,9 @@ func TestLoadExplicitFile(t *testing.T) {
 	}
 	if !cfg.IgnoreWhitespace {
 		t.Error("ignore-whitespace = false, want true")
+	}
+	if !cfg.Borderless {
+		t.Error("borderless = false, want true")
 	}
 	if cfg.SidebarWidth != 40 {
 		t.Errorf("sidebar-width = %d, want 40", cfg.SidebarWidth)

@@ -142,7 +142,7 @@ type blockDoc struct {
 	lines  int
 	widest int   // widest rendered line
 	preW   int   // widest row above the document
-	gutter int   // width of the stacked-row gutter, set by the model
+	gutter int   // width of the unified number gutter
 	numW   int   // width of one split column's number gutter
 	order  []int // materialised blocks, least recently used first
 	loads  int   // materialisations, exposed for tests
@@ -695,8 +695,7 @@ func (d *blockDoc) preCount() int {
 	return len(d.pre)
 }
 
-// setGutter records the gutter widths the model is using: the whole gutter for
-// stacked rows and one side's number column for split columns.
+// setGutter records the unified and split number gutter widths.
 func (d *blockDoc) setGutter(cells, numW int) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -708,7 +707,7 @@ func (d *blockDoc) width(vpWidth int, split, numbers bool) int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if split {
-		colW := vpWidth / 2
+		colW, _ := splitColumnWidths(vpWidth)
 		gut := 0
 		if numbers {
 			gut = d.numW

@@ -46,10 +46,180 @@ func TestViewDimensions(t *testing.T) {
 	}
 }
 
-func TestGutterShowsLineNumbers(t *testing.T) {
+func TestUnifiedUsesSingleLineNumberColumn(t *testing.T) {
+	virtual := New(false, styles.New())
+	virtual.SetSize(60, 12)
+	virtual.SetLines(sampleFile())
+
+	for _, test := range []struct {
+		name string
+		view Model
+	}{
+		{name: "flat", view: newSized(false, 60)},
+		{name: "virtual", view: virtual},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			view := ansi.Strip(test.view.View())
+			if strings.Contains(view, "   1    1") {
+				t.Fatalf("unified view has two line-number columns:\n%s", view)
+			}
+			found := false
+			for _, line := range strings.Split(view, "\n") {
+				if !strings.Contains(line, "package main") {
+					continue
+				}
+				found = true
+				if !strings.HasPrefix(line, "1     package main") {
+					t.Fatalf("context line does not have one number column: %q", line)
+				}
+			}
+			if !found {
+				t.Fatalf("context line missing from unified view:\n%s", view)
+			}
+		})
+	}
+}
+
+func TestUnifiedChangeBackgroundFillsRow(t *testing.T) {
 	m := newSized(false, 60)
-	if !strings.Contains(m.View(), "   1    1") {
-		t.Fatalf("expected line numbers in the gutter, got:\n%s", m.View())
+	checked := 0
+	for row, r := range m.rows {
+		if r.line.Kind != diff.Addition && r.line.Kind != diff.Deletion {
+			continue
+		}
+		_, text := m.styledText(row, r.line, r.flat)
+		base := m.lineStyles(r.line)
+		n := r.line.New
+		if n <= 0 {
+			n = r.line.Old
+		}
+		number := fmt.Sprintf("%-*s ", m.gut.numCells(), lineNum(n))
+		got := m.paintRow(row)
+		if !strings.Contains(got, base.Render(number)) {
+			t.Fatalf("%v line number is outside the background: %q", r.line.Kind, got)
+		}
+		padding := m.rowBudget() - m.gut.cells() - m.foldMarkerWidth(row) - lipgloss.Width(text)
+		if want := base.Render(strings.Repeat(" ", padding)); !strings.HasSuffix(got, want) {
+			t.Fatalf("%v background does not fill the row:\n%q", r.line.Kind, got)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("sample diff has no changed lines")
+	}
+}
+
+func TestUnfocusedContentAndCursorUseMutedStyles(t *testing.T) {
+	m := newSized(false, 60)
+	m.SetSelectable(true)
+	m.SetBorderless(true)
+	row := rowOfKind(m, diff.Addition)
+	if !m.CursorTo(row) {
+		t.Fatal("could not place the cursor")
+	}
+	m.View()
+	before := m.paintRow(row)
+
+	m.SetCursorFocus(false)
+	base := m.lineStyles(m.rowAt(row).line)
+	if got, want := base.GetForeground(), m.styles.DescNormalFg(); got != want {
+		t.Fatalf("unfocused foreground = %v, want %v", got, want)
+	}
+	if got, want := base.GetBackground(), m.styles.DiffAdd().GetBackground(); got != want {
+		t.Fatalf("unfocused background = %v, want %v", got, want)
+	}
+	if got, want := m.barAt(row), m.styles.HunkEdge().Render("│"); got != want {
+		t.Fatalf("unfocused cursor = %q, want aligned rail %q", got, want)
+	}
+	if !m.StartRange() {
+		t.Fatal("could not start a range")
+	}
+	if !m.ExtendCursor(1) {
+		t.Fatal("could not extend the range")
+	}
+	if got := m.barAt(row); got != m.styles.HunkEdge().Render("│") {
+		t.Fatalf("unfocused range = %q, want muted rail", got)
+	}
+	if after := m.paintRow(row); ansi.Strip(after) != ansi.Strip(before) {
+		t.Fatal("focus styling changed diff text or alignment")
+	}
+
+	m.SetCursorFocus(true)
+	if restored := m.paintRow(row); restored != before {
+		t.Fatalf("focused diff did not restore its colors:\nbefore %q\nafter  %q", before, restored)
+	}
+
+	m.SetCursorFocus(false)
+	m.SetBorderless(false)
+	base = m.lineStyles(m.rowAt(row).line)
+	if got, want := base.GetForeground(), m.styles.DiffAdd().GetForeground(); got != want {
+		t.Fatalf("bordered unfocused foreground = %v, want active %v", got, want)
+	}
+}
+
+func TestSplitChangeBackgroundIncludesLineNumbers(t *testing.T) {
+	m := newSized(true, 60)
+	checked := 0
+	for row, r := range m.rows {
+		leftW, rightW := splitColumnWidths(m.rowBudget())
+		for _, side := range []struct {
+			line    diff.Line
+			flat    int
+			present bool
+			old     bool
+			width   int
+		}{
+			{line: r.left, flat: r.leftFlat, present: r.hasLeft, old: true, width: leftW},
+			{line: r.right, flat: r.rightFlat, present: r.hasRight, width: rightW},
+		} {
+			if !side.present || (side.line.Kind != diff.Addition && side.line.Kind != diff.Deletion) {
+				continue
+			}
+			n := side.line.New
+			if side.old {
+				n = side.line.Old
+			}
+			number := fmt.Sprintf("%-*s ", m.gut.numW, lineNum(n))
+			base := m.lineStyles(side.line)
+			got := m.renderSide(row, side.line, side.flat, true, side.width, side.old)
+			if !strings.HasPrefix(got, base.Render(number)) {
+				t.Fatalf("%v line number is outside the background: %q", side.line.Kind, got)
+			}
+			_, text := m.styledText(row, side.line, side.flat)
+			padding := side.width - ansi.StringWidth(number) - ansi.StringWidth(text)
+			if padding > 0 && !strings.HasSuffix(got, base.Render(strings.Repeat(" ", padding))) {
+				t.Fatalf("%v background does not fill its column: %q", side.line.Kind, got)
+			}
+			checked++
+		}
+	}
+	if checked == 0 {
+		t.Fatal("sample diff has no changed split lines")
+	}
+}
+
+func TestSplitViewHasEmptyColumn(t *testing.T) {
+	m := newSized(true, 60)
+	width := m.rowBudget()
+	leftW, _ := splitColumnWidths(width)
+
+	tests := []struct{ name, rendered string }{{name: "header", rendered: m.renderHeader(m.file)}}
+	for row, r := range m.rows {
+		if r.hasLeft && r.hasRight && r.left.Kind == diff.Deletion && r.right.Kind == diff.Addition {
+			tests = append(tests, struct{ name, rendered string }{name: "changed pair", rendered: m.splitRow(row, width)})
+			break
+		}
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cells := []rune(ansi.Strip(test.rendered))
+			if len(cells) != width {
+				t.Fatalf("row has %d cells, want %d", len(cells), width)
+			}
+			if cells[leftW] != ' ' {
+				t.Fatalf("separator cell = %q, want a blank: %q", cells[leftW], test.rendered)
+			}
+		})
 	}
 }
 
@@ -534,6 +704,7 @@ func TestGutterGrowsWithLineNumbers(t *testing.T) {
 	}
 	m := New(false, styles.New())
 	m.SetSize(100, 20)
+	m.SetSplit(true)
 	m.SetFile(diff.Generate("big.txt", diff.Modified, "", long.String(), diff.GenerateOptions{}))
 
 	if got := m.gut.numCells(); got != 6 {
@@ -667,6 +838,21 @@ func TestSyntaxIndexIsBuiltOnce(t *testing.T) {
 	}
 	if first.Bytes() <= 0 {
 		t.Fatalf("index reports %d bytes", first.Bytes())
+	}
+}
+
+func TestCommitSyntaxWhenBorderlessDisabled(t *testing.T) {
+	m := newSized(false, 80)
+	m.SetCursorFocus(false)
+	if m.muted() {
+		t.Fatal("bordered diff treated an unfocused pane as muted")
+	}
+	m.SetFile(diff.Aggregate([]*diff.File{syntaxFile()}))
+
+	view := m.View()
+	keyword := m.styles.Syntax(styles.SyntaxContext, syntax.Keyword).Render("func")
+	if !strings.Contains(view, keyword) {
+		t.Fatalf("bordered commit view lost syntax highlighting:\n%q", view)
 	}
 }
 

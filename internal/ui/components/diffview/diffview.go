@@ -50,9 +50,7 @@ type Match struct {
 	Start, End int
 }
 
-// gutterState is what the viewport gutter needs to draw a row. The gutter
-// callback is captured once, when the viewport is created, so this is shared by
-// pointer: a Model copy would never see later changes.
+// gutterState tracks line-number rendering and the rows above a diff.
 type gutterState struct {
 	file  *diff.File
 	notes int
@@ -61,10 +59,13 @@ type gutterState struct {
 	// header is 1 when a file header row is drawn above the diff, 0 for a commit
 	// document.
 	header int
-	// numW is the cells reserved per side for a line number.
+	// numW is the cells reserved for a line number.
 	numW int
 	// lineFor resolves a document row to its diff line, for the virtual document.
 	lineFor func(row int) (diff.Line, bool)
+	theme   styles.Styles
+	focused bool
+	visible []int
 }
 
 // contentRow is one rendered row: one line unified, a deleted/added pair in split.
@@ -139,6 +140,11 @@ type Model struct {
 	// and match offsets stay valid.
 	folded []string
 
+	// folds keys collapsible sections; visibleRows maps display rows onto the
+	// full layout so folding is reversible without rebuilding the document.
+	folds       map[string]bool
+	visibleRows []int
+
 	// cursor is the row the staging cursor sits on, or -1 before it is placed; anchor
 	// is the other end of a range, or -1. pending is the mark set select mode applies
 	// in one go, markPath the file it belongs to, since a selection names lines and
@@ -176,7 +182,9 @@ type Model struct {
 
 	split bool
 	wrap  bool
-	// rx is the compiled regular expression when the term looks like one.
+	// borderless enables the muted unfocused rendering; bordered panes use
+	// their border colour as the focus affordance.
+	borderless      bool
 	rx              *regexp.Regexp
 	width, height   int
 	showLineNumbers bool
@@ -192,7 +200,7 @@ type scrollFrameMsg struct {
 
 // New builds a diff view.
 func New(smooth bool, st styles.Styles) Model {
-	gut := &gutterState{show: true, numW: 4}
+	gut := &gutterState{show: true, numW: 4, theme: st, focused: true}
 
 	vp := viewport.New()
 	vp.MouseWheelEnabled = true
@@ -228,6 +236,7 @@ func New(smooth bool, st styles.Styles) Model {
 // SetStyles updates the theme and re-renders the content.
 func (m *Model) SetStyles(st styles.Styles) {
 	m.styles = st
+	m.gut.theme = st
 	m.rebuild()
 }
 
@@ -364,6 +373,7 @@ func (m *Model) setFlat(f *diff.File) {
 	m.gut.lineFor = nil
 	m.file = f
 	m.gut.file = f
+	m.resetFolds()
 	m.term = ""
 	m.matches = nil
 	m.matchIdx = -1
@@ -410,6 +420,7 @@ func (m *Model) SetLines(f *diff.File) {
 	m.gut.lineFor = m.doc.lineForRow
 	m.gut.file = nil
 	m.file = f
+	m.resetFolds()
 	m.term = ""
 	m.matches = nil
 	m.matchIdx = -1
@@ -455,6 +466,7 @@ func (m *Model) SetNotes(lines []string) {
 	m.notes = lines
 	m.refreshNoteRows()
 	m.gut.notes = len(m.noteRows)
+	m.resetFolds()
 	m.setContent()
 }
 
@@ -465,7 +477,7 @@ func (m Model) File() *diff.File { return m.file }
 // mode, the block under the viewport in a virtual document.
 func (m Model) CurrentFilePatch() string {
 	if m.doc != nil {
-		return m.doc.blockPatchAt(m.vp.YOffset())
+		return m.doc.blockPatchAt(m.logicalAt(m.vp.YOffset()))
 	}
 	if m.file == nil {
 		return ""
@@ -481,21 +493,31 @@ func (m Model) Empty() bool {
 	return m.file == nil || len(m.rows) == 0
 }
 
-// nrows is the number of rendered rows in the document.
+// nrows is the number of rows shown after folds.
 func (m Model) nrows() int {
+	if m.visibleRows != nil {
+		return len(m.visibleRows)
+	}
 	if m.doc != nil {
 		return m.doc.count()
 	}
 	return len(m.rows)
 }
 
-// rowAt returns row i of the document.
+// rowAt returns display row i, mapping folded views onto the full layout.
 func (m Model) rowAt(i int) contentRow {
+	i = m.logicalAt(i)
 	if m.doc != nil {
 		return m.doc.row(i)
 	}
+	if i < 0 || i >= len(m.rows) {
+		return contentRow{}
+	}
 	return m.rows[i]
 }
+
+// Rows reports the number of rows shown after folds.
+func (m Model) Rows() int { return m.nrows() }
 
 // nlines is the number of document lines, which is what search indexes.
 func (m Model) nlines() int {
@@ -520,10 +542,13 @@ func (m *Model) SetDocument(load func(i int) *diff.File) {
 	m.gut.file = nil
 	m.gut.lineFor = m.doc.lineForRow
 	m.file = nil
+	m.resetFolds()
 	m.term = ""
 	m.matches = nil
 	m.matchIdx = -1
 	m.hunkCur = -1
+	m.folds = nil
+	m.visibleRows = nil
 	m.pruneSyntax()
 	m.resetCursor()
 	m.cancelAnim()
@@ -614,6 +639,7 @@ func (m *Model) rebuildDoc() {
 	m.updateGutterWidth()
 	m.doc.setGutter(m.gut.cells(), m.gut.numCells()+1)
 	m.contentWidth = m.doc.width(m.vpWidth(), m.split, m.showLineNumbers)
+	m.rebuildFolds()
 	m.pushContent()
 }
 
@@ -950,7 +976,7 @@ func (m Model) visibleLineRange() (int, int) {
 	if m.doc != nil {
 		return m.doc.lineRange(m.vp.YOffset(), m.vpHeight())
 	}
-	from := max(0, m.vp.YOffset())
+	from := max(0, m.logicalAt(m.vp.YOffset()))
 	return from, min(m.nlines(), from+m.vpHeight())
 }
 
@@ -1217,7 +1243,7 @@ func (m Model) nearestMatch(from int) int {
 // rowForLine maps a flat line index onto the row that paints it.
 func (m Model) rowForLine(flat int) int {
 	if m.doc != nil {
-		return m.doc.rowForLine(flat - m.lineBase())
+		return m.displayOfLogical(m.doc.rowForLine(flat - m.lineBase()))
 	}
 	return flat
 }
@@ -1262,9 +1288,9 @@ func (m *Model) SetScroll(row int) {
 // refresh replays with SetFileAt. A flat document has no line index, so rows serve.
 func (m Model) Anchor() int {
 	if m.doc != nil {
-		return m.doc.lineAtRow(m.vp.YOffset()) + m.lineBase()
+		return m.doc.lineAtRow(m.logicalAt(m.vp.YOffset())) + m.lineBase()
 	}
-	return m.vp.YOffset()
+	return m.logicalAt(m.vp.YOffset())
 }
 
 // TopLine is the diff line painted at the top of the pane, the reader's place in the
@@ -1273,7 +1299,7 @@ func (m Model) TopLine() int {
 	if m.doc != nil {
 		return m.Anchor()
 	}
-	idx := m.vp.YOffset() - m.gut.header - len(m.noteRows)
+	idx := m.logicalAt(m.vp.YOffset()) - m.gut.header - len(m.noteRows)
 	if m.file == nil {
 		return max(0, idx)
 	}
@@ -1283,7 +1309,7 @@ func (m Model) TopLine() int {
 // rowForDiffLine is the row that paints a diff line.
 func (m Model) rowForDiffLine(line int) int {
 	if m.doc != nil {
-		return m.doc.rowForLine(line - m.lineBase())
+		return m.displayOfLogical(m.doc.rowForLine(line - m.lineBase()))
 	}
 	return line + m.gut.header + len(m.noteRows)
 }
@@ -1671,6 +1697,7 @@ func (m *Model) rebuild() {
 	m.contentWidth = 0
 	m.indexed = 0
 	m.indexRows()
+	m.rebuildFolds()
 	m.pushContent()
 }
 
@@ -1685,7 +1712,7 @@ func (m *Model) indexRows() {
 				m.fileBands = append(m.fileBands, i)
 			}
 		}
-		m.contentWidth = max(m.contentWidth, m.rowWidth(r))
+		m.contentWidth = max(m.contentWidth, m.rowWidth(i, r))
 	}
 	m.indexed = len(m.rows)
 }
@@ -1770,14 +1797,16 @@ func (m *Model) ExtendFile(f *diff.File) {
 	m.folded = nil
 	m.reindex()
 	m.indexRows()
+	m.rebuildFolds()
 	m.pushContent()
 }
 
 // rowWidth is one row's contribution to the content width, which drives the
 // horizontal scrollbar.
-func (m Model) rowWidth(r contentRow) int {
+func (m Model) rowWidth(row int, r contentRow) int {
+	foldW := m.foldMarkerWidth(row)
 	if m.split {
-		colW := m.vpWidth() / 2
+		colW, _ := splitColumnWidths(m.rowBudget() - foldW)
 		gut := 0
 		if m.showLineNumbers {
 			gut = m.gut.numW + 1
@@ -1791,19 +1820,19 @@ func (m Model) rowWidth(r contentRow) int {
 			widest = max(widest, ansi.StringWidth(r.right.Text))
 		}
 		if widest <= contentW {
-			return m.vpWidth()
+			return m.rowBudget()
 		}
-		return m.vpWidth() + (widest - contentW)
+		return m.rowBudget() + (widest - contentW)
 	}
 
 	if r.pre {
-		return ansi.StringWidth(r.text)
+		return foldW + ansi.StringWidth(r.text)
 	}
 	gut := 0
 	if m.showLineNumbers {
 		gut = m.gut.cells()
 	}
-	return gut + ansi.StringWidth(r.line.Text)
+	return foldW + gut + ansi.StringWidth(r.line.Text)
 }
 
 // visibleLines renders the rows currently in view.
@@ -1842,7 +1871,9 @@ func (m Model) paintRow(i int) string {
 	if m.showLineNumbers && !m.split {
 		gutW = m.gut.cells()
 	}
-	contentW := max(0, m.rowBudget()-gutW)
+	marker := m.foldMarker(i)
+	markerW := ansi.StringWidth(marker)
+	contentW := max(0, m.rowBudget()-gutW-markerW)
 	x := m.vp.XOffset()
 
 	var text string
@@ -1861,7 +1892,7 @@ func (m Model) paintRow(i int) string {
 	}
 
 	// The bar is prepended by visibleLines, so this depends only on document and width.
-	line := gutterText(m.gut, viewport.GutterContext{Index: i, TotalLines: m.nrows()}) + text
+	line := gutterText(m.gut, viewport.GutterContext{Index: i, TotalLines: m.nrows()}) + marker + text
 	if pad := m.rowBudget() - ansi.StringWidth(line); pad > 0 {
 		line += strings.Repeat(" ", pad)
 	}
@@ -1896,10 +1927,8 @@ func (m Model) renderRow(row int, r contentRow) string {
 func (m Model) renderHeader(f *diff.File) string {
 	if m.split {
 		// Split mode gets a header per column, with the change counts.
-		w := m.rowBudget()
-		leftW := w / 2
-		rightW := w - leftW
-		return m.headerSide(pathOr(f.OldPath, f), f, leftW) +
+		leftW, rightW := splitColumnWidths(m.rowBudget())
+		return m.headerSide(pathOr(f.OldPath, f), f, leftW) + " " +
 			m.headerSide(pathOr(f.NewPath, f), f, rightW)
 	}
 
@@ -1910,18 +1939,31 @@ func (m Model) renderHeader(f *diff.File) string {
 		b.WriteString(m.styles.DiffBinary().Render("binary"))
 		return b.String()
 	}
-	b.WriteString(m.styles.GreenFg(fmt.Sprintf("  +%d", f.Additions)))
-	b.WriteString(m.styles.RedFg(fmt.Sprintf(" -%d", f.Deletions)))
+	adds, dels := m.diffStats(f)
+	b.WriteString(adds)
+	b.WriteString(dels)
 	return b.String()
+}
+
+func (m Model) diffStats(f *diff.File) (adds, dels string) {
+	addText := fmt.Sprintf("  +%d", f.Additions)
+	delText := fmt.Sprintf(" -%d", f.Deletions)
+	if m.muted() {
+		return m.styles.DimBrightGrayFg(addText), m.styles.DimBrightGrayFg(delText)
+	}
+	return m.styles.GreenFg(addText), m.styles.RedFg(delText)
 }
 
 // headerSide renders one column of the split header, truncated to its
 // column and padded so the two halves line up.
 func (m Model) headerSide(path string, f *diff.File, width int) string {
+	if width <= 0 {
+		return ""
+	}
 	stats := ""
 	if !f.Binary {
-		stats = m.styles.GreenFg(fmt.Sprintf("  +%d", f.Additions)) +
-			m.styles.RedFg(fmt.Sprintf(" -%d", f.Deletions))
+		adds, dels := m.diffStats(f)
+		stats = adds + dels
 	} else {
 		stats = " " + m.styles.DiffBinary().Render("binary")
 	}
@@ -1967,7 +2009,7 @@ func (m Model) renderLine(row int, l diff.Line, flatIdx int) string {
 		return ""
 	}
 	base, out := m.styledText(row, l, flatIdx)
-	return m.padLine(out, base)
+	return m.padLine(out, base, m.foldMarkerWidth(row))
 }
 
 // styledText renders one line's text, resolving token, word and search styles
@@ -1976,6 +2018,9 @@ func (m Model) styledText(row int, l diff.Line, flatIdx int) (lipgloss.Style, st
 	base := m.lineStyles(l)
 	if l.Text == "" {
 		return base, ""
+	}
+	if m.muted() {
+		return base, base.Render(l.Text)
 	}
 
 	toks := m.tokens(row, l)
@@ -2271,10 +2316,15 @@ func (m Model) splitRow(row, width int) string {
 	case r.fullWidth:
 		return m.renderLine(row, r.line, r.flat)
 	}
-	leftW := width / 2
-	rightW := width - leftW
-	return m.renderSide(row, r.left, r.leftFlat, r.hasLeft, leftW, true) +
+	leftW, rightW := splitColumnWidths(width)
+	return m.renderSide(row, r.left, r.leftFlat, r.hasLeft, leftW, true) + " " +
 		m.renderSide(row, r.right, r.rightFlat, r.hasRight, rightW, false)
+}
+
+func splitColumnWidths(width int) (left, right int) {
+	available := max(0, width-1)
+	left = available / 2
+	return left, available - left
 }
 
 // renderSide renders one column of a split row: line number, text, then a
@@ -2297,7 +2347,12 @@ func (m Model) renderSide(row int, l diff.Line, flatIdx int, present bool, colW 
 		if oldSide {
 			n = l.Old
 		}
-		num = fmt.Sprintf("%*s ", m.gut.numW, lineNum(n))
+		num = fmt.Sprintf("%-*s ", m.gut.numW, lineNum(n))
+		if hasBackground(base) {
+			num = base.Render(num)
+		} else {
+			num = base.Foreground(m.styles.DescNormalFg()).Render(num)
+		}
 	}
 
 	contentW := max(1, colW-gut)
@@ -2344,14 +2399,14 @@ func hasBackground(st lipgloss.Style) bool {
 // background, so diff washes and hunk header bands span the whole row like
 // Zed and drift do. Padding is skipped when soft wrap is on, because
 // trailing spaces would wrap onto empty continuation lines.
-func (m Model) padLine(out string, base lipgloss.Style) string {
+func (m Model) padLine(out string, base lipgloss.Style, foldW int) string {
 	if m.vp.SoftWrap || m.vpWidth() == 0 {
 		return out
 	}
 	if !hasBackground(base) {
 		return out
 	}
-	target := m.rowBudget()
+	target := m.rowBudget() - foldW
 	if m.showLineNumbers && !m.split {
 		target -= m.gut.cells()
 	}
@@ -2366,18 +2421,28 @@ func posInSpan(s [2]int, pos int) bool {
 	return pos >= s[0] && pos < s[1]
 }
 
+func (m Model) muted() bool { return m.borderless && !m.gut.focused }
+
 func (m Model) lineStyles(l diff.Line) lipgloss.Style {
+	style := diffLineStyle(m.styles, l)
+	if m.muted() {
+		style = style.Foreground(m.styles.DescNormalFg())
+	}
+	return style
+}
+
+func diffLineStyle(st styles.Styles, l diff.Line) lipgloss.Style {
 	switch l.Kind {
 	case diff.Addition:
-		return m.styles.DiffAdd()
+		return st.DiffAdd()
 	case diff.Deletion:
-		return m.styles.DiffDel()
+		return st.DiffDel()
 	case diff.HunkHeader:
-		return m.styles.DiffHunk()
+		return st.DiffHunk()
 	case diff.NoNewline:
-		return m.styles.DiffNoNewline()
+		return st.DiffNoNewline()
 	default:
-		return m.styles.DiffContext()
+		return st.DiffContext()
 	}
 }
 
@@ -2436,56 +2501,59 @@ func (m *Model) updateGutterWidth() {
 // numCells is the width of one number column, never below four digits.
 func (g *gutterState) numCells() int { return max(4, g.numW) }
 
-// cells is the total width of the two number columns and their gaps.
-func (g *gutterState) cells() int { return 2*g.numCells() + 2 }
+// cells is the width of the unified number column and its gap.
+func (g *gutterState) cells() int { return g.numCells() + 1 }
 
-// gutterText renders the left line-number gutter. The state is read through a
-// shared pointer, so the callback always sees the current file and mode.
+func (g *gutterState) logical(display int) int {
+	if display < 0 || display >= len(g.visible) {
+		return display
+	}
+	return g.visible[display]
+}
+
+// gutterText renders one unified line-number column with the row's background.
 func gutterText(g *gutterState, info viewport.GutterContext) string {
-	if g.split {
+	if g.split || !g.show {
 		return ""
 	}
-	if info.Soft {
+
+	l, ok := diff.Line{}, false
+	if g.lineFor != nil {
+		l, ok = g.lineFor(g.logical(info.Index))
+	} else if g.file != nil && info.Index >= 0 {
+		idx := g.logical(info.Index) - g.header - g.notes
+		if idx >= 0 {
+			l, ok = g.file.LineAt(idx)
+		}
+	}
+	if !ok {
 		return strings.Repeat(" ", g.cells())
 	}
-	if !g.show {
-		return ""
+
+	base := diffLineStyle(g.theme, l)
+	if !g.focused {
+		base = base.Foreground(g.theme.DescNormalFg())
 	}
-	if g.lineFor != nil {
-		l, ok := g.lineFor(info.Index)
-		if !ok {
-			return blankGutterFor(g)
-		}
-		if l.Kind == diff.HunkHeader {
-			label := "  ·    ·  "
-			if pad := g.cells() - len(label); pad > 0 {
-				return label + strings.Repeat(" ", pad)
+	text := strings.Repeat(" ", g.cells())
+	if !info.Soft {
+		switch l.Kind {
+		case diff.HunkHeader:
+			text = "  ·  "
+			if pad := g.cells() - ansi.StringWidth(text); pad > 0 {
+				text += strings.Repeat(" ", pad)
 			}
-			return label
+		default:
+			n := l.New
+			if n <= 0 {
+				n = l.Old
+			}
+			text = fmt.Sprintf("%-*s ", g.numCells(), lineNum(n))
 		}
-		w := g.numCells()
-		return fmt.Sprintf("%*s %*s ", w, lineNum(l.Old), w, lineNum(l.New))
 	}
-	if g.file == nil {
-		return blankGutterFor(g)
+	if hasBackground(base) {
+		return base.Render(text)
 	}
-	// Index 0 onward is the notes block and file header; diff lines follow.
-	idx := info.Index - g.header - g.notes
-	if info.Index < 0 || idx < 0 {
-		return blankGutterFor(g)
-	}
-	l, ok := g.file.LineAt(idx)
-	if !ok {
-		return blankGutterFor(g)
-	}
-	if l.Kind == diff.HunkHeader {
-		label := "  ·    ·  "
-		if pad := g.cells() - len(label); pad > 0 {
-			return label + strings.Repeat(" ", pad)
-		}
-		return label
-	}
-	return fmt.Sprintf("%*s %*s ", g.numW, lineNum(l.Old), g.numW, lineNum(l.New))
+	return text
 }
 
 // lineNum formats a line number, leaving absent sides (0) blank.
@@ -2497,8 +2565,6 @@ func lineNum(n int) string {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
-
-func blankGutterFor(g *gutterState) string { return strings.Repeat(" ", g.cells()) }
 
 // findAllFold returns byte offsets of all case-insensitive occurrences of
 // sub in s.

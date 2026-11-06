@@ -58,7 +58,11 @@ func (m *Model) rowOfChange(path string, line diff.Line) (int, bool) {
 		return 0, false
 	}
 	row := m.doc.rowOfFileRow(block, at)
-	if row < 0 || row >= m.nrows() {
+	if row < 0 || row >= m.logicalRows() {
+		return 0, false
+	}
+	row = m.displayOfLogical(row)
+	if row < 0 {
 		return 0, false
 	}
 	// The block may have been evicted: ask for the row so it is there to paint.
@@ -97,7 +101,7 @@ func (m *Model) matchRow(path string, line diff.Line, byNumber bool) (int, bool)
 		}
 		for i := range m.file.Lines {
 			if match(m.file.Lines[i]) {
-				return i + m.gut.header + len(m.noteRows), true
+				return m.displayOfLogical(i + m.gut.header + len(m.noteRows)), true
 			}
 		}
 		return 0, false
@@ -208,7 +212,7 @@ func (m *Model) FollowEditInBand(band int, path string, line diff.Line) bool {
 	}
 	// A document materialises only a window of blocks: ask for one row to bring the
 	// block back.
-	m.rowAt(start)
+	m.rowAt(m.displayOfLogical(start))
 	if row, ok := m.matchRowIn(start, end, path, line, true); ok {
 		return m.followRow(row)
 	}

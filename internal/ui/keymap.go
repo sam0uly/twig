@@ -62,6 +62,7 @@ type KeyMap struct {
 	ToggleWS    key.Binding
 	CycleCtx    key.Binding
 	ToggleView  key.Binding
+	ToggleFold  key.Binding
 	// ToggleSmooth turns the harmonica scroll animation on and off. It is a
 	// global key and the choice is written back to the config file.
 	ToggleSmooth key.Binding
@@ -243,6 +244,10 @@ func DefaultKeyMap() KeyMap {
 		ToggleView: key.NewBinding(
 			key.WithKeys("v"),
 			key.WithHelp("v", "split view"),
+		),
+		ToggleFold: key.NewBinding(
+			key.WithKeys("o"),
+			key.WithHelp("o", "fold"),
 		),
 		ToggleSmooth: key.NewBinding(
 			key.WithKeys("m"),
