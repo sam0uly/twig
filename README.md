@@ -61,32 +61,33 @@ twig log          # browse commits, open any of them
 `H` and `L` bring a sidebar in; the diff gets the whole window otherwise.
 Search and the list filters run as you type, and `esc` clears either.
 
-| Key                       | Action                                          |
-| ------------------------- | ----------------------------------------------- |
-| `enter`                   | open diff / jump to file / expand a tree folder |
-| `esc`                     | back to the sidebar                             |
-| `tab` / `shift+tab`       | next / previous pane                            |
-| `j` / `k`, `↑` / `↓`      | move the staging cursor a line                  |
-| `f` / `b`, `pgdn`/`pgup`  | move it a screenful (`ctrl+d` / `ctrl+u` too)   |
-| `h` / `l`, `←` / `→`      | horizontal scroll (when wrap is off)            |
-| `[` / `]`                 | previous / next hunk, cursor and all            |
-| `J` / `K`                 | next / previous file                            |
-| `g` / `G`                 | first / last row a keystroke can act on         |
-| `t`                       | tree / flat listing                             |
-| `a`                       | all changes in one scroll                       |
-| `H` / `L`                 | left / right sidebar                            |
-| `/`                       | filter files, or search the diff                |
-| `n` / `N`                 | next / previous match                           |
-| `space`                   | stage or unstage what the cursor is on          |
-| `V`                       | select a range, extended with `j` / `k`         |
-| `z`                       | undo the last staging operation                 |
-| `x`                       | discard what the cursor is on                   |
-| `s` / `u`                 | stage / unstage the whole file                  |
-| `C` / `P`                 | commit / push                                   |
-| `y` / `Y`                 | copy the patch / the hunk                       |
-| `v` / `w`                 | split view / soft wrap                          |
-| `Z` / `c`                 | ignore whitespace / cycle context               |
-| `r` / `?` / `q`           | refresh / help / quit                           |
+| Key                      | Action                                          |
+| ------------------------ | ----------------------------------------------- |
+| `enter`                  | open diff / jump to file / expand a tree folder |
+| `esc`                    | back to the sidebar                             |
+| `tab` / `shift+tab`      | next / previous pane                            |
+| `j` / `k`, `↑` / `↓`     | move the staging cursor a line                  |
+| `f` / `b`, `pgdn`/`pgup` | move it a screenful (`ctrl+d` / `ctrl+u` too)   |
+| `h` / `l`, `←` / `→`     | horizontal scroll (when wrap is off)            |
+| `[` / `]`                | previous / next hunk, cursor and all            |
+| `J` / `K`                | next / previous file                            |
+| `g` / `G`                | first / last row a keystroke can act on         |
+| `t`                      | tree / flat listing                             |
+| `a`                      | all changes in one scroll                       |
+| `H` / `L`                | left / right sidebar                            |
+| `/`                      | filter files, or search the diff                |
+| `n` / `N`                | next / previous match                           |
+| `space`                  | stage or unstage what the cursor is on          |
+| `V`                      | select a range, extended with `j` / `k`         |
+| `z`                      | undo the last staging operation                 |
+| `x`                      | discard what the cursor is on                   |
+| `s` / `u`                | stage / unstage the whole file                  |
+| `C` / `P`                | commit / push                                   |
+| `y` / `Y`                | copy the patch / the hunk                       |
+| `v` / `w`                | split view / soft wrap                          |
+| `o`                      | fold / unfold metadata, hunk, or file           |
+| `Z` / `c`                | ignore whitespace / cycle context               |
+| `r` / `?` / `q`          | refresh / help / quit                           |
 
 ## Staging
 
@@ -125,6 +126,7 @@ it elsewhere. Every key is optional.
   "ignore-whitespace": false,
   "wrap": false,
   "line-numbers": true,
+  "borderless": false,
   "watch": true,
   "follow": true,
   "watch-debounce": 120,
@@ -159,6 +161,10 @@ place as before.
 `syntax` colours diff lines by what a token is: keywords, strings, comments,
 numbers, names. It is on by default, needs no external tool and no grammar
 files, and `false` returns the plain diff wash.
+
+Set `borderless` to `true` in `twig.json` to remove every pane's frame and
+separate adjacent panes with one blank column. Unfocused panes mute their item
+colors; focused panes keep the full palette. This setting has no CLI flag.
 
 `stage` adds the cursor, `false` gives `j`/`k` back. `stage-apply`: `instant`/`select`.
 `discard-confirm` is the smallest discard that asks: `line`, `hunk` (one line goes),
