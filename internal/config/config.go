@@ -20,6 +20,8 @@ type Config struct {
 	Wrap bool `json:"wrap"`
 	// LineNumbers shows old/new line numbers in the gutter.
 	LineNumbers bool `json:"line-numbers"`
+	// Borderless removes pane borders and separates panes with one blank cell.
+	Borderless bool `json:"borderless"`
 	// SidebarWidth is the width of the file list sidebar in cells.
 	SidebarWidth int `json:"sidebar-width"`
 	// ShowLeftSidebar starts with the files pane visible.
@@ -92,6 +94,7 @@ func Default() Config {
 		IgnoreWhitespace: false,
 		Wrap:             false,
 		LineNumbers:      true,
+		Borderless:       false,
 		SidebarWidth:     32,
 		ShowLeftSidebar:  false,
 		ShowRightSidebar: false,
