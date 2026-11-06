@@ -33,20 +33,20 @@ type Item struct {
 	Line diff.Line
 }
 
-// barWidth is the columns the staging gutter reserves. Reserving rather than
-// inserting them keeps the code from shifting sideways when the cursor moves.
+// barWidth is the column the staging gutter reserves. Reserving rather than
+// inserting it keeps the code from shifting sideways when the cursor moves.
 func (m Model) barWidth() int {
 	if !m.selectable {
 		return 0
 	}
-	return 2
+	return 1
 }
 
 // rowFile is the file a row belongs to: the one on screen, or the block's own in
 // a document.
 func (m Model) rowFile(row int) *diff.File {
 	if m.doc != nil {
-		return m.doc.fileForRow(row)
+		return m.doc.fileForRow(m.logicalAt(row))
 	}
 	return m.file
 }
@@ -73,8 +73,10 @@ func (m Model) CursorDiffFile() *diff.File {
 // isBandRow reports whether a row is a file's separator band.
 func (m Model) isBandRow(row int) bool {
 	if m.doc == nil {
+		row = m.logicalAt(row)
 		return row >= 0 && row == m.fileHeaderRow()
 	}
+	row = m.logicalAt(row)
 	i := sort.SearchInts(m.fileBands, row)
 	return i < len(m.fileBands) && m.fileBands[i] == row
 }
@@ -114,8 +116,45 @@ func (m Model) CursorRow() int { return m.cursor }
 // HasCursor reports whether the cursor has been placed.
 func (m Model) HasCursor() bool { return m.cursor >= 0 && m.cursor < m.nrows() }
 
-// SetCursorFocus says whether this pane holds the keys; the bar dims, never moves.
-func (m *Model) SetCursorFocus(on bool) { m.cursorOn = on }
+// SetBorderless turns muted unfocused rendering on or off. Bordered panes keep
+// full colours and use their border as the focus affordance.
+func (m *Model) SetBorderless(on bool) {
+	if m.borderless == on {
+		// Normalize stale focus state if this was already a bordered view.
+		if !on && !m.gut.focused {
+			m.gut.focused = true
+			m.cache.reset()
+			if m.vp.SoftWrap {
+				m.pushContent()
+			}
+		}
+		return
+	}
+	m.borderless = on
+	m.gut.focused = true
+	m.cache.reset()
+	if m.vp.SoftWrap {
+		m.pushContent()
+	}
+}
+
+// SetCursorFocus says whether this pane holds the keys; muted content and the bar
+// regain their colors when focused, without moving the cursor. Muting is only
+// active in borderless mode.
+func (m *Model) SetCursorFocus(on bool) {
+	focused := !m.borderless || on
+	if m.cursorOn == on && m.gut.focused == focused {
+		return
+	}
+	m.cursorOn = on
+	if m.gut.focused != focused {
+		m.gut.focused = focused
+		m.cache.reset()
+		if m.vp.SoftWrap {
+			m.pushContent()
+		}
+	}
+}
 
 // CursorOn reports whether the bar is drawn bright.
 func (m Model) CursorOn() bool { return m.cursorOn }
@@ -176,24 +215,12 @@ func (m Model) eachLine(row int, fn func(diff.Line) bool) bool {
 
 // hunkAtRow reports the file-local hunk whose header is on this row.
 func (m Model) hunkAtRow(row int) (int, bool) {
+	row = m.logicalAt(row)
 	i := sort.SearchInts(m.hunks, row)
 	if i < len(m.hunks) && m.hunks[i] == row {
 		return i, true
 	}
 	return -1, false
-}
-
-// hunkRows is the inclusive row span of hunk h, including its header.
-func (m Model) hunkRows(h int) (start, end int) {
-	if h < 0 || h >= len(m.hunks) {
-		return 0, 0
-	}
-	start = m.hunks[h]
-	end = m.nrows() - 1
-	if h+1 < len(m.hunks) {
-		end = m.hunks[h+1] - 1
-	}
-	return start, end
 }
 
 // fileHeaderRow is the row holding the file's own header, or -1.
@@ -234,7 +261,7 @@ func (m Model) itemAt(row int) Item {
 
 // hunkOfRow names the hunk a row falls in: the last header above it, or -1.
 func (m Model) hunkOfRow(row int) int {
-	return sort.SearchInts(m.hunks, row) - 1
+	return sort.SearchInts(m.hunks, m.logicalAt(row)) - 1
 }
 
 // CursorItem is the object under the cursor.
@@ -273,7 +300,7 @@ func (m *Model) moveByPage(rows int) {
 	// A page walks over rows the document has not built yet, and a row whose
 	// block is evicted answers nothing: without these blocks the cursor would
 	// stop on a band or a hunk header instead of the line under it.
-	m.materialiseSpan(m.cursor, m.cursor+dir*m.vpHeight())
+	m.materialiseSpan(m.logicalAt(m.cursor), m.logicalAt(m.cursor)+dir*m.vpHeight())
 	if m.RangeActive() {
 		m.ExtendCursor(dir * steps)
 		return
@@ -289,7 +316,7 @@ func (m *Model) materialiseSpan(from, to int) {
 	}
 	lo, hi := min(from, to), max(from, to)
 	for i, start := range m.fileBands {
-		end := m.nrows() - 1
+		end := m.logicalRows() - 1
 		if i+1 < len(m.fileBands) {
 			end = m.fileBands[i+1] - 1
 		}
@@ -523,10 +550,10 @@ func (m *Model) CursorToBand(i int) bool {
 	if !m.Selectable() || !m.HasBand(i) {
 		return false
 	}
-	start := m.fileBands[i]
+	start := m.displayOfLogical(m.fileBands[i])
 	end := m.nrows()
 	if i+1 < len(m.fileBands) {
-		end = m.fileBands[i+1]
+		end = m.displayOfLogical(m.fileBands[i+1])
 	}
 	for row := max(0, start); row < min(end, m.nrows()); row++ {
 		if k := m.itemAt(row).Kind; k == ItemLine || k == ItemHunk {
@@ -669,8 +696,11 @@ func (m Model) Selection() *stage.Selection {
 			return stage.AllSelection(file)
 		case ItemHunk:
 			// A hunk is named by its rows: a document numbers them across files.
-			start, end := m.hunkRows(item.Hunk)
+			start, end := m.logicalHunkRows(item.Hunk)
 			for row := start; row <= end; row++ {
+				if !m.visible(row) {
+					continue
+				}
 				if m.rowFile(row) != file {
 					continue
 				}
@@ -770,35 +800,29 @@ func (m Model) rowPending(row int) bool {
 	return false
 }
 
-// barAt renders the two reserved gutter columns for one row, never the line itself,
-// so the wash and the syntax colours stay as they were.
+// barAt renders the staging rail for one row, never the line itself, so the
+// wash and syntax colours stay as they were.
 func (m Model) barAt(row int) string {
 	if m.barWidth() == 0 {
 		return ""
 	}
-	bar := " "
 	switch {
+	case m.inRange(row) && m.cursorOn:
+		return m.styles.CursorBar().Render("┃")
 	case m.cursor == row && m.cursorOn:
-		bar = m.styles.CursorBar().Render("▌")
-	case m.cursor == row:
-		bar = m.styles.HunkEdge().Render("▏")
-	}
-
-	mark := " "
-	switch {
+		return m.styles.CursorBar().Render("┃")
 	case m.rowPending(row):
-		mark = m.styles.PendingMark().Render("│")
-	case m.inRange(row):
-		mark = m.styles.StageMark().Render("║")
+		return m.styles.PendingMark().Render("│")
+	case m.cursor == row:
+		return m.styles.HunkEdge().Render("│")
 	case m.inHunkBody(row):
-		mark = m.styles.HunkEdge().Render("│")
+		return m.styles.HunkEdge().Render("│")
 	default:
-		if h, ok := m.hunkAtRow(row); ok {
-			_ = h
-			mark = m.styles.HunkEdge().Render("┌")
+		if _, ok := m.hunkAtRow(row); ok {
+			return m.styles.HunkEdge().Render("│")
 		}
+		return " "
 	}
-	return bar + mark
 }
 
 // inRange reports whether a row lies between the two ends of a range, in the
@@ -815,10 +839,11 @@ func (m Model) inRange(row int) bool {
 
 // inHunkBody reports whether a row sits inside a hunk but is not its header.
 func (m Model) inHunkBody(row int) bool {
+	row = m.logicalAt(row)
 	i := sort.SearchInts(m.hunks, row)
 	if i == 0 || i > len(m.hunks) {
 		return false
 	}
-	start, end := m.hunkRows(i - 1)
+	start, end := m.logicalHunkRows(i - 1)
 	return row > start && row <= end
 }

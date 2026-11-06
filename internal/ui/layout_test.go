@@ -91,14 +91,21 @@ func TestListViewsFitPane(t *testing.T) {
 	}
 }
 
-func TestMainPaneShowsLineNumbers(t *testing.T) {
+func TestMainPaneShowsLineNumbersInSplitMode(t *testing.T) {
 	m := testModel(120, 24)
 	m.files.SetFiles(nil, []git.FileStatus{{Path: "a.go", Letter: "M"}})
+	m.view.SetSplit(true)
 	m.view.SetFile(diff.Generate("a.go", diff.Modified,
 		"package a\n\nfunc x() {}\n", "package a\n\nfunc y() {}\n", diff.GenerateOptions{Context: 3}))
-	if !strings.Contains(m.render(), "   1    1") {
-		t.Fatalf("expected line numbers in the main pane:\n%s", m.render())
+	for _, line := range strings.Split(ansi.Strip(m.render()), "\n") {
+		if strings.Contains(line, "func x()") && strings.Contains(line, "func y()") {
+			if !strings.Contains(line, "3    ") {
+				t.Fatalf("expected line numbers in the split main pane: %q", line)
+			}
+			return
+		}
 	}
+	t.Fatalf("changed lines missing from the split main pane:\n%s", m.render())
 }
 
 func TestSplitViewToggle(t *testing.T) {

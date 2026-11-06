@@ -175,21 +175,19 @@ func TestCursorDoesNotReflowTheDiff(t *testing.T) {
 	}
 
 	// The gutter is reserved, not inserted: every row keeps its content and
-	// its width, losing two cells of trailing padding to the bar.
+	// its width, losing one cell of trailing padding to the bar.
 	trim := func(s string) string {
 		return strings.TrimRight(strings.TrimSuffix(s, "│"), " ")
 	}
 	want := strings.Split(ansi.Strip(off.View()), "\n")
 	got := strings.Split(ansi.Strip(on.View()), "\n")
 	for i := range want {
-		// The bar is two cells, not two bytes: the mark column holds a
-		// box-drawing glyph.
 		runes := []rune(got[i])
-		if len(runes) < 2 {
+		if len(runes) < 1 {
 			t.Fatalf("row %d is too short to carry the bar: %q", i, got[i])
 		}
-		if trim(string(runes[2:])) != trim(want[i]) {
-			t.Fatalf("row %d moved its content:\ngot  %q\nwant %q", i, string(runes[2:]), want[i])
+		if trim(string(runes[1:])) != trim(want[i]) {
+			t.Fatalf("row %d moved its content:\ngot  %q\nwant %q", i, string(runes[1:]), want[i])
 		}
 	}
 }
@@ -299,11 +297,11 @@ func TestSplitViewWithCursorKeepsItsWidth(t *testing.T) {
 			t.Fatalf("row %d is %d cells wide, want 60:\n%s", i, w, got[i])
 		}
 		runes := []rune(got[i])
-		if len(runes) < 2 {
+		if len(runes) < 1 {
 			t.Fatalf("row %d cannot carry the bar", i)
 		}
 		// Nothing on the row may be lost. Padding and the split filler do change,
-		// because two cells less width divides into different halves, so the
+		// because one cell less width divides into different halves, so the
 		// comparison keeps only what was written there.
 		content := func(s string) string {
 			return strings.Map(func(r rune) rune {
@@ -314,8 +312,8 @@ func TestSplitViewWithCursorKeepsItsWidth(t *testing.T) {
 				return r
 			}, s)
 		}
-		if content(string(runes[2:])) != content(base[i]) {
-			t.Fatalf("row %d lost content with the bar:\nwith %q\nwithout %q", i, string(runes[2:]), base[i])
+		if content(string(runes[1:])) != content(base[i]) {
+			t.Fatalf("row %d lost content with the bar:\nwith %q\nwithout %q", i, string(runes[1:]), base[i])
 		}
 	}
 }
