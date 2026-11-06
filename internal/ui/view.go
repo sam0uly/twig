@@ -193,11 +193,22 @@ func blendColor(from, to color.Color, t float64) color.Color {
 func (m model) bodyView() string {
 	var panes []string
 	if m.showLeft {
-		panes = append(panes, m.pane(m.files.View(), m.focus == focusSidebar, m.sideRect))
+		panes = append(panes, m.pane(m.files.ViewFocused(!m.cfg.Borderless || m.focus == focusSidebar), m.focus == focusSidebar, m.sideRect))
 	}
 	panes = append(panes, m.mainPane())
 	if m.files.Tab() == filelist.TabCommits && m.showRight {
-		panes = append(panes, m.pane(m.files.CommitFilesView(), m.focus == focusCommitFiles, m.commitFilesRct))
+		panes = append(panes, m.pane(m.files.CommitFilesViewFocused(!m.cfg.Borderless || m.focus == focusCommitFiles), m.focus == focusCommitFiles, m.commitFilesRct))
+	}
+	if m.cfg.Borderless {
+		gap := fitBlock("", 1, m.mainRect.Dy())
+		spaced := make([]string, 0, 2*len(panes)-1)
+		for i, pane := range panes {
+			if i > 0 {
+				spaced = append(spaced, gap)
+			}
+			spaced = append(spaced, pane)
+		}
+		panes = spaced
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, panes...)
 }
@@ -205,6 +216,7 @@ func (m model) bodyView() string {
 // mainPane renders the diff of the selection, with the search bar pinned below it
 // while active.
 func (m model) mainPane() string {
+	width := max(1, m.mainRect.Dx()-2*m.paneInset())
 	var content string
 	if !m.loaded || (m.view.Empty() && (m.loading() || m.allLoading)) {
 		content = "\n" + m.spinner.View() + " " +
@@ -221,25 +233,34 @@ func (m model) mainPane() string {
 		content = lipgloss.JoinVertical(
 			lipgloss.Left,
 			content,
-			m.search.View(m.mainRect.Dx()-2, matchMsg),
+			m.search.View(width, matchMsg),
 		)
 	} else if m.searchApplied && m.view.SearchTerm() != "" {
 		// Applied searches stay visible, muted, until esc clears them.
 		label := m.styles.Subtle().Render(" Search: " + m.view.SearchTerm() + " ")
 		count := m.styles.SemiDimGreenFg(fmt.Sprintf(" %d matches", m.view.MatchCount()))
-		line := ansi.Truncate(label+count, max(1, m.mainRect.Dx()-2), "…")
+		line := ansi.Truncate(label+count, width, "…")
 		content = lipgloss.JoinVertical(lipgloss.Left, content, line)
 	}
 	return m.pane(content, m.focus == focusMain, m.mainRect)
+}
+
+func (m model) paneInset() int {
+	if m.cfg.Borderless {
+		return 0
+	}
+	return 1
 }
 
 func (m model) loading() bool {
 	return m.view.Empty() && !m.loaded
 }
 
-// pane wraps content in a bordered pane whose border color reflects focus, clipping
-// to the body so the chrome is never pushed off-screen.
+// pane optionally wraps content in a focus-colored border and clips it to the body.
 func (m model) pane(content string, focused bool, rect uv.Rectangle) string {
+	if m.cfg.Borderless {
+		return fitBlock(content, max(1, rect.Dx()), max(1, rect.Dy()))
+	}
 	st := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder())
 	if focused {
@@ -722,6 +743,7 @@ func (m model) helpColumns() []helpColumn {
 			"y", "yank patch",
 			"Y", "yank hunk",
 			"v", "split view",
+			"o", "fold",
 			"w", "wrap",
 			"Z", "ignore ws",
 			"c", "context",
@@ -782,6 +804,7 @@ func (m model) helpColumns() []helpColumn {
 	}
 	c4 := newHelpColumn(
 		"v", "split view",
+		"o", "fold",
 		"w", "wrap",
 		"Z", "ignore ws",
 		"c", "context",

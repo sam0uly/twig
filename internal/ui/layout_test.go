@@ -51,6 +51,77 @@ func TestLayoutFilesTab(t *testing.T) {
 	assertGeometry(t, m, "files")
 }
 
+func TestBorderlessDiffPaneUsesFullSpace(t *testing.T) {
+	m := testModel(120, 24)
+	m.view.SetFile(diff.Generate("a.go", diff.Modified, "package a\n", "package b\n", diff.GenerateOptions{Context: 3}))
+	cfg := m.cfg
+	cfg.Borderless = true
+	m.applyConfig(cfg)
+
+	view := ansi.Strip(m.view.View())
+	lines := strings.Split(view, "\n")
+	if len(lines) != m.mainRect.Dy() {
+		t.Fatalf("borderless diff has %d rows, want %d", len(lines), m.mainRect.Dy())
+	}
+	for i, line := range lines {
+		if got := lipgloss.Width(line); got != m.mainRect.Dx() {
+			t.Fatalf("borderless diff row %d width = %d, want %d", i, got, m.mainRect.Dx())
+		}
+	}
+	pane := ansi.Strip(m.mainPane())
+	if strings.ContainsAny(pane, "╭╮╰╯") {
+		t.Fatalf("borderless diff still has a frame:\n%s", pane)
+	}
+	assertGeometry(t, m, "borderless diff")
+}
+
+func TestBorderlessPanesHaveSingleCellGaps(t *testing.T) {
+	m := testModel(120, 24)
+	m.files.SetTab(filelist.TabCommits)
+	cfg := m.cfg
+	cfg.Borderless = true
+	cfg.ShowLeftSidebar = true
+	cfg.ShowRightSidebar = true
+	m.applyConfig(cfg)
+
+	files := []*diff.File{
+		diff.Generate("a.go", diff.Modified, "a\n", "b\n", diff.GenerateOptions{Context: 3}),
+		diff.Generate("b.go", diff.Modified, "a\n", "b\n", diff.GenerateOptions{Context: 3}),
+	}
+	m.applyCommit(git.Commit{Hash: "h", Short: "abc1234", Subject: "subject", Author: "sam", When: "now"},
+		diff.Aggregate(files), files)
+	m.files.SetCommits([]git.Commit{{Hash: "h", Short: "abc1234", Subject: "subject"}})
+
+	if gap := m.mainRect.Min.X - m.sideRect.Max.X; gap != 1 {
+		t.Fatalf("left pane gap = %d, want 1", gap)
+	}
+	if gap := m.commitFilesRct.Min.X - m.mainRect.Max.X; gap != 1 {
+		t.Fatalf("right pane gap = %d, want 1", gap)
+	}
+	for _, r := range []uv.Rectangle{m.sideRect, m.mainRect, m.commitFilesRct} {
+		if !m.inPane(r.Min.X, r.Min.Y, r) {
+			t.Fatalf("borderless pane origin %+v is outside its hit area", r.Min)
+		}
+	}
+	if body := ansi.Strip(m.bodyView()); strings.ContainsAny(body, "╭╮╰╯") {
+		t.Fatalf("borderless panes still have a frame:\n%s", body)
+	}
+	assertGeometry(t, m, "borderless panes")
+}
+
+func TestSidebarWidthFollowsConfig(t *testing.T) {
+	cfg := config.Default()
+	cfg.SidebarWidth = 50
+	cfg.ShowLeftSidebar = true
+	m := newModel(Options{Config: cfg, Source: git.Source{}}, "main", "twig")
+	m.width, m.height = 120, 24
+	m.loaded = true
+	m.setSize()
+	if got := m.sideRect.Dx(); got != 50 {
+		t.Fatalf("sidebar width = %d, want 50", got)
+	}
+}
+
 func TestLayoutCommitsTab(t *testing.T) {
 	m := testModel(120, 24)
 	m.showRight = true
@@ -773,6 +844,22 @@ func TestHelpPillClickTogglesHelp(t *testing.T) {
 	}
 }
 
+func TestBorderedSidebarKeepsActiveColors(t *testing.T) {
+	m := testModel(100, 24)
+	m.showLeft = true
+	m.setSize()
+	m.files.SetFiles(nil, []git.FileStatus{{Path: "a.go", Letter: "M"}})
+	m.lastLoaded.path = "a.go"
+	m.view.SetFile(diff.Generate("a.go", diff.Modified, "a\n", "b\n", diff.GenerateOptions{Context: 3}))
+	m.focus = focusSidebar
+	m.syncStaging()
+
+	activeSelector := lipgloss.NewStyle().Foreground(m.styles.SelectorFg()).Render("┃")
+	if got := m.bodyView(); !strings.Contains(got, activeSelector) {
+		t.Fatalf("bordered sidebar muted its selected row:\n%s", got)
+	}
+}
+
 func TestMainPaneClickFocusesDiff(t *testing.T) {
 	m := testModel(120, 24)
 	m.focus = focusSidebar
@@ -782,6 +869,25 @@ func TestMainPaneClickFocusesDiff(t *testing.T) {
 	})
 	if next.(model).focus != focusMain {
 		t.Fatal("clicking the main pane did not focus it")
+	}
+}
+
+func TestBorderlessMainPaneClickAtOrigin(t *testing.T) {
+	m := testModel(120, 24)
+	m.lastLoaded.path = "a.go"
+	m.view.SetFile(diff.Generate("a.go", diff.Modified, "old\n", "new\n", diff.GenerateOptions{Context: 3}))
+	m.view.SetSelectable(true)
+	cfg := m.cfg
+	cfg.Borderless = true
+	m.applyConfig(cfg)
+
+	next, _ := m.Update(tea.MouseClickMsg{X: m.mainRect.Min.X, Y: m.mainRect.Min.Y})
+	got := next.(model)
+	if got.focus != focusMain {
+		t.Fatal("clicking the borderless pane origin did not focus it")
+	}
+	if got.view.CursorRow() != 0 {
+		t.Fatalf("clicking the borderless pane origin selected row %d, want 0", got.view.CursorRow())
 	}
 }
 

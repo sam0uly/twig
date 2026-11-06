@@ -252,6 +252,7 @@ func newModel(opts Options, branch, project string) model {
 	m.view.SetLineNumbers(opts.Config.LineNumbers)
 	m.view.SetSplit(opts.Config.SplitView)
 	m.view.SetSyntax(opts.Config.Syntax)
+	m.view.SetBorderless(opts.Config.Borderless)
 	if opts.ShowLogPicker {
 		m.files.SetTab(filelist.TabCommits)
 	}
@@ -1097,12 +1098,12 @@ func (m model) updateWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch {
-	case m.showLeft && inRect(msg.X, msg.Y, m.sideRect):
+	case m.showLeft && m.inPane(msg.X, msg.Y, m.sideRect):
 		var cmd tea.Cmd
 		cmd = m.updateFiles(msg)
 		// The wheel moves the list cursor too; keep the diff in step.
 		return m.followSelection(cmd)
-	case m.showRight && m.files.Tab() == filelist.TabCommits && inRect(msg.X, msg.Y, m.commitFilesRct):
+	case m.showRight && m.files.Tab() == filelist.TabCommits && m.inPane(msg.X, msg.Y, m.commitFilesRct):
 		return m, m.updateCommitFiles(msg)
 	default:
 		var cmd tea.Cmd
@@ -1140,15 +1141,15 @@ func (m model) updateClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Main pane: a click puts the staging cursor on the row under the pointer.
-	if inRect(msg.X, msg.Y, m.mainRect) {
+	if m.inPane(msg.X, msg.Y, m.mainRect) {
 		m.focus = focusMain
-		row := m.view.YOffset() + (msg.Y - m.mainRect.Min.Y - 1)
+		row := m.view.YOffset() + msg.Y - m.mainRect.Min.Y - m.paneInset()
 		m.view.CursorTo(row)
 		return m, nil
 	}
 
-	if m.showLeft && inRect(msg.X, msg.Y, m.sideRect) {
-		row := msg.Y - m.sideRect.Min.Y - 1 // skip the border
+	if m.showLeft && m.inPane(msg.X, msg.Y, m.sideRect) {
+		row := msg.Y - m.sideRect.Min.Y - m.paneInset()
 		// the commits tab lists commits where the files tab lists files, and
 		// clicking either one follows the selection into the main pane
 		if m.files.Tab() == filelist.TabCommits {
@@ -1172,8 +1173,8 @@ func (m model) updateClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		return m.followSelection(nil)
 	}
 
-	if m.showRight && m.files.Tab() == filelist.TabCommits && inRect(msg.X, msg.Y, m.commitFilesRct) {
-		row := msg.Y - m.commitFilesRct.Min.Y - 1
+	if m.showRight && m.files.Tab() == filelist.TabCommits && m.inPane(msg.X, msg.Y, m.commitFilesRct) {
+		row := msg.Y - m.commitFilesRct.Min.Y - m.paneInset()
 		idx, ok := m.files.CommitFileAt(row)
 		if !ok {
 			return m, nil
@@ -1184,7 +1185,7 @@ func (m model) updateClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if inRect(msg.X, msg.Y, m.mainRect) {
+	if m.inPane(msg.X, msg.Y, m.mainRect) {
 		m.focus = focusMain
 		return m, nil
 	}
@@ -1211,9 +1212,10 @@ func (m model) tabHitRanges() (filesX, filesW, commitsX, commitsW int) {
 	return filesX, filesW, commitsX, commitsW
 }
 
-// inRect reports whether a cell lies inside a pane body (borders excluded).
-func inRect(x, y int, r uv.Rectangle) bool {
-	return x > r.Min.X && x < r.Max.X-1 && y > r.Min.Y && y < r.Max.Y-1
+func (m model) inPane(x, y int, r uv.Rectangle) bool {
+	inset := m.paneInset()
+	return x >= r.Min.X+inset && x < r.Max.X-inset &&
+		y >= r.Min.Y+inset && y < r.Max.Y-inset
 }
 
 func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -1336,6 +1338,9 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.message = "wrap " + onOff(m.cfg.Wrap)
 		m.saveSetting()
 		return m, setMessageCmd(m.message)
+	case key.Matches(msg, m.keys.ToggleFold):
+		m.view.ToggleFold()
+		return m, nil
 	case key.Matches(msg, m.keys.ToggleSmooth):
 		m.cfg.SmoothScroll = !m.cfg.SmoothScroll
 		m.view.SetSmooth(m.cfg.SmoothScroll)
@@ -1895,7 +1900,7 @@ func (m *model) setSize() {
 		Split(uv.Rect(0, 0, w, h)).
 		Assign(&header, &body, &footer)
 
-	sidebarW := min(36, max(16, w/3))
+	sidebarW := min(max(10, m.cfg.SidebarWidth), max(10, w/2))
 	filesW := min(30, max(14, w/4))
 	if !m.showLeft {
 		sidebarW = 0
@@ -1910,33 +1915,43 @@ func (m *model) setSize() {
 	if m.search.Active() || m.searchApplied {
 		searchRows = 1
 	}
+	inset := m.paneInset()
+	gapLeft, gapRight := 0, 0
+	if m.cfg.Borderless {
+		if sidebarW > 0 {
+			gapLeft = 1
+		}
+		if filesW > 0 {
+			gapRight = 1
+		}
+	}
 
 	switch m.files.Tab() {
 	case filelist.TabCommits:
-		var commits, main, commitFiles uv.Rectangle
-		layout.Horizontal(layout.Len(sidebarW), layout.Fill(1), layout.Len(filesW)).
+		var commits, leftGap, main, rightGap, commitFiles uv.Rectangle
+		layout.Horizontal(layout.Len(sidebarW), layout.Len(gapLeft), layout.Fill(1), layout.Len(gapRight), layout.Len(filesW)).
 			Split(body).
-			Assign(&commits, &main, &commitFiles)
+			Assign(&commits, &leftGap, &main, &rightGap, &commitFiles)
 		m.sideRect = commits
 		m.mainRect = main
 		m.commitFilesRct = commitFiles
-		m.files.SetSize(max(1, max(0, sidebarW-2)), max(1, commits.Dy()-2))
-		m.files.SetCommitFilesSize(max(1, max(0, filesW-2)), max(1, commitFiles.Dy()-2))
-		m.view.SetSize(max(1, main.Dx()-2), max(1, main.Dy()-2-searchRows))
+		m.files.SetSize(max(1, max(0, sidebarW-2*inset)), max(1, commits.Dy()-2*inset))
+		m.files.SetCommitFilesSize(max(1, max(0, filesW-2*inset)), max(1, commitFiles.Dy()-2*inset))
+		m.view.SetSize(max(1, main.Dx()-2*inset), max(1, main.Dy()-2*inset-searchRows))
 	default:
-		var side, main uv.Rectangle
-		layout.Horizontal(layout.Len(sidebarW), layout.Fill(1)).
+		var side, gap, main uv.Rectangle
+		layout.Horizontal(layout.Len(sidebarW), layout.Len(gapLeft), layout.Fill(1)).
 			Split(body).
-			Assign(&side, &main)
+			Assign(&side, &gap, &main)
 		m.sideRect = side
 		m.mainRect = main
 		m.commitFilesRct = uv.Rect(0, 0, 0, 0)
-		m.files.SetSize(max(1, max(0, side.Dx()-2)), max(1, side.Dy()-2))
-		m.view.SetSize(max(1, main.Dx()-2), max(1, main.Dy()-2-searchRows))
+		m.files.SetSize(max(1, max(0, side.Dx()-2*inset)), max(1, side.Dy()-2*inset))
+		m.view.SetSize(max(1, main.Dx()-2*inset), max(1, main.Dy()-2*inset-searchRows))
 	}
 
 	m.status.SetWidth(w)
-	m.search.SetWidth(max(1, m.mainRect.Dx()-2))
+	m.search.SetWidth(max(1, m.mainRect.Dx()-2*inset))
 }
 
 func nextContext(current int) int {
@@ -2266,6 +2281,7 @@ func (m *model) applyConfig(cfg config.Config) tea.Cmd {
 	m.view.SetWrap(cfg.Wrap)
 	m.view.SetSplit(cfg.SplitView)
 	m.view.SetSyntax(cfg.Syntax)
+	m.view.SetBorderless(cfg.Borderless)
 	// The sidebars are also toggled by hand, so they only move when the file
 	// on disk actually says something different from what is on screen.
 	if cfg.ShowLeftSidebar != old.ShowLeftSidebar {
@@ -2281,7 +2297,8 @@ func (m *model) applyConfig(cfg config.Config) tea.Cmd {
 		}
 	}
 	if cfg.SidebarWidth != old.SidebarWidth || cfg.LogLimit != old.LogLimit ||
-		cfg.ShowLeftSidebar != old.ShowLeftSidebar || cfg.ShowRightSidebar != old.ShowRightSidebar {
+		cfg.ShowLeftSidebar != old.ShowLeftSidebar || cfg.ShowRightSidebar != old.ShowRightSidebar ||
+		cfg.Borderless != old.Borderless {
 		m.setSize()
 	}
 	if cfg.Context != old.Context || cfg.IgnoreWhitespace != old.IgnoreWhitespace {
