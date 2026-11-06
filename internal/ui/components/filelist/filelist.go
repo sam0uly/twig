@@ -808,16 +808,28 @@ func (m *Model) moveSelectable(delta int) bool {
 }
 
 // View renders the list for the active tab.
-func (m Model) View() string {
-	if m.tab == TabFiles {
-		return renderList(m.files, m.height, m.styles)
+func (m Model) View() string { return m.ViewFocused(true) }
+
+// ViewFocused renders the active tab with its selected row styled for this focus state.
+func (m Model) ViewFocused(focused bool) string {
+	l := m.files
+	isCommit := false
+	if m.tab == TabCommits {
+		l = m.commits
+		isCommit = true
 	}
-	return renderList(m.commits, m.height, m.styles)
+	l.SetDelegate(glowDelegate{styles: m.styles, isCommit: isCommit, focused: focused})
+	return renderList(l, m.height, m.styles)
 }
 
 // CommitFilesView renders the per-commit file sidebar.
-func (m Model) CommitFilesView() string {
-	return renderList(m.commitFiles, m.height, m.styles)
+func (m Model) CommitFilesView() string { return m.CommitFilesViewFocused(true) }
+
+// CommitFilesViewFocused renders the per-commit file sidebar for this focus state.
+func (m Model) CommitFilesViewFocused(focused bool) string {
+	l := m.commitFiles
+	l.SetDelegate(glowDelegate{styles: m.styles, isCommitFile: true, focused: focused})
+	return renderList(l, m.height, m.styles)
 }
 
 // renderList renders a list into exactly height rows. The bubbles list always
@@ -825,7 +837,7 @@ func (m Model) CommitFilesView() string {
 // filtered that row is empty, so it is dropped here. While filtering, the row
 // holds the filter input and the last row is trimmed instead.
 func renderList(l list.Model, height int, st styles.Styles) string {
-	view := l.View()
+	view := strings.TrimSuffix(l.View(), "\n")
 	lines := strings.Split(view, "\n")
 
 	// The list reserves a row for its title above the items. It is blank
@@ -892,6 +904,7 @@ type glowDelegate struct {
 	styles       styles.Styles
 	isCommit     bool
 	isCommitFile bool
+	focused      bool
 }
 
 func (d glowDelegate) Height() int {
@@ -938,11 +951,16 @@ func (d glowDelegate) Render(w io.Writer, m list.Model, index int, value list.It
 		letterStyle := lipgloss.NewStyle().Foreground(st.HashFg())
 		titleStyle := lipgloss.NewStyle().Foreground(st.TitleNormalFg())
 		if index == m.Index() {
-			letterStyle = lipgloss.NewStyle().Foreground(st.HashActiveFg()).Bold(true)
-			titleStyle = lipgloss.NewStyle().Foreground(st.TitleActiveFg()).Bold(true)
+			selectorFg := st.DescNormalFg()
+			letterStyle = lipgloss.NewStyle().Foreground(st.DescNormalFg())
+			if d.focused {
+				selectorFg = st.SelectorFg()
+				letterStyle = lipgloss.NewStyle().Foreground(st.HashActiveFg()).Bold(true)
+				titleStyle = lipgloss.NewStyle().Foreground(st.TitleActiveFg()).Bold(true)
+			}
 			_, _ = fmt.Fprintf(
 				w, "%s %s%s%s",
-				lipgloss.NewStyle().Foreground(st.SelectorFg()).Render(verticalLine),
+				lipgloss.NewStyle().Foreground(selectorFg).Render(verticalLine),
 				conn,
 				letterStyle.Render(letter+" "),
 				titleStyle.Render(name),
@@ -970,11 +988,16 @@ func (d glowDelegate) Render(w io.Writer, m list.Model, index int, value list.It
 		glyphStyle := lipgloss.NewStyle().Foreground(st.HashFg())
 		nameStyle := lipgloss.NewStyle().Foreground(st.TitleNormalFg())
 		if index == m.Index() {
-			glyphStyle = lipgloss.NewStyle().Foreground(st.HashActiveFg()).Bold(true)
-			nameStyle = lipgloss.NewStyle().Foreground(st.TitleActiveFg()).Bold(true)
+			selectorFg := st.DescNormalFg()
+			glyphStyle = lipgloss.NewStyle().Foreground(st.DescNormalFg())
+			if d.focused {
+				selectorFg = st.SelectorFg()
+				glyphStyle = lipgloss.NewStyle().Foreground(st.HashActiveFg()).Bold(true)
+				nameStyle = lipgloss.NewStyle().Foreground(st.TitleActiveFg()).Bold(true)
+			}
 			_, _ = fmt.Fprintf(
 				w, "%s %s%s%s",
-				lipgloss.NewStyle().Foreground(st.SelectorFg()).Render(verticalLine),
+				lipgloss.NewStyle().Foreground(selectorFg).Render(verticalLine),
 				conn,
 				glyphStyle.Render(glyph),
 				nameStyle.Render(name),
@@ -1003,12 +1026,20 @@ func (d glowDelegate) Render(w io.Writer, m list.Model, index int, value list.It
 		if index == m.Index() {
 			// the selector cell replaces the two leading spaces of a plain
 			// row, so the name starts in the same column either way
+			selectorFg := st.DescNormalFg()
+			pathStyle := lipgloss.NewStyle().Foreground(st.TitleNormalFg())
+			statsStyle := lipgloss.NewStyle().Foreground(st.DescNormalFg())
+			if d.focused {
+				selectorFg = st.SelectorFg()
+				pathStyle = lipgloss.NewStyle().Foreground(st.TitleActiveFg()).Bold(true)
+				statsStyle = lipgloss.NewStyle().Foreground(st.DescActiveFg())
+			}
 			_, _ = fmt.Fprintf(
 				w, "%s %s%s%s",
-				lipgloss.NewStyle().Foreground(st.SelectorFg()).Render(verticalLine),
-				lipgloss.NewStyle().Foreground(st.TitleActiveFg()).Bold(true).Render(path),
+				lipgloss.NewStyle().Foreground(selectorFg).Render(verticalLine),
+				pathStyle.Render(path),
 				strings.Repeat(" ", pad),
-				lipgloss.NewStyle().Foreground(st.DescActiveFg()).Render(" "+stats),
+				statsStyle.Render(" "+stats),
 			)
 		} else {
 			_, _ = fmt.Fprintf(
@@ -1031,9 +1062,13 @@ func (d glowDelegate) Render(w io.Writer, m list.Model, index int, value list.It
 		// the metadata line carry it.
 		selector := "  "
 		if index == m.Index() {
-			titleStyle = lipgloss.NewStyle().Foreground(st.TitleActiveFg()).Bold(true)
-			metaStyle = lipgloss.NewStyle().Foreground(st.DescActiveFg())
-			selector = lipgloss.NewStyle().Foreground(st.SelectorFg()).Render(verticalLine) + " "
+			selectorFg := st.DescNormalFg()
+			if d.focused {
+				titleStyle = lipgloss.NewStyle().Foreground(st.TitleActiveFg()).Bold(true)
+				metaStyle = lipgloss.NewStyle().Foreground(st.DescActiveFg())
+				selectorFg = st.SelectorFg()
+			}
+			selector = lipgloss.NewStyle().Foreground(selectorFg).Render(verticalLine) + " "
 		}
 
 		_, _ = fmt.Fprintf(w, "%s%s\n%s%s",

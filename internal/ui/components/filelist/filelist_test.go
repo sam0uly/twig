@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/list"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"samouly.fun/twig/internal/diff"
@@ -46,6 +47,73 @@ func TestViewsNeverExceedPaneHeight(t *testing.T) {
 		if got := len(strings.Split(tc.view(), "\n")); got > 10 {
 			t.Fatalf("%s list rendered %d lines into a 10 line pane", tc.name, got)
 		}
+	}
+}
+
+func TestSelectedItemsAreMutedUntilFocused(t *testing.T) {
+	m := New(30, 10, styles.New())
+	m.SetFiles([]git.FileStatus{{Path: "a.go", Letter: "M"}}, nil)
+	m.SetCommits([]git.Commit{{Hash: "1", Short: "1", Subject: "subject"}})
+	m.SetCommitFiles([]*diff.File{diff.Generate("a.go", diff.Modified, "a\n", "b\n", diff.GenerateOptions{})})
+	m.SetSize(30, 10)
+
+	for _, test := range []struct {
+		name string
+		tab  int
+		view func(Model, bool) string
+	}{
+		{name: "files", tab: TabFiles, view: func(m Model, focused bool) string { return m.ViewFocused(focused) }},
+		{name: "commits", tab: TabCommits, view: func(m Model, focused bool) string { return m.ViewFocused(focused) }},
+		{name: "commit files", view: func(m Model, focused bool) string { return m.CommitFilesViewFocused(focused) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m.SetTab(test.tab)
+			focused := test.view(m, true)
+			muted := test.view(m, false)
+			activeSelector := lipgloss.NewStyle().Foreground(m.styles.SelectorFg()).Render(verticalLine)
+			mutedSelector := lipgloss.NewStyle().Foreground(m.styles.DescNormalFg()).Render(verticalLine)
+			if !strings.Contains(focused, activeSelector) {
+				t.Fatalf("focused selected row lost its active color: %q", focused)
+			}
+			if strings.Contains(muted, activeSelector) || !strings.Contains(muted, mutedSelector) {
+				t.Fatalf("unfocused selected row was not muted: %q", muted)
+			}
+			if ansi.Strip(focused) != ansi.Strip(muted) {
+				t.Fatal("focus styling changed list item text")
+			}
+		})
+	}
+}
+
+func TestTreeFocusedSelectedRowKeepsItsRail(t *testing.T) {
+	m := New(30, 10, styles.New())
+	m.SetSize(30, 10)
+	m.SetFiles(nil, treeSample())
+	m.SetTree(true)
+	m.ViewFocused(true)
+}
+
+func TestSidebarListsFillTheirPaneExactly(t *testing.T) {
+	m := New(30, 9, styles.New())
+	m.SetFiles([]git.FileStatus{{Path: "a.go", Letter: "M"}}, nil)
+	m.SetCommits([]git.Commit{{Hash: "1", Short: "1", Subject: "subject"}})
+	m.SetCommitFiles([]*diff.File{diff.Generate("a.go", diff.Modified, "a\n", "b\n", diff.GenerateOptions{})})
+
+	for _, test := range []struct {
+		name string
+		tab  int
+		view func() string
+	}{
+		{"files", TabFiles, m.View},
+		{"commits", TabCommits, m.View},
+		{"commit files", TabCommits, m.CommitFilesView},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m.SetTab(test.tab)
+			if got := len(strings.Split(test.view(), "\n")); got != 9 {
+				t.Fatalf("%s list rendered %d rows, want exactly 9", test.name, got)
+			}
+		})
 	}
 }
 
