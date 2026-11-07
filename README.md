@@ -173,68 +173,6 @@ colors; focused panes keep the full palette. This setting has no CLI flag.
 
 ## How it works
 
-```mermaid
-%%{init: {"theme":"base","themeVariables":{"background":"#201F26","primaryColor":"#201F26","primaryTextColor":"#F7F6FB","primaryBorderColor":"#6B50FF","lineColor":"#858392","clusterBkg":"#201F26","clusterBorder":"#605F6B","fontFamily":"ui-monospace,monospace","fontSize":"14px"}}}%%
-flowchart TB
-    subgraph change["what changes"]
-        editor["editor save\none word · a block · 100 lines"]
-        shell["git add · commit · checkout"]
-        other["another tool"]
-    end
-
-    subgraph live["watch"]
-        kern["inotify · kqueue · ReadDirectoryChangesW"]
-        quiet["debounce\n120 ms quiet"]
-    end
-
-    subgraph refresh["refresh"]
-        status["git status --porcelain=v2"]
-        gate{"fingerprint\nchanged?"}
-        snap["snapshot\nindex + HEAD blob ids"]
-        norep["no repaint"]
-    end
-
-    subgraph diff["diff"]
-        cache{"diff cache\nindexed by blob id"}
-        anchors["anchors\nunique 64-line blocks"]
-        myers["Myers in the gaps\ncost capped"]
-        runs["runs + Fenwick index"]
-    end
-
-    subgraph view["view"]
-        paged["paged document\n2048-row blocks"]
-        slice["only rows near the viewport"]
-        term["terminal"]
-    end
-
-    editor --> kern
-    shell --> kern
-    other --> kern
-    kern --> quiet --> status --> gate
-    gate -->|"same state"| norep
-    gate -->|"new state"| snap --> cache
-    cache -->|"miss"| anchors --> myers --> runs
-    cache -->|"hit"| runs
-    runs --> paged --> slice --> term
-    slice -.->|"scroll"| slice
-
-    classDef touched fill:#201F26,stroke:#605F6B,color:#D6D3DC,stroke-width:1px
-    classDef watched fill:#18463D,stroke:#12C78F,color:#68FFD6,stroke-width:2px
-    classDef gitted fill:#201F26,stroke:#8B75FF,color:#D6D3DC,stroke-width:2px
-    classDef gated fill:#201F26,stroke:#858392,color:#BFBCC8,stroke-width:1px
-    classDef computed fill:#201F26,stroke:#00A475,color:#68FFD6,stroke-width:2px
-    classDef untouched fill:#201F26,stroke:#605F6B,color:#605F6B,stroke-width:1px
-    classDef painted fill:#201F26,stroke:#FF84FF,color:#FFFAF1,stroke-width:2px
-
-    class editor,shell,other touched
-    class kern,quiet watched
-    class status,snap gitted
-    class gate gated
-    class cache,anchors,myers,runs computed
-    class norep untouched
-    class paged,slice,term painted
-```
-
 **One status run.** `git status --porcelain=v2` carries the index and HEAD blob
 ids, so diffs are keyed by content ids: switching files is a lookup, and an
 unchanged refresh costs no repaint. Caches are bounded by bytes, because an
