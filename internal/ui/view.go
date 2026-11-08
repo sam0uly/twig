@@ -52,6 +52,9 @@ func (m model) render() string {
 }
 
 func (m model) tooSmallView() string {
+	if m.width <= 0 || m.height <= 0 {
+		return ""
+	}
 	msg := m.styles.Subtle().Render(
 		fmt.Sprintf("terminal too small (%d x %d)", m.width, m.height),
 	)
