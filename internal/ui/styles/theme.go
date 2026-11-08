@@ -13,6 +13,46 @@ import (
 	"samouly.fun/twig/internal/syntax"
 )
 
+// NoticeKind names the tone family a footer notice draws its colours from, so a
+// copy, a warning and a failure each read at a glance.
+type NoticeKind int
+
+// The notice kinds. Each picks a darker tone for its word and the brighter one
+// of the same family for its body.
+const (
+	NoticeOkay NoticeKind = iota
+	NoticeInfo
+	NoticeWarn
+	NoticeFail
+)
+
+// noticeSpec is one notice kind's word and its CharmTone colours: the pill the
+// word sits in, the body's text and the wash it paints on.
+type noticeSpec struct {
+	word string
+	pill color.Color
+	text color.Color
+	wash color.Color
+}
+
+var noticeSpecs = map[NoticeKind]noticeSpec{
+	NoticeOkay: {word: "OKAY!", pill: tone.Guac, text: tone.Julep, wash: tone.Spinach},
+	NoticeInfo: {word: "FYI", pill: tone.Sardine, text: tone.Lichen, wash: tone.Oceania},
+	NoticeWarn: {word: "HMM!", pill: tone.Paprika, text: tone.Yam, wash: tone.Toast},
+	NoticeFail: {word: "OOPS!", pill: tone.Cherry, text: tone.Salmon, wash: tone.Steak},
+}
+
+// Notice returns one notice kind's word, the pill colour behind it, the body's
+// text colour and the wash behind the body. Every colour is a CharmTone key,
+// never an edit of one.
+func (s Styles) Notice(kind NoticeKind) (word string, pill, text, wash color.Color) {
+	spec, ok := noticeSpecs[kind]
+	if !ok {
+		spec = noticeSpecs[NoticeInfo]
+	}
+	return spec.word, spec.pill, spec.text, spec.wash
+}
+
 // Styles contains all styles used in the UI.
 type Styles struct {
 	dimNormalFg     func(...string) string

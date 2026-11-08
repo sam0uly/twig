@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -280,12 +281,18 @@ func (m model) pane(content string, focused bool, rect uv.Rectangle) string {
 func (m model) footerView() string {
 	st := m.styles
 
-	info := statusbar.Info{
-		Message: m.message,
-	}
+	info := statusbar.Info{}
 	// A push goes over the network: the spinner says it is still working.
 	if m.pushing {
 		info.Message = m.pushNotice()
+	} else if m.message != "" {
+		info.Notice = &statusbar.Notice{
+			Kind:  m.noticeKind,
+			Body:  m.message,
+			Since: m.noticeSince,
+			Now:   time.Now(),
+			Left:  m.noticeLeft,
+		}
 	}
 	// The footer says when refreshing fell back to polling.
 	info.Watch = m.refreshMode()

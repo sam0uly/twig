@@ -3,11 +3,14 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"samouly.fun/twig/internal/diff"
 	"samouly.fun/twig/internal/git"
 	"samouly.fun/twig/internal/ui/components/filelist"
+	"samouly.fun/twig/internal/ui/components/statusbar"
+	"samouly.fun/twig/internal/ui/styles"
 )
 
 // TestViewKeysWorkFromEitherPane: keys about the view rather than the cursor
@@ -114,6 +117,94 @@ func TestFoldKeyTogglesCommitMetadata(t *testing.T) {
 
 // TestHelpListsEveryKeyThatWorks keeps the reference honest: a key the model
 // handles but the help omits is a key the reader has to remember.
+// TestNoticesPickTheirTone: the footer notice draws its colour from the kind of
+// outcome the message names.
+func TestNoticesPickTheirTone(t *testing.T) {
+	cases := map[string]styles.NoticeKind{
+		"copied patch":             styles.NoticeOkay,
+		"copied hunk":              styles.NoticeOkay,
+		"committed abc1234":        styles.NoticeOkay,
+		"pushed!":                  styles.NoticeOkay,
+		"undid stage":              styles.NoticeOkay,
+		"nothing to copy":          styles.NoticeWarn,
+		"no matches":               styles.NoticeWarn,
+		"live refresh unavailable": styles.NoticeWarn,
+		"error: fatal: denied":     styles.NoticeFail,
+		"context lines: 5":         styles.NoticeInfo,
+	}
+	for text, want := range cases {
+		if got := noticeKindOf(text); got != want {
+			t.Fatalf("noticeKindOf(%q) = %v, want %v", text, got, want)
+		}
+	}
+}
+
+// TestNoticeScrambleTicksUntilItSettles: a fresh message starts a short
+// animation and stops ticking once the text has settled.
+func TestNoticeScrambleTicksUntilItSettles(t *testing.T) {
+	m := testModel(100, 24)
+	m.lastLoaded.path = "a.go"
+	m.focus = focusMain
+	m.view.SetFile(diff.Generate("a.go", diff.Modified, "one\n", "one\ntwo\n", diff.GenerateOptions{Context: 3}))
+	m.syncStaging()
+
+	next, cmd := m.Update(keyPress("y"))
+	m = next.(model)
+	if m.message == "" || !m.noticeTicking {
+		t.Fatalf("yank did not start a notice: message %q ticking %v", m.message, m.noticeTicking)
+	}
+	if cmd == nil {
+		t.Fatal("notice scramble scheduled nothing")
+	}
+
+	// Once the window has passed, the next frame ends the animation.
+	m.noticeSince = time.Now().Add(-statusbar.NoticeDuration - time.Millisecond)
+	next, cmd = m.Update(noticeTickMsg{})
+	m = next.(model)
+	if m.noticeTicking || cmd != nil {
+		t.Fatalf("notice kept ticking after it settled: ticking %v cmd %v", m.noticeTicking, cmd != nil)
+	}
+}
+
+// TestNoticeLivesExactlyThreeSeconds: the exit scramble is part of the notice's
+// budget, not extra time on top.
+func TestNoticeLivesExactlyThreeSeconds(t *testing.T) {
+	if got := messageHold + statusbar.NoticeDuration; got != statusMessageTimeout {
+		t.Fatalf("notice lives %v, want %v", got, statusMessageTimeout)
+	}
+}
+
+// TestNoticeScramblesOutBeforeClearing: the clear timeout starts the way-out
+// animation and only empties the message once it has played.
+func TestNoticeScramblesOutBeforeClearing(t *testing.T) {
+	m := testModel(100, 24)
+	m.lastLoaded.path = "a.go"
+	m.focus = focusMain
+	m.view.SetFile(diff.Generate("a.go", diff.Modified, "one\n", "one\ntwo\n", diff.GenerateOptions{Context: 3}))
+	m.syncStaging()
+	next, _ := m.Update(keyPress("y"))
+	m = next.(model)
+
+	next, _ = m.Update(clearMsgMsg{})
+	m = next.(model)
+	if m.message == "" {
+		t.Fatal("clear wiped the notice instead of scrambling it out")
+	}
+	if m.noticeLeft.IsZero() || !m.noticeTicking {
+		t.Fatalf("clear did not start the exit scramble: left %v ticking %v",
+			m.noticeLeft, m.noticeTicking)
+	}
+
+	// Let the exit animation run out: the next frame past its duration clears.
+	m.noticeLeft = time.Now().Add(-statusbar.NoticeDuration - time.Millisecond)
+	next, cmd := m.Update(noticeTickMsg{})
+	m = next.(model)
+	if m.message != "" || m.noticeTicking || cmd != nil {
+		t.Fatalf("notice outlived its exit: message %q ticking %v cmd %v",
+			m.message, m.noticeTicking, cmd != nil)
+	}
+}
+
 func TestHelpListsEveryKeyThatWorks(t *testing.T) {
 	filesTab := testModel(120, 30)
 	commitsTab := testModel(120, 30)
