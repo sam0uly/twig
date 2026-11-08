@@ -166,6 +166,9 @@ type Model struct {
 	readSide     int
 	readDragging bool
 	readMoved    bool
+	// readRail marks the commits reader's fold trail: the pane has no staging
+	// cursor, so the rail follows the section the reader is looking at instead.
+	readRail bool
 	// fileStaged is which half of the file on screen this pane shows; blockStaged
 	// carries one for each block of a document, where a file can appear twice.
 	fileStaged  bool

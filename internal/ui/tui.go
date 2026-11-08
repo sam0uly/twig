@@ -1585,8 +1585,9 @@ func (m model) updateFocus(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Discard):
 			return m.discardHere()
 		case key.Matches(msg, m.keys.CursorDown), key.Matches(msg, m.keys.CursorUp):
-			// With a staging cursor the pane behaves like a list; without one
-			// it stays the reader it has always been.
+			// With a staging cursor the pane behaves like a list; without one it
+			// stays the reader it has always been, and the commits rail follows
+			// the window on its own.
 			if !m.view.Selectable() {
 				return m.forwardMain(msg)
 			}

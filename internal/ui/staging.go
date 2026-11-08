@@ -29,6 +29,9 @@ func (m *model) syncStaging() {
 		m.files.Tab() == filelist.TabFiles &&
 		(m.allChanges || m.lastLoaded.path != "")
 	m.view.SetSelectable(on)
+	// The commits tab has nothing to stage, so its rail marks the section being
+	// read: the commit metadata, a file band or a hunk header.
+	m.view.SetReadRail(m.state == stateShowList && m.files.Tab() == filelist.TabCommits)
 	m.view.SetCursorFocus(m.focus == focusMain)
 	m.view.SetSelectMode(m.cfg.StageApply == config.StageApplySelect)
 	if !on {

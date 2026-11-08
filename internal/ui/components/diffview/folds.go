@@ -187,11 +187,16 @@ func (m *Model) rebuildFolds() {
 }
 
 func (m *Model) ToggleFold() {
-	row := m.cursor
-	if row < 0 || row >= m.nrows() {
-		row = m.vp.YOffset()
+	var logical int
+	if m.cursor >= 0 && m.cursor < m.nrows() {
+		logical = m.logicalAt(m.cursor)
+	} else if anchor := m.readAnchor(); anchor >= 0 {
+		// The commits reader folds the section its trail marks, not whatever
+		// happens to be at the top of the window.
+		logical = anchor
+	} else {
+		logical = m.logicalAt(m.vp.YOffset())
 	}
-	logical := m.logicalAt(row)
 	key, ok := m.foldTargetKey(logical)
 	if !ok {
 		return
