@@ -130,6 +130,8 @@ type model struct {
 	d *diff.Diff
 	// loaded marks the first status load.
 	loaded bool
+	// logLoaded keeps an empty commit list distinct from one still loading.
+	logLoaded bool
 	// lastLoaded tracks which file diff the main pane shows.
 	lastLoaded struct {
 		path   string
@@ -168,9 +170,11 @@ type model struct {
 	// allRestore carries it to the end of the rebuild; -1 when there is nothing.
 	allAnchor, allRestore int
 
-	// welcomeFrame drives the welcome screen animation.
+	// playground is a disposable bonsai tended while there is nothing to browse.
+	playground pixelPlayground
+	// welcomeFrame counts visible spring ticks for lifecycle tests and diagnostics.
 	welcomeFrame int
-	// welcomeTicking keeps one welcome tick chain alive at most.
+	// welcomeTicking keeps one playground tick chain alive at most.
 	welcomeTicking bool
 	// spinnerTicking keeps the spinner chain to one per load.
 	spinnerTicking bool
@@ -240,24 +244,25 @@ func newModel(opts Options, branch, project string) model {
 		allRestore: -1,
 		// The sidebars follow the config, and H/L flip them from there: the
 		// diff gets the whole window unless one was asked for.
-		showLeft:  opts.Config.ShowLeftSidebar,
-		showRight: opts.Config.ShowRightSidebar,
-		cfg:       opts.Config,
-		cfgPath:   opts.ConfigPath,
-		cfgStamp:  configStamp(opts.ConfigPath),
-		src:       opts.Source,
-		branch:    branch,
-		project:   project,
-		styles:    st,
-		keys:      DefaultKeyMap(),
-		state:     stateShowList,
-		focus:     focusMain,
-		files:     newFilelist(st),
-		view:      newDiffview(opts.Config.SmoothScroll, st),
-		status:    newStatusbar(st),
-		search:    newSearchbar(st),
-		compose:   newComposer(st),
-		spinner:   spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(st.SpinnerStyle())),
+		showLeft:   opts.Config.ShowLeftSidebar,
+		showRight:  opts.Config.ShowRightSidebar,
+		cfg:        opts.Config,
+		cfgPath:    opts.ConfigPath,
+		cfgStamp:   configStamp(opts.ConfigPath),
+		src:        opts.Source,
+		branch:     branch,
+		project:    project,
+		styles:     st,
+		keys:       DefaultKeyMap(),
+		playground: newPixelPlayground(),
+		state:      stateShowList,
+		focus:      focusMain,
+		files:      newFilelist(st),
+		view:       newDiffview(opts.Config.SmoothScroll, st),
+		status:     newStatusbar(st),
+		search:     newSearchbar(st),
+		compose:    newComposer(st),
+		spinner:    spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(st.SpinnerStyle())),
 	}
 	m.view.SetWrap(opts.Config.Wrap)
 	m.view.SetLineNumbers(opts.Config.LineNumbers)
@@ -294,7 +299,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return next, cmd
 	}
-	if !wasWelcome && nm.showWelcome() && !nm.welcomeTicking {
+	isWelcome := nm.showWelcome()
+	if wasWelcome != isWelcome {
+		// Status and log loads can arrive in either order at startup. Recompute
+		// the panes on either transition so empty commits never leave stale
+		// sidebar widths behind, and arriving commits always restore them.
+		nm.setSize()
+	}
+	if !wasWelcome && isWelcome && !nm.welcomeTicking {
 		nm.welcomeTicking = true
 		cmd = tea.Batch(cmd, welcomeTick())
 	}
@@ -396,11 +408,15 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.files.Tab() == filelist.TabFiles && m.files.Total() == 0 {
 			// Everything was staged or reverted: drop the stale diff so the
-			// welcome screen can take over.
+			// welcome screen can take over. Invalidate a load that is still in
+			// flight too, or it could put a diff back behind the playground.
+			m.seq++
 			m.allChanges = false
 			m.allLoading = false
 			m.allPendingJump = false
 			m.allAdds, m.allDels = 0, 0
+			m.preparePlaygroundInput()
+			m.view.SetNotes(nil)
 			m.view.SetFile(nil)
 			m.d = nil
 			m.lastLoaded.path, m.lastLoaded.staged = "", false
@@ -408,6 +424,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.anchorWait = false
 			m.reloadPending = false
 			m.clearAllFollow()
+			m.setSize()
 		}
 		// The file on screen can leave the listing entirely, which happens when
 		// an editor reverts it. The pane must let go of it, or pressing space
@@ -484,6 +501,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.state = stateFatal
 			return m, nil
 		}
+		m.logLoaded = true
 		m.files.SetCommits(msg.commits)
 		if m.files.Tab() != filelist.TabCommits {
 			// The files tab owns the pane. Opening a commit here would race the
@@ -492,8 +510,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if c, ok := m.files.SelectedCommit(); ok {
+			// An empty log may have stretched the main pane over both sidebars.
+			// Restore their configured widths as soon as there is a commit.
+			m.setSize()
 			return m.showCommit(c)
 		}
+		m.clearEmptyCommitPane()
+		m.setSize()
 		return m, nil
 
 	case configTickMsg:
@@ -545,6 +568,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.welcomeTicking = false
 			return m, nil
 		}
+		// Spring integration belongs to the Elm update path, never View. The bonsai
+		// contains only values and fixed arrays, so the copied Tea model is private.
+		m.playground.Tick()
 		m.welcomeFrame++
 		return m, welcomeTick()
 
@@ -1147,7 +1173,7 @@ func (m model) updateChildren(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
-	if m.state != stateShowList {
+	if m.state != stateShowList || m.playgroundInput() {
 		return m, nil
 	}
 	switch {
@@ -1190,6 +1216,12 @@ func (m model) updateClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 			m.setSize()
 			return m, nil
 		}
+		return m, nil
+	}
+
+	// The playground is keyboard-driven and never selects a diff hidden behind it.
+	if m.playgroundInput() {
+		m.view.ClearReadSelection()
 		return m, nil
 	}
 
@@ -1254,7 +1286,7 @@ func (m model) mainRow(y int) int {
 }
 
 func (m model) updateMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
-	if m.state != stateShowList || !m.view.ReadSelecting() || !m.inPane(msg.X, msg.Y, m.mainRect) {
+	if m.state != stateShowList || m.playgroundInput() || !m.view.ReadSelecting() || !m.inPane(msg.X, msg.Y, m.mainRect) {
 		return m, nil
 	}
 	m.view.ExtendReadSelection(m.mainRow(msg.Y), msg.X-m.mainRect.Min.X-m.paneInset())
@@ -1262,7 +1294,7 @@ func (m model) updateMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.Cmd) {
-	if m.state != stateShowList || !m.view.ReadSelecting() {
+	if m.state != stateShowList || m.playgroundInput() || !m.view.ReadSelecting() {
 		return m, nil
 	}
 	if m.inPane(msg.X, msg.Y, m.mainRect) {
@@ -1344,6 +1376,9 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.state == stateConfirm {
 		return m.updateConfirm(msg)
+	}
+	if m.playgroundInput() {
+		return m.updateWelcomeKey(msg)
 	}
 
 	switch {
@@ -1482,18 +1517,24 @@ func (m model) switchTab(tab int) (tea.Model, tea.Cmd) {
 	}
 	m.files.SetTab(tab)
 	m.focus = focusSidebar
-	if !m.showLeft {
+	if !m.showLeft || m.showWelcome() {
 		m.focus = focusMain
 	}
 	m.setSize()
 
 	if tab == filelist.TabCommits {
-		if m.files.Total() == 0 {
+		if m.files.Total() == 0 && !m.logLoaded {
 			m.message = "loading commits…"
 			return m, tea.Batch(loadLogCmd(m.cfg.LogLimit), setMessageCmd(m.message))
 		}
 		if c, ok := m.files.SelectedCommit(); ok {
 			return m.showCommit(c)
+		}
+		if m.logLoaded {
+			// A loaded empty log replaces a file diff brought over from the other
+			// tab. Otherwise that invisible diff would keep owning the keys.
+			m.clearEmptyCommitPane()
+			m.setSize()
 		}
 		return m, nil
 	}
@@ -1503,10 +1544,14 @@ func (m model) switchTab(tab int) (tea.Model, tea.Cmd) {
 	m.view.SetNotes(nil)
 	m.lastLoaded.path, m.lastLoaded.staged = "", false
 	if m.files.Total() == 0 {
+		m.seq++
+		m.commitSeq++
 		m.allChanges = false
 		m.allLoading = false
+		m.preparePlaygroundInput()
 		m.view.SetFile(nil)
 		m.d = nil
+		m.setSize()
 		return m, nil
 	}
 	if m.allChanges {
@@ -1992,10 +2037,11 @@ func (m *model) setSize() {
 
 	sidebarW := min(max(10, m.cfg.SidebarWidth), max(10, w/2))
 	filesW := min(30, max(14, w/4))
-	if !m.showLeft {
+	hideSidebars := m.files.Tab() == filelist.TabCommits && m.showWelcome()
+	if !m.showLeft || hideSidebars {
 		sidebarW = 0
 	}
-	if !m.showRight {
+	if !m.showRight || hideSidebars {
 		filesW = 0
 	}
 

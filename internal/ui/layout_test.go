@@ -324,6 +324,7 @@ func TestArrowKeysScrollTheDiff(t *testing.T) {
 
 func TestSplitKeyBinding(t *testing.T) {
 	m := testModel(120, 24)
+	m.view.SetFile(diff.Generate("a.go", diff.Modified, "a\n", "b\n", diff.GenerateOptions{Context: 3}))
 	m.focus = focusMain
 	if !key.Matches(tea.KeyPressMsg{Code: 'v', Text: "v"}, m.keys.ToggleView) {
 		t.Fatal("v is not bound to the diff view toggle")
@@ -348,13 +349,15 @@ func TestWelcomeAnimationFrames(t *testing.T) {
 	m := testModel(100, 30)
 	first := m.welcomeView()
 
-	next, cmd := m.Update(welcomeTickMsg{})
-	if cmd == nil {
-		t.Fatal("welcome tick should schedule the next frame")
+	for range 6 {
+		next, cmd := m.Update(welcomeTickMsg{})
+		if cmd == nil {
+			t.Fatal("welcome tick should schedule the next frame")
+		}
+		m = next.(model)
 	}
-	m = next.(model)
-	if m.welcomeFrame != 1 {
-		t.Fatalf("welcome frame = %d, want 1", m.welcomeFrame)
+	if m.welcomeFrame != 6 {
+		t.Fatalf("welcome frame = %d, want 6", m.welcomeFrame)
 	}
 	if m.welcomeView() == first {
 		t.Fatal("animation frame did not change the welcome art")
@@ -376,14 +379,16 @@ func TestWelcomeContent(t *testing.T) {
 	view := ansi.Strip(m.welcomeView())
 	t.Logf("welcome screen:\n%s", view)
 
-	for _, want := range []string{"twig", "working tree clean", "git log", "●", "files", "commits"} {
+	for _, want := range []string{"twig", "bonsai", "working tree clean", "▀", "h/l wind", "b grow", "color", "prune", "replant", "space gust"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("welcome screen missing %q:\n%s", want, view)
 		}
 	}
-
-	m.welcomeFrame = welcomeRevealFrames + 5
-	t.Logf("scrolled graph:\n%s", ansi.Strip(m.welcomeView()))
+	for _, oldGraph := range []string{"HEAD", "feature", "git log", "●"} {
+		if strings.Contains(view, oldGraph) {
+			t.Fatalf("welcome screen retained graph artifact %q:\n%s", oldGraph, view)
+		}
+	}
 }
 
 func TestCommitModalOverDimmedPage(t *testing.T) {
@@ -895,6 +900,7 @@ func TestCommitsTabHighlightsReadingRowAndCopiesDrag(t *testing.T) {
 
 func TestMainPaneClickFocusesDiff(t *testing.T) {
 	m := testModel(120, 24)
+	m.view.SetFile(diff.Generate("a.go", diff.Modified, "a\n", "b\n", diff.GenerateOptions{Context: 3}))
 	m.focus = focusSidebar
 	next, _ := m.Update(tea.MouseClickMsg{
 		X: m.mainRect.Min.X + 2,
@@ -1134,29 +1140,23 @@ func TestHelpColumnsSeparateChrome(t *testing.T) {
 	}
 }
 
-// TestWelcomeStaysOnTheFilesTab pins the splash to the files tab: an empty
-// commits list must not bring the animation back.
-func TestWelcomeStaysOnTheFilesTab(t *testing.T) {
+// TestWelcomeStopsWhenCommitsArrive keeps the playground from consuming
+// animation ticks after the commit pane has real content.
+func TestWelcomeStopsWhenCommitsArrive(t *testing.T) {
 	m := testModel(100, 30)
+	m.logLoaded = true
+	m.files.SetTab(filelist.TabCommits)
 	if !m.showWelcome() {
-		t.Fatal("welcome should start visible on the files tab")
+		t.Fatal("welcome should show on an empty commits tab")
 	}
 
-	m.files.SetTab(filelist.TabCommits)
-	if m.showWelcome() {
-		t.Fatal("welcome should not show on the commits tab")
-	}
+	m.files.SetCommits([]git.Commit{{Hash: "abc", Subject: "one"}})
 	next, cmd := m.Update(welcomeTickMsg{})
 	if cmd != nil {
-		t.Fatal("welcome tick should stop once the commits tab is active")
+		t.Fatal("welcome tick should stop once commits arrive")
 	}
 	if next.(model).welcomeFrame != m.welcomeFrame {
-		t.Fatal("welcome frame advanced while the commits tab was active")
-	}
-
-	m.files.SetTab(filelist.TabFiles)
-	if !m.showWelcome() {
-		t.Fatal("welcome should come back with the files tab")
+		t.Fatal("welcome frame advanced while hidden")
 	}
 }
 
@@ -1229,6 +1229,7 @@ func TestSmoothScrollTogglesAndPersists(t *testing.T) {
 	}
 
 	m := testModel(100, 30)
+	m.view.SetFile(diff.Generate("a.go", diff.Modified, "a\n", "b\n", diff.GenerateOptions{Context: 3}))
 	m.cfg.SmoothScroll = false
 	m.view.SetSmooth(false)
 	m.cfgPath = path
@@ -1470,6 +1471,7 @@ func TestTypingAfterClickingTheRightSidebarStaysThere(t *testing.T) {
 // instead of acting as "back" and closing the search.
 func TestDeleteKeyStaysInTheSearchInput(t *testing.T) {
 	m := testModel(100, 30)
+	m.view.SetFile(diff.Generate("a.go", diff.Modified, "a\n", "b\n", diff.GenerateOptions{Context: 3}))
 	m.focus = focusMain
 	next, _ := m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
 	m = next.(model)
@@ -1524,6 +1526,7 @@ func TestCommitNotesListTheChangedFiles(t *testing.T) {
 // split view that quietly refuses to wrap.
 func TestWrapAndSplitTurnEachOtherOff(t *testing.T) {
 	m := testModel(120, 30)
+	m.view.SetFile(diff.Generate("a.go", diff.Modified, "a\n", "b\n", diff.GenerateOptions{Context: 3}))
 	m.focus = focusMain
 
 	split := tea.KeyPressMsg{Code: 'v', Text: "v"}

@@ -11,7 +11,7 @@
     It refreshes in about a tenth of a second while you edit, pages diffs with
     millions of rows instead of choking on them, stages, commits and pushes
     without leaving the pane, and ships as one 11 MB binary with no libgit2
-    inside. If the tree is clean, a small twig grows where the diff would be.
+    inside. Quiet screens grow a tiny interactive pixel bonsai instead of a blank pane.
   </p>
 </div>
 
@@ -88,6 +88,10 @@ Search and the list filters run as you type, and `esc` clears either.
 | `o`                      | fold / unfold metadata, hunk, or file           |
 | `Z` / `c`                | ignore whitespace / cycle context               |
 | `r` / `?` / `q`          | refresh / help / quit                           |
+
+Quiet screens grow an interactive pixel bonsai; empty commits hide both sidebars.
+`h`/`l` wind, `space` gust, `b` sprout, `c` colors, `m` bloom, `z` prune, `x` replant.
+Nothing here changes your repository.
 
 Drag across diff text with the mouse to select exact characters and copy them
 on release; diff signs are omitted from the copied text. For line selection,
