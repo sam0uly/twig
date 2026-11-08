@@ -2,6 +2,9 @@ package diffview
 
 import (
 	"sort"
+	"strings"
+
+	"github.com/charmbracelet/x/ansi"
 
 	"samouly.fun/twig/internal/diff"
 	"samouly.fun/twig/internal/stage"
@@ -36,7 +39,7 @@ type Item struct {
 // barWidth is the column the staging gutter reserves. Reserving rather than
 // inserting it keeps the code from shifting sideways when the cursor moves.
 func (m Model) barWidth() int {
-	if !m.selectable {
+	if !m.selectable && m.readAnchor() < 0 {
 		return 0
 	}
 	return 1
@@ -91,6 +94,8 @@ func (m *Model) SetSelectable(on bool) {
 	if !on {
 		m.cursor, m.anchor = -1, -1
 		m.pending = stage.NewSelection()
+	} else {
+		m.clearReadSelection()
 	}
 	// The gutter is part of the width now, so a pane that gains or loses the
 	// cursor has to re-wrap around it.
@@ -102,6 +107,25 @@ func (m *Model) SetSelectable(on bool) {
 
 // Selectable reports whether the staging cursor is available.
 func (m Model) Selectable() bool { return m.selectable }
+
+// SetReadRail turns the fold trail on or off. It marks the section a reader is
+// in, so it belongs to the panes that have no staging cursor to show instead.
+func (m *Model) SetReadRail(on bool) {
+	if m.readRail == on {
+		return
+	}
+	m.readRail = on
+	m.cache.reset()
+	if m.vp.SoftWrap {
+		m.applyWrap()
+		m.rebuild()
+		return
+	}
+	// The rail takes a cell from every row, which can add a horizontal scrollbar
+	// and so a row of height.
+	m.vp.SetWidth(m.vpWidth())
+	m.vp.SetHeight(m.vpHeight())
+}
 
 // SetSelectMode switches between applying each keystroke at once and marking
 // lines to apply together.
@@ -159,11 +183,336 @@ func (m *Model) SetCursorFocus(on bool) {
 // CursorOn reports whether the bar is drawn bright.
 func (m Model) CursorOn() bool { return m.cursorOn }
 
+// StartReadSelection places the reading rail on a row and begins a drag.
+func (m *Model) StartReadSelection(row, col int) {
+	if m.nrows() == 0 {
+		return
+	}
+	row = max(0, min(row, m.nrows()-1))
+	m.readSide = -1
+	if m.split {
+		m.readSide = 0
+		markerW := m.foldMarkerWidth(row)
+		leftW, _ := splitColumnWidths(m.rowBudget() - markerW)
+		if col-m.barWidth()-markerW >= leftW {
+			m.readSide = 1
+		}
+	}
+	m.readStart = m.logicalAt(row)
+	m.readStartCol = m.contentColumn(row, col, m.readSide)
+	m.readEnd, m.readEndCol = m.readStart, m.readStartCol
+	m.readDragging, m.readMoved = true, false
+	m.cache.reset()
+	if m.vp.SoftWrap {
+		m.applyWrap()
+	}
+}
+
+// ExtendReadSelection grows the mouse selection to a row and column.
+func (m *Model) ExtendReadSelection(row, col int) {
+	if !m.readDragging || m.nrows() == 0 {
+		return
+	}
+	row = max(0, min(row, m.nrows()-1))
+	logical := m.logicalAt(row)
+	col = m.contentColumn(row, col, m.readSide)
+	if logical != m.readStart || col != m.readStartCol {
+		m.readMoved = true
+	}
+	m.readEnd, m.readEndCol = logical, col
+	m.cache.reset()
+}
+
+func (m Model) contentColumn(row, col, side int) int {
+	markerW := m.foldMarkerWidth(row)
+	base := m.barWidth() + markerW
+	var contentW int
+	if m.split {
+		leftW, rightW := splitColumnWidths(m.rowBudget() - markerW)
+		gut := 0
+		if m.showLineNumbers {
+			gut = m.gut.numW + 1
+		}
+		if side == 1 {
+			base += leftW + 1
+			contentW = max(1, rightW-gut)
+		} else {
+			contentW = max(1, leftW-gut)
+		}
+		base += gut
+	} else {
+		base += m.gut.cells()
+		contentW = max(1, m.rowBudget()-m.barWidth()-markerW-m.gut.cells())
+	}
+	screen := min(max(col, base), base+max(0, contentW)-1)
+	return max(0, screen-base+m.vp.XOffset())
+}
+
+func (m Model) readRowText(logical int) string {
+	return m.readRowTextSide(logical, -1)
+}
+
+func (m Model) readRowTextSide(logical, side int) string {
+	display := m.displayOfLogical(logical)
+	if display < 0 {
+		return ""
+	}
+	r := m.rowAt(display)
+	if r.pre {
+		return ansi.Strip(r.text)
+	}
+	if m.split {
+		if side == 0 {
+			return r.left.Text
+		}
+		if side == 1 {
+			return r.right.Text
+		}
+		var parts []string
+		if r.hasLeft {
+			parts = append(parts, r.left.Text)
+		}
+		if r.hasRight {
+			parts = append(parts, r.right.Text)
+		}
+		return strings.Join(parts, " ")
+	}
+	return r.line.Text
+}
+
+func (m Model) selectionSpan(row, side int) (int, int, bool) {
+	if m.readStart < 0 || m.readEnd < 0 {
+		return 0, 0, false
+	}
+	logical := m.logicalAt(row)
+	fromRow, toRow := m.readStart, m.readEnd
+	fromCol, toCol := m.readStartCol, m.readEndCol
+	if fromRow > toRow || (fromRow == toRow && fromCol > toCol) {
+		fromRow, toRow = toRow, fromRow
+		fromCol, toCol = toCol, fromCol
+	}
+	if logical < fromRow || logical > toRow {
+		return 0, 0, false
+	}
+	if m.split && side != m.readSide {
+		return 0, 0, false
+	}
+	text := m.readRowTextSide(logical, m.readSide)
+	start, end := 0, len(text)
+	if logical == fromRow {
+		start = columnByte(text, fromCol)
+	}
+	if logical == toRow {
+		end = columnByte(text, toCol)
+	}
+	if start > end {
+		start, end = end, start
+	}
+	if start == 0 {
+		start = min(signSkip(text), end)
+	}
+	return start, end, start < end
+}
+
+// signSkip is the width of a row's diff sign. A selection that starts at the
+// row's left edge begins after it, because the sign names the change rather than
+// its text and the copied text leaves it out too.
+func signSkip(text string) int {
+	if text != "" && strings.ContainsRune("+- ", rune(text[0])) {
+		return 1
+	}
+	return 0
+}
+
+func columnByte(text string, col int) int {
+	if col <= 0 {
+		return 0
+	}
+	used := 0
+	for i, r := range text {
+		w := ansi.StringWidth(string(r))
+		if r == '\t' {
+			w = 4 - used%4
+		}
+		if used+w > col {
+			return i
+		}
+		used += w
+	}
+	return len(text)
+}
+
+// FinishReadSelection ends a drag and returns its copied text when the mouse moved.
+func (m *Model) FinishReadSelection() (string, bool) {
+	if !m.readDragging {
+		return "", false
+	}
+	m.readDragging = false
+	if !m.readMoved {
+		return "", false
+	}
+	text := m.SelectionText()
+	m.clearReadSelection()
+	return text, true
+}
+
+// SelectionText is the plain text of the current reading selection.
+func (m Model) SelectionText() string {
+	if m.readStart < 0 || m.readEnd < 0 {
+		return ""
+	}
+	fromRow, toRow := m.readStart, m.readEnd
+	fromCol, toCol := m.readStartCol, m.readEndCol
+	if fromRow > toRow || (fromRow == toRow && fromCol > toCol) {
+		fromRow, toRow = toRow, fromRow
+		fromCol, toCol = toCol, fromCol
+	}
+	var b strings.Builder
+	for row := fromRow; row <= toRow; row++ {
+		text := m.readRowTextSide(row, m.readSide)
+		start, end := 0, len(text)
+		if row == fromRow {
+			start = columnByte(text, fromCol)
+		}
+		if row == toRow {
+			end = columnByte(text, toCol)
+		}
+		if start > end {
+			start, end = end, start
+		}
+		segment := text[start:end]
+		if start == 0 && segment != "" {
+			segment = segment[signSkip(segment):]
+		}
+		b.WriteString(segment)
+		if row < toRow {
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+// displayIndex is the row a logical row paints on, or -1 when a fold hides it.
+func (m Model) displayIndex(logical int) int {
+	if logical < 0 {
+		return -1
+	}
+	if i := sort.SearchInts(m.visibleRows, logical); i < len(m.visibleRows) && m.visibleRows[i] == logical {
+		return i
+	}
+	return -1
+}
+
+// topRow is the row painted at the top of the viewport, following soft wrap's
+// display lines back to the row they came from.
+func (m Model) topRow() int {
+	top := m.vp.YOffset()
+	if !m.vp.SoftWrap {
+		return max(0, min(top, m.nrows()-1))
+	}
+	i := sort.SearchInts(m.wrapPrefix, top+1) - 1
+	return max(0, min(i, m.nrows()-1))
+}
+
+// readAnchor is the fold anchor the commits rail marks: the section that owns
+// the top of the viewport. Every way of moving the window (arrows, page keys,
+// the wheel) carries it along, and it holds on a section while that section's
+// rows fill the screen, even once its title has scrolled off. -1 when this is a
+// staging pane or nothing folds.
+func (m Model) readAnchor() int {
+	if m.selectable || !m.readRail || m.nrows() == 0 {
+		return -1
+	}
+	top := m.logicalAt(m.topRow())
+	anchor := -1
+	if len(m.noteRows) > 1 && m.displayIndex(0) >= 0 {
+		anchor = 0
+	}
+	if i := sort.SearchInts(m.hunks, top+1) - 1; i >= 0 {
+		if row := m.hunks[i]; row > anchor && m.displayIndex(row) >= 0 {
+			anchor = row
+		}
+	}
+	if i := sort.SearchInts(m.fileBands, top+1) - 1; i >= 0 {
+		if row := m.fileBands[i]; row > anchor && m.displayIndex(row) >= 0 {
+			anchor = row
+		}
+	}
+	if anchor >= 0 {
+		return anchor
+	}
+	// The view sits above every anchor: mark the first one below it, so the rail
+	// still names where the diff starts.
+	for row := m.topRow(); row < m.nrows(); row++ {
+		if _, ok := m.foldKey(m.logicalAt(row)); ok {
+			return m.logicalAt(row)
+		}
+	}
+	return -1
+}
+
+// ReadRow is the logical row the commits rail marks, or -1.
+func (m Model) ReadRow() int { return m.readAnchor() }
+
+// readBarRow is the row the commits trail paints on: the anchor's own row while
+// it is on screen, or the top row once the section's title has scrolled above the
+// view, so the mark stays on the section the reader is in.
+func (m Model) readBarRow() int {
+	anchor := m.readAnchor()
+	if anchor < 0 {
+		return -1
+	}
+	display := m.displayIndex(anchor)
+	if display < 0 {
+		return -1
+	}
+	return max(display, m.topRow())
+}
+
+// ReadSelecting reports whether a mouse drag is in progress.
+func (m Model) ReadSelecting() bool { return m.readDragging }
+
+// ReadSelectionActive reports whether a mouse text selection exists.
+func (m Model) ReadSelectionActive() bool { return m.readStart >= 0 }
+
+// ClearReadSelection removes the mouse text selection.
+func (m *Model) ClearReadSelection() { m.clearReadSelection() }
+
+// SelectedText returns the full plain text of a V-selected line range.
+func (m Model) SelectedText() (string, bool) {
+	if !m.HasRange() {
+		return "", false
+	}
+	from, to := min(m.anchor, m.cursor), max(m.anchor, m.cursor)
+	var b strings.Builder
+	for row := from; row <= to && row < m.nrows(); row++ {
+		b.WriteString(m.readRowText(m.logicalAt(row)))
+		if row < to {
+			b.WriteByte('\n')
+		}
+	}
+	return b.String(), true
+}
+
+func (m *Model) clearReadSelection() {
+	if m.readStart < 0 && m.readEnd < 0 {
+		return
+	}
+	m.readStart, m.readEnd = -1, -1
+	m.readStartCol, m.readEndCol = 0, 0
+	m.readDragging, m.readMoved = false, false
+	m.cache.reset()
+	if m.vp.SoftWrap {
+		m.applyWrap()
+	}
+}
+
 // resetCursor drops the cursor when the document behind it changes.
 func (m *Model) resetCursor() {
 	m.cursor, m.anchor = -1, -1
 	m.pending = stage.NewSelection()
 	m.markPath = ""
+	m.clearReadSelection()
 }
 
 // ClearCursor drops the cursor before the document is replaced.
@@ -805,6 +1154,9 @@ func (m Model) rowPending(row int) bool {
 func (m Model) barAt(row int) string {
 	if m.barWidth() == 0 {
 		return ""
+	}
+	if !m.selectable && row == m.readBarRow() {
+		return m.styles.CursorBar().Render("┃")
 	}
 	switch {
 	case m.inRange(row) && m.cursorOn:

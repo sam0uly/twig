@@ -114,6 +114,68 @@ func TestFoldKeyTogglesCommitMetadata(t *testing.T) {
 
 // TestHelpListsEveryKeyThatWorks keeps the reference honest: a key the model
 // handles but the help omits is a key the reader has to remember.
+func TestVRangeCopiesSelectedLines(t *testing.T) {
+	m := testModel(80, 20)
+	m.lastLoaded.path = "a.go"
+	m.view.SetFile(diff.Generate("a.go", diff.Modified, "one\ntwo\nthree\n", "one\nTWO\nthree\n", diff.GenerateOptions{Context: 3}))
+	m.focus = focusMain
+	m.syncStaging()
+
+	next, _ := m.Update(keyPress("V"))
+	m = next.(model)
+	next, _ = m.Update(keyPress("j"))
+	m = next.(model)
+	next, cmd := m.Update(keyPress("y"))
+	m = next.(model)
+	if cmd == nil || m.message != "copied selection" {
+		t.Fatalf("V+y did not copy selected lines: message %q, cmd %v", m.message, cmd != nil)
+	}
+}
+
+// TestCommitsArrowsScrollTheView: the commits tab is a normal reader, so the
+// arrows scroll it, and the rail follows the section they scroll to.
+func TestCommitsArrowsScrollTheView(t *testing.T) {
+	m := testModel(120, 20)
+	m.files.SetTab(filelist.TabCommits)
+	m.setSize()
+	file := diff.Generate("a.go", diff.Modified, twoHunkSource(false), twoHunkSource(true), diff.GenerateOptions{Context: 3})
+	m.applyCommit(git.Commit{Hash: "1", Short: "abc1234", Subject: "one", Author: "sam", When: "now"},
+		diff.Aggregate([]*diff.File{file}), []*diff.File{file})
+	m.view.SetNotes([]string{"commit metadata", "subject"})
+	m.focus = focusMain
+	m.syncStaging()
+
+	if got := m.view.ReadRow(); got != 0 {
+		t.Fatalf("rail starts on %d, want the commit metadata 0", got)
+	}
+	before := m.view.YOffset()
+	next, _ := m.Update(keyPress("j"))
+	m = next.(model)
+	if got := m.view.YOffset(); got == before {
+		t.Fatal("j did not scroll the commits pane")
+	}
+}
+
+// twoHunkSource is a file with two changes far enough apart to make two hunks.
+func twoHunkSource(changed bool) string {
+	var b strings.Builder
+	for i := 1; i <= 40; i++ {
+		switch {
+		case changed && i == 3:
+			b.WriteString("after\n")
+		case changed && i == 30:
+			b.WriteString("later\n")
+		case !changed && i == 3:
+			b.WriteString("before\n")
+		case !changed && i == 30:
+			b.WriteString("earlier\n")
+		default:
+			b.WriteString("line\n")
+		}
+	}
+	return b.String()
+}
+
 func TestHelpListsEveryKeyThatWorks(t *testing.T) {
 	filesTab := testModel(120, 30)
 	commitsTab := testModel(120, 30)

@@ -172,10 +172,17 @@ func (m Model) wrapWithBar() string {
 	if m.HasCursor() {
 		cursorLine = m.displayLineOf(m.cursor) - m.vp.YOffset()
 	}
+	readLine := -1
+	if row := m.readBarRow(); row >= 0 {
+		readLine = max(0, m.displayLineOf(row)-m.vp.YOffset())
+	}
 	for i := range lines {
 		bar := strings.Repeat(" ", gutter)
-		if i == cursorLine {
+		switch i {
+		case cursorLine:
 			bar = m.barAt(m.cursor)
+		case readLine:
+			bar = m.styles.CursorBar().Render("┃")
 		}
 		lines[i] = bar + lines[i]
 	}
