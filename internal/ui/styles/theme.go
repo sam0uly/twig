@@ -83,6 +83,7 @@ type Styles struct {
 
 	searchHi    lipgloss.Style
 	searchHiSel lipgloss.Style
+	selection   lipgloss.Style
 
 	// Staging affordances. None of these may paint a background across the
 	// line: the diff wash and the syntax colours are what the reader is
@@ -208,6 +209,8 @@ func New() Styles {
 		Background(tone.Zest).Foreground(tone.Pepper)
 	s.searchHiSel = lipgloss.NewStyle().
 		Bold(true).Background(tone.Bok).Foreground(tone.Pepper)
+	s.selection = lipgloss.NewStyle().
+		Background(tone.Hazy).Foreground(tone.Pepper)
 
 	// Scrollbars: a dim track with a bright thumb.
 	s.scrollTrack = lipgloss.NewStyle().Foreground(tone.Iron)
@@ -560,6 +563,9 @@ func (s Styles) SearchHi() lipgloss.Style { return s.searchHi }
 
 // SearchHiSel returns the style for the selected search match.
 func (s Styles) SearchHiSel() lipgloss.Style { return s.searchHiSel }
+
+// Selection returns the style for a mouse text selection.
+func (s Styles) Selection() lipgloss.Style { return s.selection }
 
 // GreenFg renders text in the green accent.
 func (s Styles) GreenFg(text string) string { return s.greenFg(text) }

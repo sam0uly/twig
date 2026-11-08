@@ -157,6 +157,15 @@ type Model struct {
 	selectable bool
 	selectMode bool
 	cursorOn   bool
+	// readStart and readEnd are a mouse-selected display-row range in a
+	// non-staging pane. readDragging marks an unfinished drag.
+	readStart    int
+	readEnd      int
+	readStartCol int
+	readEndCol   int
+	readSide     int
+	readDragging bool
+	readMoved    bool
 	// fileStaged is which half of the file on screen this pane shows; blockStaged
 	// carries one for each block of a document, where a file can appear twice.
 	fileStaged  bool
@@ -229,6 +238,8 @@ func New(smooth bool, st styles.Styles) Model {
 		hunkCur:         -1,
 		cursor:          -1,
 		anchor:          -1,
+		readStart:       -1,
+		readEnd:         -1,
 		pending:         stage.NewSelection(),
 	}
 }
@@ -2015,6 +2026,10 @@ func (m Model) renderLine(row int, l diff.Line, flatIdx int) string {
 // styledText renders one line's text, resolving token, word and search styles
 // per boundary. Lines with nothing to highlight take the fast path.
 func (m Model) styledText(row int, l diff.Line, flatIdx int) (lipgloss.Style, string) {
+	return m.styledTextSide(row, l, flatIdx, -1)
+}
+
+func (m Model) styledTextSide(row int, l diff.Line, flatIdx, side int) (lipgloss.Style, string) {
 	base := m.lineStyles(l)
 	if l.Text == "" {
 		return base, ""
@@ -2026,7 +2041,8 @@ func (m Model) styledText(row int, l diff.Line, flatIdx int) (lipgloss.Style, st
 	toks := m.tokens(row, l)
 	spans := m.spansFor(flatIdx)
 	words := l.WordRanges()
-	if len(toks) == 0 && len(words) == 0 && len(spans) == 0 {
+	selectionStart, selectionEnd, hasSelection := m.selectionSpan(row, side)
+	if len(toks) == 0 && len(words) == 0 && len(spans) == 0 && !hasSelection {
 		return base, base.Render(l.Text)
 	}
 
@@ -2041,6 +2057,9 @@ func (m Model) styledText(row int, l diff.Line, flatIdx int) (lipgloss.Style, st
 	}
 
 	kind := syntaxKind(l.Kind)
+	if hasSelection {
+		spans = append(spans, Match{Start: selectionStart, End: selectionEnd})
+	}
 	bounds := tokenBounds(boundarySet(0, len(l.Text), words, spans), toks, len(l.Text))
 
 	var b strings.Builder
@@ -2063,6 +2082,9 @@ func (m Model) styledText(row int, l diff.Line, flatIdx int) (lipgloss.Style, st
 		}
 		if containsMatch(spans, mid) {
 			st = m.styles.SearchHi()
+		}
+		if hasSelection && mid >= selectionStart && mid < selectionEnd {
+			st = m.styles.Selection()
 		}
 		if hasSel && posInSpan(selected, mid) {
 			st = m.styles.SearchHiSel()
@@ -2337,7 +2359,11 @@ func (m Model) renderSide(row int, l diff.Line, flatIdx int, present bool, colW 
 		return m.fillSide(colW)
 	}
 
-	base, text := m.styledText(row, l, flatIdx)
+	side := 0
+	if !oldSide {
+		side = 1
+	}
+	base, text := m.styledTextSide(row, l, flatIdx, side)
 
 	var gut int
 	var num string

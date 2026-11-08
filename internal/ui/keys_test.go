@@ -114,6 +114,24 @@ func TestFoldKeyTogglesCommitMetadata(t *testing.T) {
 
 // TestHelpListsEveryKeyThatWorks keeps the reference honest: a key the model
 // handles but the help omits is a key the reader has to remember.
+func TestVRangeCopiesSelectedLines(t *testing.T) {
+	m := testModel(80, 20)
+	m.lastLoaded.path = "a.go"
+	m.view.SetFile(diff.Generate("a.go", diff.Modified, "one\ntwo\nthree\n", "one\nTWO\nthree\n", diff.GenerateOptions{Context: 3}))
+	m.focus = focusMain
+	m.syncStaging()
+
+	next, _ := m.Update(keyPress("V"))
+	m = next.(model)
+	next, _ = m.Update(keyPress("j"))
+	m = next.(model)
+	next, cmd := m.Update(keyPress("y"))
+	m = next.(model)
+	if cmd == nil || m.message != "copied selection" {
+		t.Fatalf("V+y did not copy selected lines: message %q, cmd %v", m.message, cmd != nil)
+	}
+}
+
 func TestHelpListsEveryKeyThatWorks(t *testing.T) {
 	filesTab := testModel(120, 30)
 	commitsTab := testModel(120, 30)

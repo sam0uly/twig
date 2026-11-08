@@ -89,6 +89,10 @@ Search and the list filters run as you type, and `esc` clears either.
 | `Z` / `c`                | ignore whitespace / cycle context               |
 | `r` / `?` / `q`          | refresh / help / quit                           |
 
+Drag across diff text with the mouse to select exact characters and copy them
+on release; diff signs are omitted from the copied text. For line selection,
+use `V`, extend with `j`/`k`, then `y` to copy.
+
 ## Staging
 
 Cursor picks the scope: a band is the file, a hunk header the hunk, a changed line

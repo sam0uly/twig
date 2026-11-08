@@ -848,6 +848,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseClickMsg:
 		return m.updateClick(msg)
 
+	case tea.MouseMotionMsg:
+		return m.updateMotion(msg)
+
+	case tea.MouseReleaseMsg:
+		return m.updateRelease(msg)
+
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
 
@@ -1140,11 +1146,14 @@ func (m model) updateClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Main pane: a click puts the staging cursor on the row under the pointer.
+	// Main pane: a click moves the staging cursor or starts a reading selection.
 	if m.inPane(msg.X, msg.Y, m.mainRect) {
 		m.focus = focusMain
-		row := m.view.YOffset() + msg.Y - m.mainRect.Min.Y - m.paneInset()
-		m.view.CursorTo(row)
+		row := m.mainRow(msg.Y)
+		if m.view.Selectable() {
+			m.view.CursorTo(row)
+		}
+		m.view.StartReadSelection(row, msg.X-m.mainRect.Min.X-m.paneInset())
 		return m, nil
 	}
 
@@ -1191,6 +1200,33 @@ func (m model) updateClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m model) mainRow(y int) int {
+	return m.view.YOffset() + y - m.mainRect.Min.Y - m.paneInset()
+}
+
+func (m model) updateMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
+	if m.state != stateShowList || !m.view.ReadSelecting() || !m.inPane(msg.X, msg.Y, m.mainRect) {
+		return m, nil
+	}
+	m.view.ExtendReadSelection(m.mainRow(msg.Y), msg.X-m.mainRect.Min.X-m.paneInset())
+	return m, nil
+}
+
+func (m model) updateRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.Cmd) {
+	if m.state != stateShowList || !m.view.ReadSelecting() {
+		return m, nil
+	}
+	if m.inPane(msg.X, msg.Y, m.mainRect) {
+		m.view.ExtendReadSelection(m.mainRow(msg.Y), msg.X-m.mainRect.Min.X-m.paneInset())
+	}
+	text, ok := m.view.FinishReadSelection()
+	if !ok || text == "" {
+		return m, nil
+	}
+	m.message = "copied selection"
+	return m, tea.Batch(tea.SetClipboard(text), setMessageCmd(m.message))
 }
 
 // tabHitRanges returns the cell ranges of the header tabs, read from the rendered
@@ -1352,6 +1388,10 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Keys about the view belong to the whole window, so they work from the sidebar
 	// too.
 	case key.Matches(msg, m.keys.YankFile):
+		if text, ok := m.view.SelectedText(); ok && text != "" {
+			m.message = "copied selection"
+			return m, tea.Batch(tea.SetClipboard(text), setMessageCmd(m.message))
+		}
 		if patch := m.view.CurrentFilePatch(); patch != "" {
 			m.message = "copied patch"
 			return m, tea.Batch(tea.SetClipboard(patch), setMessageCmd(m.message))
