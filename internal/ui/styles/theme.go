@@ -37,7 +37,7 @@ type noticeSpec struct {
 
 var noticeSpecs = map[NoticeKind]noticeSpec{
 	NoticeOkay: {word: "OKAY!", pill: tone.Guac, text: tone.Julep, wash: tone.Spinach},
-	NoticeInfo: {word: "FYI", pill: tone.Sardine, text: tone.Lichen, wash: tone.Oceania},
+	NoticeInfo: {word: "FYI!", pill: tone.Sardine, text: tone.Lichen, wash: tone.Oceania},
 	NoticeWarn: {word: "HMM!", pill: tone.Paprika, text: tone.Yam, wash: tone.Toast},
 	NoticeFail: {word: "OOPS!", pill: tone.Cherry, text: tone.Salmon, wash: tone.Steak},
 }
