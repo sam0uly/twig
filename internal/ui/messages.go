@@ -116,6 +116,9 @@ type pushedMsg struct {
 // clearMsgMsg clears the transient status message.
 type clearMsgMsg struct{}
 
+// noticeTickMsg advances a notice's scramble animation.
+type noticeTickMsg struct{}
+
 // prefetchedMsg carries a background-loaded file diff for the cache. The
 // fingerprint says which working-tree state it was taken from, so a prefetch that
 // lands after the tree moved is dropped instead of caching a stale diff.

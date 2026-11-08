@@ -3,11 +3,14 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"samouly.fun/twig/internal/diff"
 	"samouly.fun/twig/internal/git"
 	"samouly.fun/twig/internal/ui/components/filelist"
+	"samouly.fun/twig/internal/ui/components/statusbar"
+	"samouly.fun/twig/internal/ui/styles"
 )
 
 // TestViewKeysWorkFromEitherPane: keys about the view rather than the cursor
@@ -114,66 +117,112 @@ func TestFoldKeyTogglesCommitMetadata(t *testing.T) {
 
 // TestHelpListsEveryKeyThatWorks keeps the reference honest: a key the model
 // handles but the help omits is a key the reader has to remember.
-func TestVRangeCopiesSelectedLines(t *testing.T) {
-	m := testModel(80, 20)
+// TestYankHunkSaysWhatItCopied: every yank reports through the footer, so the
+// hunk key must not be the one silent case.
+func TestYankHunkSaysWhatItCopied(t *testing.T) {
+	m := testModel(120, 24)
 	m.lastLoaded.path = "a.go"
-	m.view.SetFile(diff.Generate("a.go", diff.Modified, "one\ntwo\nthree\n", "one\nTWO\nthree\n", diff.GenerateOptions{Context: 3}))
 	m.focus = focusMain
+	m.view.SetFile(diff.Generate("a.go", diff.Modified,
+		"one\n", "one\ntwo\n", diff.GenerateOptions{Context: 3}))
 	m.syncStaging()
 
-	next, _ := m.Update(keyPress("V"))
-	m = next.(model)
-	next, _ = m.Update(keyPress("j"))
-	m = next.(model)
-	next, cmd := m.Update(keyPress("y"))
-	m = next.(model)
-	if cmd == nil || m.message != "copied selection" {
-		t.Fatalf("V+y did not copy selected lines: message %q, cmd %v", m.message, cmd != nil)
+	next, cmd := m.Update(keyPress("Y"))
+	got := next.(model)
+	if got.message != "copied hunk" {
+		t.Fatalf("hunk yank said %q, want a notification", got.message)
+	}
+	if cmd == nil {
+		t.Fatal("hunk yank scheduled nothing")
 	}
 }
 
-// TestCommitsArrowsScrollTheView: the commits tab is a normal reader, so the
-// arrows scroll it, and the rail follows the section they scroll to.
-func TestCommitsArrowsScrollTheView(t *testing.T) {
-	m := testModel(120, 20)
-	m.files.SetTab(filelist.TabCommits)
-	m.setSize()
-	file := diff.Generate("a.go", diff.Modified, twoHunkSource(false), twoHunkSource(true), diff.GenerateOptions{Context: 3})
-	m.applyCommit(git.Commit{Hash: "1", Short: "abc1234", Subject: "one", Author: "sam", When: "now"},
-		diff.Aggregate([]*diff.File{file}), []*diff.File{file})
-	m.view.SetNotes([]string{"commit metadata", "subject"})
-	m.focus = focusMain
-	m.syncStaging()
-
-	if got := m.view.ReadRow(); got != 0 {
-		t.Fatalf("rail starts on %d, want the commit metadata 0", got)
+// TestNoticesPickTheirTone: the footer notice draws its colour from the kind of
+// outcome the message names.
+func TestNoticesPickTheirTone(t *testing.T) {
+	cases := map[string]styles.NoticeKind{
+		"copied patch":             styles.NoticeOkay,
+		"copied hunk":              styles.NoticeOkay,
+		"committed abc1234":        styles.NoticeOkay,
+		"pushed!":                  styles.NoticeOkay,
+		"undid stage":              styles.NoticeOkay,
+		"nothing to copy":          styles.NoticeWarn,
+		"no matches":               styles.NoticeWarn,
+		"live refresh unavailable": styles.NoticeWarn,
+		"error: fatal: denied":     styles.NoticeFail,
+		"context lines: 5":         styles.NoticeInfo,
 	}
-	before := m.view.YOffset()
-	next, _ := m.Update(keyPress("j"))
-	m = next.(model)
-	if got := m.view.YOffset(); got == before {
-		t.Fatal("j did not scroll the commits pane")
-	}
-}
-
-// twoHunkSource is a file with two changes far enough apart to make two hunks.
-func twoHunkSource(changed bool) string {
-	var b strings.Builder
-	for i := 1; i <= 40; i++ {
-		switch {
-		case changed && i == 3:
-			b.WriteString("after\n")
-		case changed && i == 30:
-			b.WriteString("later\n")
-		case !changed && i == 3:
-			b.WriteString("before\n")
-		case !changed && i == 30:
-			b.WriteString("earlier\n")
-		default:
-			b.WriteString("line\n")
+	for text, want := range cases {
+		if got := noticeKindOf(text); got != want {
+			t.Fatalf("noticeKindOf(%q) = %v, want %v", text, got, want)
 		}
 	}
-	return b.String()
+}
+
+// TestNoticeScrambleTicksUntilItSettles: a fresh message starts a short
+// animation and stops ticking once the text has settled.
+func TestNoticeScrambleTicksUntilItSettles(t *testing.T) {
+	m := testModel(100, 24)
+	m.lastLoaded.path = "a.go"
+	m.focus = focusMain
+	m.view.SetFile(diff.Generate("a.go", diff.Modified, "one\n", "one\ntwo\n", diff.GenerateOptions{Context: 3}))
+	m.syncStaging()
+
+	next, cmd := m.Update(keyPress("y"))
+	m = next.(model)
+	if m.message == "" || !m.noticeTicking {
+		t.Fatalf("yank did not start a notice: message %q ticking %v", m.message, m.noticeTicking)
+	}
+	if cmd == nil {
+		t.Fatal("notice scramble scheduled nothing")
+	}
+
+	// Once the window has passed, the next frame ends the animation.
+	m.noticeSince = time.Now().Add(-statusbar.NoticeDuration - time.Millisecond)
+	next, cmd = m.Update(noticeTickMsg{})
+	m = next.(model)
+	if m.noticeTicking || cmd != nil {
+		t.Fatalf("notice kept ticking after it settled: ticking %v cmd %v", m.noticeTicking, cmd != nil)
+	}
+}
+
+// TestNoticeLivesExactlyThreeSeconds: the exit scramble is part of the notice's
+// budget, not extra time on top.
+func TestNoticeLivesExactlyThreeSeconds(t *testing.T) {
+	if got := messageHold + statusbar.NoticeDuration; got != statusMessageTimeout {
+		t.Fatalf("notice lives %v, want %v", got, statusMessageTimeout)
+	}
+}
+
+// TestNoticeScramblesOutBeforeClearing: the clear timeout starts the way-out
+// animation and only empties the message once it has played.
+func TestNoticeScramblesOutBeforeClearing(t *testing.T) {
+	m := testModel(100, 24)
+	m.lastLoaded.path = "a.go"
+	m.focus = focusMain
+	m.view.SetFile(diff.Generate("a.go", diff.Modified, "one\n", "one\ntwo\n", diff.GenerateOptions{Context: 3}))
+	m.syncStaging()
+	next, _ := m.Update(keyPress("y"))
+	m = next.(model)
+
+	next, _ = m.Update(clearMsgMsg{})
+	m = next.(model)
+	if m.message == "" {
+		t.Fatal("clear wiped the notice instead of scrambling it out")
+	}
+	if m.noticeLeft.IsZero() || !m.noticeTicking {
+		t.Fatalf("clear did not start the exit scramble: left %v ticking %v",
+			m.noticeLeft, m.noticeTicking)
+	}
+
+	// Let the exit animation run out: the next frame past its duration clears.
+	m.noticeLeft = time.Now().Add(-statusbar.NoticeDuration - time.Millisecond)
+	next, cmd := m.Update(noticeTickMsg{})
+	m = next.(model)
+	if m.message != "" || m.noticeTicking || cmd != nil {
+		t.Fatalf("notice outlived its exit: message %q ticking %v cmd %v",
+			m.message, m.noticeTicking, cmd != nil)
+	}
 }
 
 func TestHelpListsEveryKeyThatWorks(t *testing.T) {

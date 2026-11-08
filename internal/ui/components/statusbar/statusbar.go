@@ -45,6 +45,9 @@ type Info struct {
 	Watch string
 	// Message replaces the value segment when set.
 	Message string
+	// Notice replaces Message with a coloured status word and a scrambling
+	// body, which is how every transient message is drawn.
+	Notice *Notice
 }
 
 // HeaderView renders the top bar: gradient logo, project title, flexible
@@ -132,7 +135,9 @@ func (m Model) FooterView(info Info) string {
 
 	maxValue := w - lipgloss.Width(key) - lipgloss.Width(watchSeg) - lipgloss.Width(infoSeg) - lipgloss.Width(help)
 	var value string
-	if info.Message != "" {
+	if info.Notice != nil {
+		value = m.noticeSegment(*info.Notice, max(0, maxValue))
+	} else if info.Message != "" {
 		msg := ansi.Truncate(" "+info.Message+" ", max(0, maxValue), "…")
 		pad := max(0, maxValue-lipgloss.Width(msg))
 		value = st.FooterMessage().Render(msg + strings.Repeat(" ", pad))

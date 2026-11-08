@@ -30,7 +30,12 @@ import (
 )
 
 const (
+	// statusMessageTimeout is how long a notice lives in total: the text rests
+	// for messageHold, then scrambles out for the notice duration.
 	statusMessageTimeout = time.Second * 3
+	// messageHold is the rest before the exit scramble starts, so the whole
+	// notice, exit included, still costs statusMessageTimeout.
+	messageHold = statusMessageTimeout - statusbar.NoticeDuration
 	// prefetchRadius is how many neighbouring files are queued ahead of the cursor.
 	prefetchRadius = 2
 )
@@ -133,6 +138,12 @@ type model struct {
 	// reloadPending marks a refresh that must re-read the file on screen.
 	reloadPending bool
 	message       string
+	// noticeKind, noticeSince and noticeTicking drive the footer notice: the
+	// colour family, when it arrived, and whether its scramble is still running.
+	noticeKind    styles.NoticeKind
+	noticeSince   time.Time
+	noticeLeft    time.Time
+	noticeTicking bool
 	// searchApplied keeps the query on screen, muted, after the input closes.
 	searchApplied bool
 	err           error
@@ -291,6 +302,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if (nm.loading() || nm.pushing) && !nm.spinnerTicking {
 		nm.spinnerTicking = true
 		cmd = tea.Batch(cmd, nm.spinner.Tick)
+	}
+	// A fresh message gets its notice colour and a scramble, which the ticks
+	// below animate until the text settles.
+	if nm.message != m.message {
+		nm.noticeKind = noticeKindOf(nm.message)
+		nm.noticeSince = time.Now()
+		nm.noticeLeft = time.Time{}
+		nm.noticeTicking = nm.message != ""
+		if nm.noticeTicking {
+			cmd = tea.Batch(cmd, noticeTick())
+		}
 	}
 	// The staging cursor is an affordance, not a mode: offered where staging is
 	// possible, and kept across the reload an operation triggers.
@@ -839,8 +861,33 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, setMessageCmd(m.message)
 
 	case clearMsgMsg:
-		m.message = ""
+		if m.message == "" {
+			return m, nil
+		}
+		// A notice scrambles out before it goes: the message stays on screen
+		// while the body dissolves, then the footer takes its segment back.
+		m.noticeLeft = time.Now()
+		if !m.noticeTicking {
+			m.noticeTicking = true
+			return m, noticeTick()
+		}
 		return m, nil
+
+	case noticeTickMsg:
+		if !m.noticeLeft.IsZero() {
+			if time.Since(m.noticeLeft) >= statusbar.NoticeDuration {
+				m.message = ""
+				m.noticeLeft = time.Time{}
+				m.noticeTicking = false
+				return m, nil
+			}
+			return m, noticeTick()
+		}
+		if time.Since(m.noticeSince) >= statusbar.NoticeDuration {
+			m.noticeTicking = false
+			return m, nil
+		}
+		return m, noticeTick()
 
 	case tea.MouseWheelMsg:
 		return m.updateWheel(msg)
@@ -1400,9 +1447,11 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, setMessageCmd(m.message)
 	case key.Matches(msg, m.keys.YankHunk):
 		if patch := m.view.CurrentHunkPatch(); patch != "" {
-			return m, tea.SetClipboard(patch)
+			m.message = "copied hunk"
+			return m, tea.Batch(tea.SetClipboard(patch), setMessageCmd(m.message))
 		}
-		return m, nil
+		m.message = "nothing to copy"
+		return m, setMessageCmd(m.message)
 	case key.Matches(msg, m.keys.ToggleWS):
 		m.cfg.IgnoreWhitespace = !m.cfg.IgnoreWhitespace
 		m.message = "ignore whitespace " + onOff(m.cfg.IgnoreWhitespace)
@@ -2275,8 +2324,50 @@ func pushCmd() tea.Cmd {
 	}
 }
 
+// noticeKindOf classifies a footer message into a notice colour family. Every
+// site already names its outcome in the text, so the text is the classifier.
+func noticeKindOf(text string) styles.NoticeKind {
+	switch {
+	case text == "":
+		return styles.NoticeInfo
+	case looksLikeFailure(text):
+		return styles.NoticeFail
+	case strings.HasPrefix(text, "nothing"), strings.HasPrefix(text, "no "),
+		strings.Contains(text, "unavailable"):
+		return styles.NoticeWarn
+	case strings.HasPrefix(text, "copied"), strings.HasPrefix(text, "committed"),
+		strings.HasPrefix(text, "undid"), strings.HasPrefix(text, "staged"),
+		strings.HasPrefix(text, "unstaged"), strings.HasPrefix(text, "discarded"),
+		text == "pushed!":
+		return styles.NoticeOkay
+	default:
+		return styles.NoticeInfo
+	}
+}
+
+// looksLikeFailure reports whether a message came from an error, which every
+// other classification must not claim as an ordinary notice.
+func looksLikeFailure(text string) bool {
+	for _, word := range []string{
+		"error", "failed", "fatal", "invalid", "denied", "refused", "unable",
+		"cannot", "no such", "not found", "conflict", "timeout", "panic",
+	} {
+		if strings.Contains(strings.ToLower(text), word) {
+			return true
+		}
+	}
+	return false
+}
+
+// noticeTick asks the model for the next scramble frame.
+func noticeTick() tea.Cmd {
+	return tea.Tick(statusbar.NoticeDuration/10, func(time.Time) tea.Msg {
+		return noticeTickMsg{}
+	})
+}
+
 func setMessageCmd(string) tea.Cmd {
-	return tea.Tick(statusMessageTimeout, func(time.Time) tea.Msg {
+	return tea.Tick(messageHold, func(time.Time) tea.Msg {
 		return clearMsgMsg{}
 	})
 }
