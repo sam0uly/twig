@@ -860,6 +860,39 @@ func TestBorderedSidebarKeepsActiveColors(t *testing.T) {
 	}
 }
 
+func TestCommitsTabHighlightsReadingRowAndCopiesDrag(t *testing.T) {
+	m := testModel(120, 24)
+	m.files.SetTab(filelist.TabCommits)
+	m.setSize()
+	files := []*diff.File{
+		diff.Generate("a.go", diff.Modified, "one\n", "one changed\n", diff.GenerateOptions{Context: 3}),
+		diff.Generate("b.go", diff.Modified, "two\n", "two changed\n", diff.GenerateOptions{Context: 3}),
+	}
+	m.applyCommit(git.Commit{Hash: "1", Short: "abc1234", Subject: "one", Author: "sam", When: "now"},
+		diff.Aggregate(files), files)
+	m.view.SetNotes([]string{"commit metadata", "subject"})
+	m.focus = focusMain
+	m.syncStaging()
+	if m.view.ReadRow() != 0 {
+		t.Fatalf("commits rail marks row %d, want the commit metadata at 0", m.view.ReadRow())
+	}
+	if !strings.Contains(m.view.View(), m.styles.CursorBar().Render("┃")) {
+		t.Fatal("commits reading rail is not painted")
+	}
+
+	x := m.mainRect.Min.X + 2
+	y := m.mainRect.Min.Y + m.paneInset()
+	next, _ := m.Update(tea.MouseClickMsg{X: x, Y: y})
+	m = next.(model)
+	next, _ = m.Update(tea.MouseMotionMsg{X: x, Y: y + 2, Button: tea.MouseLeft})
+	m = next.(model)
+	next, cmd := m.Update(tea.MouseReleaseMsg{X: x, Y: y + 2, Button: tea.MouseLeft})
+	m = next.(model)
+	if cmd == nil || !strings.Contains(m.message, "copied") {
+		t.Fatalf("mouse drag did not copy: message %q, cmd %v", m.message, cmd != nil)
+	}
+}
+
 func TestMainPaneClickFocusesDiff(t *testing.T) {
 	m := testModel(120, 24)
 	m.focus = focusSidebar
