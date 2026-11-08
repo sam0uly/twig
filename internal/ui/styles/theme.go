@@ -290,14 +290,16 @@ func New() Styles {
 	s.headerBranch = lipgloss.NewStyle().
 		Foreground(tone.Salt).Background(tone.Pom).Padding(0, 1)
 
+	// The footer key pills name the page: Hazy behind Salt, the one loud
+	// segment of the bar.
 	s.footerKeyFiles = lipgloss.NewStyle().
-		Bold(true).Foreground(tone.Salt).Background(tone.Grape).Padding(0, 1)
+		Bold(true).Foreground(tone.Salt).Background(tone.Hazy).Padding(0, 1)
 	s.footerKeyDiff = lipgloss.NewStyle().
-		Bold(true).Foreground(tone.Salt).Background(tone.Dolly).Padding(0, 1)
+		Bold(true).Foreground(tone.Salt).Background(tone.Hazy).Padding(0, 1)
 	s.footerKeyCommits = lipgloss.NewStyle().
-		Bold(true).Foreground(tone.Salt).Background(tone.Plum).Padding(0, 1)
+		Bold(true).Foreground(tone.Salt).Background(tone.Hazy).Padding(0, 1)
 	s.footerKeyCommit = lipgloss.NewStyle().
-		Bold(true).Foreground(tone.Salt).Background(tone.Orchid).Padding(0, 1)
+		Bold(true).Foreground(tone.Salt).Background(tone.Hazy).Padding(0, 1)
 
 	s.footerValue = lipgloss.NewStyle().
 		Foreground(tone.Salt).Background(tone.BBQ)

@@ -1299,24 +1299,43 @@ func TestHeaderCountsFlankTheBranchSegment(t *testing.T) {
 func TestTopBarSegmentsUseSalt(t *testing.T) {
 	st := styles.New()
 	for name, style := range map[string]lipgloss.Style{
-		"tab":         st.HeaderTab(),
-		"active tab":  st.HeaderTabActive(),
-		"adds":        st.HeaderAdds(),
-		"dels":        st.HeaderDels(),
-		"files key":   st.FooterKeyFiles(),
-		"diff key":    st.FooterKeyDiff(),
-		"commits key": st.FooterKeyCommits(),
-		"commit key":  st.FooterKeyCommit(),
-		"value":       st.FooterValue(),
-		"info":        st.FooterInfo(),
-		"help":        st.FooterHelp(),
-		"message":     st.FooterMessage(),
+		"tab":        st.HeaderTab(),
+		"active tab": st.HeaderTabActive(),
+		"adds":       st.HeaderAdds(),
+		"dels":       st.HeaderDels(),
+		"value":      st.FooterValue(),
+		"info":       st.FooterInfo(),
+		"help":       st.FooterHelp(),
+		"message":    st.FooterMessage(),
 	} {
 		got := style.GetForeground()
 		gr, gg, gb, _ := got.RGBA()
 		wr, wg, wb, _ := tone.Salt.RGBA()
 		if gr != wr || gg != wg || gb != wb {
 			t.Fatalf("%s foreground = %v, want Salt", name, got)
+		}
+	}
+}
+
+// TestFooterKeyPillsUseHazy: the page pill is Hazy behind Salt, whichever page
+// it names.
+func TestFooterKeyPillsUseHazy(t *testing.T) {
+	st := styles.New()
+	for name, style := range map[string]lipgloss.Style{
+		"files":   st.FooterKeyFiles(),
+		"diff":    st.FooterKeyDiff(),
+		"commits": st.FooterKeyCommits(),
+		"commit":  st.FooterKeyCommit(),
+	} {
+		gr, gg, gb, _ := style.GetForeground().RGBA()
+		wr, wg, wb, _ := tone.Salt.RGBA()
+		if gr != wr || gg != wg || gb != wb {
+			t.Fatalf("%s pill foreground = %v, want Salt", name, style.GetForeground())
+		}
+		gr, gg, gb, _ = style.GetBackground().RGBA()
+		wr, wg, wb, _ = tone.Hazy.RGBA()
+		if gr != wr || gg != wg || gb != wb {
+			t.Fatalf("%s pill background = %v, want Hazy", name, style.GetBackground())
 		}
 	}
 }
