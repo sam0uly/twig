@@ -1407,9 +1407,11 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, setMessageCmd(m.message)
 	case key.Matches(msg, m.keys.YankHunk):
 		if patch := m.view.CurrentHunkPatch(); patch != "" {
-			return m, tea.SetClipboard(patch)
+			m.message = "copied hunk"
+			return m, tea.Batch(tea.SetClipboard(patch), setMessageCmd(m.message))
 		}
-		return m, nil
+		m.message = "nothing to copy"
+		return m, setMessageCmd(m.message)
 	case key.Matches(msg, m.keys.ToggleWS):
 		m.cfg.IgnoreWhitespace = !m.cfg.IgnoreWhitespace
 		m.message = "ignore whitespace " + onOff(m.cfg.IgnoreWhitespace)

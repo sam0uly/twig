@@ -117,6 +117,26 @@ func TestFoldKeyTogglesCommitMetadata(t *testing.T) {
 
 // TestHelpListsEveryKeyThatWorks keeps the reference honest: a key the model
 // handles but the help omits is a key the reader has to remember.
+// TestYankHunkSaysWhatItCopied: every yank reports through the footer, so the
+// hunk key must not be the one silent case.
+func TestYankHunkSaysWhatItCopied(t *testing.T) {
+	m := testModel(120, 24)
+	m.lastLoaded.path = "a.go"
+	m.focus = focusMain
+	m.view.SetFile(diff.Generate("a.go", diff.Modified,
+		"one\n", "one\ntwo\n", diff.GenerateOptions{Context: 3}))
+	m.syncStaging()
+
+	next, cmd := m.Update(keyPress("Y"))
+	got := next.(model)
+	if got.message != "copied hunk" {
+		t.Fatalf("hunk yank said %q, want a notification", got.message)
+	}
+	if cmd == nil {
+		t.Fatal("hunk yank scheduled nothing")
+	}
+}
+
 // TestNoticesPickTheirTone: the footer notice draws its colour from the kind of
 // outcome the message names.
 func TestNoticesPickTheirTone(t *testing.T) {
