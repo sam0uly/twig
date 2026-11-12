@@ -43,6 +43,15 @@ type commitLoadedMsg struct {
 	err    error
 }
 
+// pinnedLoadedMsg carries the diff a startup ref asked for: a commit or a
+// range, which has no live worktree behind it to refresh against.
+type pinnedLoadedMsg struct {
+	src   git.Source
+	file  *diff.File
+	files []*diff.File
+	err   error
+}
+
 // repoInfoMsg carries the repository label. Resolving it opens the repository
 // and decodes HEAD, which takes seconds on a large one, so it arrives after the
 // first frame instead of in front of it.

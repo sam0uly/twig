@@ -513,13 +513,12 @@ func (d *blockDoc) setMode(split bool) {
 }
 
 // setPre replaces the rows rendered above the document, which only a single-file
-// document has; their number is fixed, so line offsets stay valid.
+// document has. Their number can change: a note wraps into more rows in a
+// narrow window than in a wide one. The caller re-runs the row arithmetic
+// afterwards, so the offsets below stay valid.
 func (d *blockDoc) setPre(pre []contentRow, preTxt []string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if len(pre) != len(d.pre) {
-		return
-	}
 	d.pre = pre
 	d.preTxt = preTxt
 	d.measurePre()

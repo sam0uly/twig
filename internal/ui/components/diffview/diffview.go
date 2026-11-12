@@ -271,6 +271,11 @@ func (m *Model) SetSize(width, height int) {
 	m.vp.SetWidth(m.vpWidth())
 	m.vp.SetHeight(m.vpHeight())
 	if changed && m.file != nil {
+		// Note rows are wrapped when they are set, so a window that changes
+		// width has to wrap them again: a document first measured at one cell
+		// would otherwise keep one character per row forever.
+		m.refreshNoteRows()
+		m.gut.notes = len(m.noteRows)
 		// Line backgrounds are padded to the viewport width.
 		m.rebuild()
 	}
@@ -1694,9 +1699,10 @@ func (m *Model) rebuild() {
 	m.updateGutterWidth()
 	if m.doc != nil {
 		m.doc.setMode(m.split)
-		if m.doc.single() {
-			m.doc.setPre(m.preRows(m.file), m.preText(m.file))
-		}
+		// The rows above the document are replaced every time: a note wraps
+		// into a different number of rows when the window changes width, and a
+		// document built from one file has to follow that.
+		m.doc.setPre(m.preRows(m.file), m.preText(m.file))
 		m.rebuildNav()
 		m.rebuildDoc()
 		return
