@@ -459,13 +459,20 @@ func (m model) applyStageDone(msg stageDoneMsg) (tea.Model, tea.Cmd) {
 	}
 
 	fileScope := msg.scope == "file"
-	if fileScope {
+	dirScope := msg.scope == "dir"
+	switch {
+	case fileScope:
 		// A whole file has just been dealt with, so the next thing to look at
 		// is the next file. Staying on this one means staring at a file that is
 		// no longer the job.
 		m.advanceList = true
 		m.stageAnchor = nil
-	} else {
+	case dirScope:
+		// The folder is the thing that was dealt with, so the reader stays on
+		// it. Its files have all moved sides, which is why the pane lets go of
+		// its cursor instead of restoring it onto a diff that may be gone.
+		m.stageAnchor = nil
+	default:
 		anchor := msg.anchor
 		m.stageAnchor = &anchor
 		m.anchorWait = true
@@ -488,7 +495,7 @@ func (m model) applyStageDone(msg stageDoneMsg) (tea.Model, tea.Cmd) {
 		nm.message = m.message
 		return nm, tea.Batch(loadStatusCmd(false), cmd, setMessageCmd(nm.message))
 	}
-	if fileScope {
+	if fileScope || dirScope {
 		return m, tea.Batch(loadStatusCmd(false), setMessageCmd(m.message))
 	}
 
@@ -519,6 +526,15 @@ func doneMessage(msg stageDoneMsg) string {
 	// A whole file has no line count worth reporting; naming it says more.
 	if msg.scope == "file" && msg.path != "" {
 		return past + " " + msg.path
+	}
+	// A folder is named by how many files it moved, which is the only count the
+	// reader can check against the listing.
+	if msg.scope == "dir" && msg.path != "" {
+		unit := "files"
+		if msg.files == 1 {
+			unit = "file"
+		}
+		return fmt.Sprintf("%s %d %s in %s", past, msg.files, unit, msg.path)
 	}
 	n := msg.lines
 	unit := "line"

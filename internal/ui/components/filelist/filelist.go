@@ -39,12 +39,16 @@ type fileItem struct {
 func (i fileItem) FilterValue() string { return i.status.Path }
 
 // treeDirItem is a directory row in tree mode. Directories are selectable so
-// they can be expanded and collapsed, but they never load a diff.
+// they can be expanded and collapsed, and so a staging operation can name a
+// folder instead of one file; they never load a diff.
 type treeDirItem struct {
 	path      string
 	name      string
 	prefix    string
 	collapsed bool
+	// staged is the section the row sits in, so a folder that holds changes on
+	// both sides is two rows and each one means its own half.
+	staged bool
 }
 
 func (d treeDirItem) FilterValue() string { return d.path }
@@ -303,6 +307,7 @@ func buildTreeItems(files []git.FileStatus, staged bool, collapsed map[string]bo
 					name:      n.name,
 					prefix:    prefix + conn,
 					collapsed: collapsed[n.path],
+					staged:    staged,
 				})
 				if !collapsed[n.path] {
 					walk(n.children, childPrefix)
@@ -498,6 +503,38 @@ func (m *Model) SelectedFile() (git.FileStatus, bool) {
 		return f.status, f.staged
 	}
 	return git.FileStatus{}, false
+}
+
+// SelectedDir names the folder row under the cursor, with the section it sits
+// in. Only the tree draws folders, and only the Files tab stages, so the flat
+// listing and the commits tab never answer.
+func (m *Model) SelectedDir() (path string, staged bool, ok bool) {
+	if m.tab != TabFiles || !m.tree {
+		return "", false, false
+	}
+	if d, isDir := m.files.SelectedItem().(treeDirItem); isDir {
+		return d.path, d.staged, true
+	}
+	return "", false, false
+}
+
+// FilesUnder lists the changed files a folder covers on one side. Collapse and
+// the sidebar filter are ignored: a folder that is folded away still holds the
+// files a staging operation means, and a filter is a way of looking, not a
+// smaller working tree.
+func (m *Model) FilesUnder(dir string, staged bool) []git.FileStatus {
+	src := m.unstaged
+	if staged {
+		src = m.staged
+	}
+	prefix := dir + "/"
+	var out []git.FileStatus
+	for _, f := range src {
+		if strings.HasPrefix(f.Path, prefix) {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // selectAnySide moves the cursor to any row of a path, whichever side it shows.

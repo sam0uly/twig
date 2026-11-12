@@ -81,7 +81,7 @@ Search and the list filters run as you type, and `esc` clears either.
 | `V`                      | select a range, extended with `j` / `k`         |
 | `z`                      | undo the last staging operation                 |
 | `x`                      | discard what the cursor is on                   |
-| `s` / `u`                | stage / unstage the whole file                  |
+| `s` / `u`                | stage / unstage the whole file or folder        |
 | `C` / `P`                | commit / push                                   |
 | `y` / `Y`                | copy the patch / the hunk                       |
 | `v` / `w`                | split view / soft wrap                          |
@@ -112,6 +112,10 @@ acts on. In `a` the block picks the file and its two bands name the side
 (`── semi.txt · staged`) or a `side-labels` glyph. `space` writes, `z` reverses;
 `stage-apply: select` marks, `enter` applies, `esc` clears; the `-` and `+` halves of
 a replacement move together.
+
+In `t` a folder is a row, and `s` / `u` cover every file under it, however deep,
+even folded away or filtered out. A folder with changes on both sides gets one
+row per section; the footer reports how many files moved.
 
 No patches: twig builds the new content, writes it with
 [`hash-object`][git hash-object] `-w` and records it with

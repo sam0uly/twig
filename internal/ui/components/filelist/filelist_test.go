@@ -470,3 +470,51 @@ func TestSelectSideNeverCrossesSides(t *testing.T) {
 		t.Fatal("the cursor landed on a side that does not exist")
 	}
 }
+
+// TestFilesUnderCoversTheWholeFolder pins what a folder means to a staging
+// operation: everything below it on its own side, at any depth, whatever the
+// tree is collapsed or filtered to.
+func TestFilesUnderCoversTheWholeFolder(t *testing.T) {
+	m := New(40, 20, styles.New())
+	m.SetFiles(
+		[]git.FileStatus{{Path: "src/staged.go", Letter: "M"}},
+		[]git.FileStatus{
+			{Path: "src/a.go", Letter: "M"},
+			{Path: "src/deep/b.go", Letter: "M"},
+			{Path: "srcsibling.go", Letter: "M"},
+			{Path: "other/c.go", Letter: "M"},
+		},
+	)
+	m.SetTree(true)
+	// Collapse the folder: a folded row still covers the files inside it.
+	m.SelectDir("src")
+	if !m.ToggleSelectedDir() {
+		t.Fatal("the folder row was not selected")
+	}
+
+	unstaged := m.FilesUnder("src", false)
+	if len(unstaged) != 2 {
+		t.Fatalf("%d unstaged files under src, want 2", len(unstaged))
+	}
+	for _, f := range unstaged {
+		if f.Path == "srcsibling.go" || f.Path == "other/c.go" {
+			t.Fatalf("%q is outside the folder", f.Path)
+		}
+	}
+
+	staged := m.FilesUnder("src", true)
+	if len(staged) != 1 || staged[0].Path != "src/staged.go" {
+		t.Fatalf("staged side under src = %+v, want only src/staged.go", staged)
+	}
+
+	// The selected folder row names its own side, so the caller can tell which
+	// half of a doubly staged folder it is looking at.
+	m.SelectDir("src")
+	path, side, ok := m.SelectedDir()
+	if !ok || path != "src" {
+		t.Fatalf("SelectedDir = %q %v, want src", path, ok)
+	}
+	if side != true {
+		t.Fatal("the first folder row should be the staged one")
+	}
+}

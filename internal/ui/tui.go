@@ -1869,6 +1869,9 @@ func blockLoader(entries []filelist.Entry, opts git.Options) func(i int) *diff.F
 }
 
 func (m model) toggleStage(staged bool) (tea.Model, tea.Cmd) {
+	if dir, dirStaged, ok := m.files.SelectedDir(); ok {
+		return m.stageDir(dir, dirStaged, staged)
+	}
 	fs, isStaged := m.files.SelectedFile()
 	if fs.Path == "" {
 		return m, nil
@@ -1878,6 +1881,22 @@ func (m model) toggleStage(staged bool) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, stageCmd(fs.Path, staged)
+}
+
+// stageDir stages or unstages a whole folder. The row already says which side
+// its files are on, so asking for that same side is asking for nothing.
+func (m model) stageDir(dir string, dirStaged, want bool) (tea.Model, tea.Cmd) {
+	switch {
+	case dirStaged && want:
+		return m.notify("already staged: " + dir)
+	case !dirStaged && !want:
+		return m.notify("nothing staged in " + dir)
+	}
+	files := m.files.FilesUnder(dir, dirStaged)
+	if len(files) == 0 {
+		return m.notify("nothing to " + stagingVerb(want) + " in " + dir)
+	}
+	return m, stageDirCmd(dir, want, len(files))
 }
 
 func (m model) startCompose() (tea.Model, tea.Cmd) {
@@ -2342,6 +2361,23 @@ func stageCmd(path string, staged bool) tea.Cmd {
 			err = git.Unstage(path)
 		}
 		return stageDoneMsg{staged: staged, op: op, path: path, scope: "file", err: err}
+	}
+}
+
+// stageDirCmd stages or unstages every file under a folder in one git call. The
+// scope is "dir", so the reader stays where they are: the folder they just
+// dealt with is the thing to look at, unlike a file, which is done.
+func stageDirCmd(path string, staged bool, files int) tea.Cmd {
+	return func() tea.Msg {
+		var err error
+		op := "stage"
+		if staged {
+			err = git.Stage(path)
+		} else {
+			op = "unstage"
+			err = git.Unstage(path)
+		}
+		return stageDoneMsg{staged: staged, op: op, path: path, scope: "dir", files: files, err: err}
 	}
 }
 

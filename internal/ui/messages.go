@@ -83,12 +83,15 @@ type stageDoneMsg struct {
 	staged bool
 	// op is "stage", "unstage" or "discard".
 	op string
-	// path is the file the operation touched.
+	// path is the file or folder the operation touched.
 	path string
-	// scope is what the cursor covered: "file", "hunk", "line" or "range".
+	// scope is what the cursor covered: "file", "dir", "hunk", "line" or
+	// "range".
 	scope string
 	// lines is how many changed lines moved.
 	lines int
+	// files is how many paths a folder operation covered.
+	files int
 	// undo reverses the operation exactly.
 	undo git.Undo
 	// anchor is where the reader was, so the reload can put them back.
