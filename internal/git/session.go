@@ -160,9 +160,20 @@ func runGitIO(dir string, stdin []byte, write bool, args ...string) (stdout, std
 		if msg == "" {
 			msg = err.Error()
 		}
+		if isUnknownRef(msg) {
+			return "", errBuf.String(), fmt.Errorf("%w: %s", ErrUnknownRef, msg)
+		}
 		return "", errBuf.String(), fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
 	}
 	return outBuf.String(), errBuf.String(), nil
+}
+
+// isUnknownRef recognises git's message for a revision that names nothing, so
+// the caller can say "no such ref" instead of quoting a command line.
+func isUnknownRef(stderr string) bool {
+	return strings.Contains(stderr, "unknown revision") ||
+		strings.Contains(stderr, "ambiguous argument") ||
+		strings.Contains(stderr, "bad revision")
 }
 
 // gitEnv is the environment every git child inherits. A read-only command asks

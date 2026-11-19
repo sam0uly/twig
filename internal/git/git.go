@@ -17,6 +17,11 @@ import (
 // git work tree.
 var ErrNotARepository = errors.New("not inside a git repository")
 
+// ErrUnknownRef is returned when a ref names nothing in this repository. It is
+// a mistyped argument rather than a repository failure, so callers can say that
+// instead of quoting a git command line.
+var ErrUnknownRef = errors.New("unknown ref")
+
 // SourceKind identifies which changes are being viewed.
 type SourceKind int
 
@@ -36,7 +41,38 @@ const (
 type Source struct {
 	Ref1 string
 	Ref2 string
-	Kind SourceKind
+	// Paths limits the view to these paths, the way git's pathspec does: a path
+	// selects itself, a directory selects everything under it. Empty means all.
+	Paths []string
+	Kind  SourceKind
+}
+
+// Matches reports whether a path belongs to the source's pathspec.
+func (s Source) Matches(path string) bool {
+	if len(s.Paths) == 0 {
+		return true
+	}
+	for _, want := range s.Paths {
+		want = strings.TrimSuffix(want, "/")
+		if want == "" || path == want || strings.HasPrefix(path, want+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// Filter narrows a file list to the source's pathspec.
+func (s Source) Filter(files []*diff.File) []*diff.File {
+	if len(s.Paths) == 0 {
+		return files
+	}
+	kept := files[:0]
+	for _, f := range files {
+		if s.Matches(f.Path()) {
+			kept = append(kept, f)
+		}
+	}
+	return kept
 }
 
 // Describe returns a short human readable description of the source.
@@ -51,6 +87,19 @@ func (s Source) Describe() string {
 	default:
 		return "worktree"
 	}
+}
+
+// Pinned reports whether the source is a fixed diff rather than the live
+// working tree. A commit or a range has nothing to write back to and nothing to
+// refresh against, so the viewer treats it as a document to read.
+func (s Source) Pinned() bool {
+	return s.Kind == SourceCommit || s.Kind == SourceRange
+}
+
+// StagedOnly reports whether only the index side of the working tree is in
+// play, which is what --staged asks for.
+func (s Source) StagedOnly() bool {
+	return s.Kind == SourceStaged
 }
 
 // Options controls how the diff is produced.
@@ -110,6 +159,7 @@ func Diff(src Source, opts Options) (*diff.Diff, error) {
 	if err != nil {
 		return nil, err
 	}
+	files = src.Filter(files)
 
 	d := &diff.Diff{Files: files}
 	for _, f := range files {
@@ -136,6 +186,29 @@ func (rc *repoContext) rangeFiles(fromRef, toRef string, opts Options) ([]*diff.
 		return nil, fmt.Errorf("diff %q..%q: %w", fromRef, toRef, err)
 	}
 	return rc.patchFiles(out, opts)
+}
+
+// RefNames lists the refs a diff can name: HEAD, local branches, tags and
+// remote branches, in the order git prints them. It is what shell completion
+// offers for the positional argument.
+func RefNames() ([]string, error) {
+	rc, err := open()
+	if err != nil {
+		return nil, err
+	}
+	out, err := rc.git("for-each-ref", "--format=%(refname:short)",
+		"refs/heads", "refs/tags", "refs/remotes")
+	if err != nil {
+		return nil, err
+	}
+
+	names := []string{"HEAD"}
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			names = append(names, line)
+		}
+	}
+	return names, nil
 }
 
 // Log returns the most recent commits, most recent first.

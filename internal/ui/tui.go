@@ -38,6 +38,9 @@ const (
 	messageHold = statusMessageTimeout - statusbar.NoticeDuration
 	// prefetchRadius is how many neighbouring files are queued ahead of the cursor.
 	prefetchRadius = 2
+	// readOnlyNotice is what a write key says over a commit or a range: there
+	// is no index behind that diff to write to.
+	readOnlyNotice = "this diff is read only"
 )
 
 // Options configures the TUI.
@@ -47,6 +50,10 @@ type Options struct {
 	ConfigPath    string
 	Source        git.Source
 	ShowLogPicker bool
+	// Document is a diff read from outside the repository, which is what the
+	// pager hands over: there is no worktree behind it, so nothing refreshes,
+	// nothing is staged, and no ref can be reloaded.
+	Document *diff.Diff
 }
 
 type state int
@@ -93,8 +100,17 @@ type model struct {
 	cfgStamp      string
 	configTicking bool
 	src           git.Source
-	branch        string
-	project       string
+	// pinned is true when the viewer was opened on a commit or a range: there is
+	// no live worktree behind that diff, so it is read only and never refreshes.
+	pinned bool
+	// fromStdin marks a document read on standard input: no repository to poll,
+	// watch or read a log from, and no ref to reload.
+	fromStdin bool
+	// pendingDoc is a document waiting for the first window size, which is the
+	// only width its notes can be wrapped at.
+	pendingDoc *diff.Diff
+	branch     string
+	project    string
 
 	width, height int
 	styles        styles.Styles
@@ -250,6 +266,7 @@ func newModel(opts Options, branch, project string) model {
 		cfgPath:    opts.ConfigPath,
 		cfgStamp:   configStamp(opts.ConfigPath),
 		src:        opts.Source,
+		pinned:     opts.Source.Pinned() || opts.Document != nil,
 		branch:     branch,
 		project:    project,
 		styles:     st,
@@ -269,6 +286,10 @@ func newModel(opts Options, branch, project string) model {
 	m.view.SetSplit(opts.Config.SplitView)
 	m.view.SetSyntax(opts.Config.Syntax)
 	m.view.SetBorderless(opts.Config.Borderless)
+	// A document from standard input is applied once the window size is known:
+	// laying it out at a width twig has not been told yet wraps every note into
+	// one character per row.
+	m.pendingDoc = opts.Document
 	if opts.ShowLogPicker {
 		m.files.SetTab(filelist.TabCommits)
 	}
@@ -276,6 +297,19 @@ func newModel(opts Options, branch, project string) model {
 }
 
 func (m model) Init() tea.Cmd {
+	if m.fromStdin {
+		// Nothing on standard input can be reloaded, watched or staged.
+		return tea.Batch(tea.RequestBackgroundColor, configTick())
+	}
+	if m.pinned {
+		// A commit or a range is a fixed diff: no status poll, no watcher, no log.
+		return tea.Batch(
+			tea.RequestBackgroundColor,
+			loadRepoInfoCmd(),
+			loadPinnedCmd(m.src, m.diffOptions()),
+			configTick(),
+		)
+	}
 	return tea.Batch(
 		tea.RequestBackgroundColor,
 		loadRepoInfoCmd(),
@@ -364,6 +398,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.setSize()
+		if m.pendingDoc != nil {
+			// The width is known now, so the notes wrap into the rows they
+			// belong in and the document can be laid out for good.
+			doc := m.pendingDoc
+			m.pendingDoc = nil
+			m.applyDocument(doc)
+		}
 		return m, nil
 
 	case statusLoadedMsg:
@@ -394,7 +435,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The working tree changed: previously generated file diffs are stale.
 		m.cache.Clear()
 		m.loaded = true
-		m.files.SetFiles(msg.staged, msg.unstaged)
+		staged, unstaged := msg.staged, msg.unstaged
+		if m.src.StagedOnly() {
+			// --staged means the index, so the rows that describe work left in
+			// the working tree have no business in the listing.
+			unstaged = nil
+		}
+		m.files.SetFiles(m.withinPaths(staged), m.withinPaths(unstaged))
 		if m.advanceList {
 			// A whole file was dealt with: move on to the next one, so the next
 			// keystroke lands on the next piece of work instead of on a file
@@ -850,6 +897,15 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case pinnedLoadedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.state = stateFatal
+			return m, nil
+		}
+		m.applyPinned(msg.src, msg.file, msg.files)
+		return m, nil
+
 	case stageDoneMsg:
 		return m.applyStageDone(msg)
 
@@ -1008,7 +1064,7 @@ func (m *model) applyView(msg tea.Msg) tea.Cmd {
 
 // autoLoadFile loads the selected file's diff so the pane never goes stale.
 func (m model) autoLoadFile() (tea.Model, tea.Cmd) {
-	if m.files.Tab() != filelist.TabFiles || m.allChanges {
+	if m.files.Tab() != filelist.TabFiles || m.allChanges || m.pinned {
 		return m, nil
 	}
 	fs, _ := m.files.SelectedFile()
@@ -1089,6 +1145,57 @@ func (m *model) applyCommit(c git.Commit, f *diff.File, files []*diff.File) {
 	m.files.SetCommitFiles(files)
 	m.view.SetNotes(commitNotes(m.styles, c, files))
 	m.view.SetFile(f)
+}
+
+// withinPaths drops the rows outside the pathspec the command line named, so a
+// directory argument narrows the listing the same way it narrows a document.
+func (m model) withinPaths(rows []git.FileStatus) []git.FileStatus {
+	if len(m.src.Paths) == 0 {
+		return rows
+	}
+	kept := rows[:0]
+	for _, row := range rows {
+		if m.src.Matches(row.Path) {
+			kept = append(kept, row)
+		}
+	}
+	return kept
+}
+
+// applyPinned shows a commit or a range as one read-only document: the listing
+// is the source's own file list, and the pane already holds every file's diff,
+// the way the all-changes view does.
+func (m *model) applyPinned(src git.Source, f *diff.File, files []*diff.File) {
+	m.src = src
+	m.applyDiff(src.Describe(), f, files, nil)
+}
+
+// applyDocument shows a diff that came from standard input.
+func (m *model) applyDocument(d *diff.Diff) {
+	m.fromStdin = true
+	m.applyDiff("stdin", diff.Aggregate(d.Files), d.Files, d.Preamble)
+}
+
+// applyDiff shows a finished document: the listing is its file list, and the
+// pane already holds every file's rows.
+func (m *model) applyDiff(label string, f *diff.File, files []*diff.File, preamble []string) {
+	m.pinned = true
+	m.loaded = true
+	m.files.SetFiles(nil, statusRows(files))
+	m.d = &diff.Diff{Additions: f.Additions, Deletions: f.Deletions}
+	m.view.SetNotes(documentNotes(m.styles, label, files, preamble))
+	m.view.SetFile(f)
+	m.setSize()
+}
+
+// statusRows is the sidebar listing for a diff that did not come from the
+// worktree: the path, where a rename came from, and the letter git uses.
+func statusRows(files []*diff.File) []git.FileStatus {
+	rows := make([]git.FileStatus, len(files))
+	for i, file := range files {
+		rows[i] = git.FileStatus{Path: file.Path(), OldPath: file.OldPath, Letter: string(file.Kind)}
+	}
+	return rows
 }
 
 // applyCommitLazy shows a large commit as a virtual document: each file is
@@ -1740,10 +1847,11 @@ func (m model) updateSidebar(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m model) followSelection(extra tea.Cmd) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
-	// In the all-changes view the pane already holds every diff: following a
-	// selection moves the cursor into that file's block and glides the window
-	// there, so the sidebar and the pane name the same file.
-	if m.allChanges && m.files.Tab() == filelist.TabFiles {
+	// In the all-changes view, and in a pinned commit or range, the pane
+	// already holds every diff: following a selection moves the cursor into
+	// that file's block and glides the window there, so the sidebar and the
+	// pane name the same file.
+	if (m.allChanges || m.pinned) && m.files.Tab() == filelist.TabFiles {
 		if fs, _ := m.files.SelectedFile(); fs.Path != "" {
 			m.view.GotoBand(m.files.SelectedOrdinal() - 1)
 		}
@@ -1869,6 +1977,9 @@ func blockLoader(entries []filelist.Entry, opts git.Options) func(i int) *diff.F
 }
 
 func (m model) toggleStage(staged bool) (tea.Model, tea.Cmd) {
+	if m.pinned {
+		return m.notify(readOnlyNotice)
+	}
 	if dir, dirStaged, ok := m.files.SelectedDir(); ok {
 		return m.stageDir(dir, dirStaged, staged)
 	}
@@ -1900,6 +2011,10 @@ func (m model) stageDir(dir string, dirStaged, want bool) (tea.Model, tea.Cmd) {
 }
 
 func (m model) startCompose() (tea.Model, tea.Cmd) {
+	if m.pinned {
+		m.message = readOnlyNotice
+		return m, setMessageCmd(m.message)
+	}
 	if m.files.StagedCount() == 0 {
 		m.message = "nothing staged — press s to stage files"
 		return m, setMessageCmd(m.message)
@@ -1995,9 +2110,14 @@ func (m model) forwardMain(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // refresh reloads the data behind the current page.
 func (m model) refresh() (tea.Model, tea.Cmd) {
-	switch m.files.Tab() {
-	case filelist.TabCommits:
+	switch {
+	case m.fromStdin:
+		// There is nothing to reload: the bytes were read once and are gone.
+		return m.notify("standard input is read once")
+	case m.files.Tab() == filelist.TabCommits:
 		return m, loadLogCmd(m.cfg.LogLimit)
+	case m.pinned:
+		return m, loadPinnedCmd(m.src, m.diffOptions())
 	default:
 		return m, m.requestStatus(false)
 	}
@@ -2006,6 +2126,12 @@ func (m model) refresh() (tea.Model, tea.Cmd) {
 // reloadContent regenerates whatever diff the main pane is showing. The
 // cached copy for the old options is dropped because the options changed.
 func (m model) reloadContent() (tea.Model, tea.Cmd) {
+	if m.fromStdin {
+		return m.notify("standard input is read once")
+	}
+	if m.pinned {
+		return m, tea.Batch(loadPinnedCmd(m.src, m.diffOptions()), setMessageCmd(m.message))
+	}
 	if m.files.Tab() == filelist.TabCommits {
 		m.cache.Delete(commitCacheKey(m.commit.Hash, m.cfg))
 		next, cmd := m.showCommit(m.commit)
@@ -2171,6 +2297,32 @@ func commitNotes(st styles.Styles, c git.Commit, files []*diff.File) []string {
 // thousand files already has its per-file bands in the diff below.
 const commitFileNoteLimit = 20
 
+// documentNotes is the pane header for a document with no commit behind it.
+func documentNotes(st styles.Styles, label string, files []*diff.File, preamble []string) []string {
+	title := lipgloss.NewStyle().Foreground(st.TitleActiveFg()).Bold(true).Render(label)
+	lines := []string{title}
+	lines = append(lines, preambleNotes(st, preamble)...)
+	lines = append(lines, changedFileNotes(st, files)...)
+	return append(lines, "")
+}
+
+// preambleNoteLimit caps the mail shown above the file list.
+const preambleNoteLimit = 30
+
+func preambleNotes(st styles.Styles, preamble []string) []string {
+	if len(preamble) == 0 {
+		return nil
+	}
+	shown := min(len(preamble), preambleNoteLimit)
+	lines := make([]string, 0, shown+2)
+	lines = append(lines, "")
+	lines = append(lines, preamble[:shown]...)
+	if rest := len(preamble) - shown; rest > 0 {
+		lines = append(lines, st.Subtle().Render(" … "+itoa(rest)+" more"))
+	}
+	return lines
+}
+
 // changedFileNotes renders the commit's changed files with their line counts,
 // so the pane says what changed before the first hunk is scrolled into view.
 // Paths form one column and the two count columns line up to their right; the
@@ -2269,6 +2421,18 @@ func loadCommitDiffCmd(c git.Commit, opts git.Options, seq int) tea.Cmd {
 			return commitLoadedMsg{commit: c, err: err, seq: seq}
 		}
 		return commitLoadedMsg{file: diff.Aggregate(d.Files), files: d.Files, commit: c, seq: seq}
+	}
+}
+
+// loadPinnedCmd builds the diff a startup ref asked for: a commit or a range,
+// as one document, with the same aggregate the commits tab uses.
+func loadPinnedCmd(src git.Source, opts git.Options) tea.Cmd {
+	return func() tea.Msg {
+		d, err := git.Diff(src, opts)
+		if err != nil {
+			return pinnedLoadedMsg{src: src, err: err}
+		}
+		return pinnedLoadedMsg{src: src, file: diff.Aggregate(d.Files), files: d.Files}
 	}
 }
 
@@ -2392,7 +2556,7 @@ func commitCmd(message string, amend bool) tea.Cmd {
 // goes over the network, so it can take a while, and a silent pause would read
 // as a hang.
 func (m model) startPush() (tea.Model, tea.Cmd) {
-	if m.pushing {
+	if m.pushing || m.pinned {
 		return m, nil
 	}
 	m.pushing = true

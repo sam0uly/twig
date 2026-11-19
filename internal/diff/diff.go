@@ -17,6 +17,8 @@ const (
 	Deleted  ChangeKind = 'D'
 	Renamed  ChangeKind = 'R'
 	Copied   ChangeKind = 'C'
+	// Unmerged is a path git printed as a combined diff, one column per parent.
+	Unmerged ChangeKind = 'U'
 )
 
 // String implements [fmt.Stringer].
@@ -30,6 +32,8 @@ func (c ChangeKind) String() string {
 		return "renamed"
 	case Copied:
 		return "copied"
+	case Unmerged:
+		return "unmerged"
 	default:
 		return "modified"
 	}
@@ -84,7 +88,7 @@ type File struct {
 	NewPath string
 	Kind    ChangeKind
 	Binary  bool
-	// OldMode and NewMode are the octal file modes when they changed.
+	// OldMode and NewMode are the octal modes a patch states.
 	OldMode string
 	NewMode string
 	// Lines is the flat list of rendered lines (hunk headers included). A
@@ -386,6 +390,8 @@ type Diff struct {
 	// Additions and Deletions are totals across all files.
 	Additions int
 	Deletions int
+	// Preamble is the mail a format-patch arrived in, if any.
+	Preamble []string
 }
 
 // FileByPath returns the file with the given path, or nil.
@@ -398,12 +404,23 @@ func (d *Diff) FileByPath(path string) *File {
 	return nil
 }
 
+// Combined reports whether the document holds a merged path.
+func (d *Diff) Combined() bool {
+	for _, f := range d.Files {
+		if f.Kind == Unmerged {
+			return true
+		}
+	}
+	return false
+}
+
 // Parse parses unified diff output. It is tolerant of unknown lines, which
 // are skipped, so that partial or unusual git output still yields a usable
 // result.
 func Parse(src string) *Diff {
 	d := &Diff{}
 	var cur *File
+	var preamble []string
 	sc := &scanner{lines: strings.Split(src, "\n")}
 
 	for sc.next() {
@@ -415,8 +432,14 @@ func Parse(src string) *Diff {
 			cur.OldPath, cur.NewPath = parseDiffGitLine(line)
 			d.Files = append(d.Files, cur)
 
+		case strings.HasPrefix(line, "diff --cc "), strings.HasPrefix(line, "diff --combined "):
+			path := parseCombinedPath(line)
+			cur = &File{Kind: Unmerged, OldPath: path, NewPath: path}
+			d.Files = append(d.Files, cur)
+
 		case cur == nil:
-			// Lines before the first file header are ignored.
+			// A patch can arrive inside format-patch's mail.
+			preamble = append(preamble, line)
 			continue
 
 		case strings.HasPrefix(line, "old mode "):
@@ -462,6 +485,12 @@ func Parse(src string) *Diff {
 				cur.NewPath = p
 			}
 
+		case strings.HasPrefix(line, "@@@"):
+			h := &Hunk{Header: line, LineIndex: len(cur.Lines)}
+			cur.Lines = append(cur.Lines, Line{Kind: HunkHeader, Text: line})
+			parseCombinedBody(sc, cur, h, combinedParents(line))
+			cur.Hunks = append(cur.Hunks, *h)
+
 		case strings.HasPrefix(line, "@@ "):
 			h := &Hunk{Header: line, LineIndex: len(cur.Lines)}
 			cur.Lines = append(cur.Lines, Line{Kind: HunkHeader, Text: line})
@@ -498,6 +527,7 @@ func Parse(src string) *Diff {
 		annotateWordDiff(f)
 	}
 
+	d.Preamble = preambleOf(preamble)
 	return d
 }
 
@@ -552,6 +582,100 @@ func parseHunkBody(sc *scanner, f *File, h *Hunk, old, new [2]int) {
 		}
 		f.Lines = append(f.Lines, h.Lines[len(h.Lines)-1])
 	}
+}
+
+// parseCombinedPath parses the path out of a "diff --cc x" line.
+func parseCombinedPath(line string) string {
+	rest := strings.TrimPrefix(line, "diff --cc ")
+	rest = strings.TrimPrefix(rest, "diff --combined ")
+	return parseFilePath(rest)
+}
+
+// combinedParents counts the parents a header names: "@@@" is two.
+func combinedParents(header string) int {
+	at := 0
+	for at < len(header) && header[at] == '@' {
+		at++
+	}
+	return max(1, at-1)
+}
+
+// parseCombinedBody reads a combined hunk: one column per parent, kept in the
+// text.
+func parseCombinedBody(sc *scanner, f *File, h *Hunk, parents int) {
+	num := combinedNewStart(h.Header)
+	for sc.next() {
+		line := strings.TrimSuffix(sc.line(), "\r")
+		if line == "" {
+			// git separates hunks and files with an empty line.
+			break
+		}
+		if strings.HasPrefix(line, "\\") {
+			l := Line{Kind: NoNewline, Text: line}
+			h.Lines = append(h.Lines, l)
+			f.Lines = append(f.Lines, l)
+			continue
+		}
+		if len(line) < parents || !combinedColumns(line[:parents]) {
+			sc.pushBack()
+			return
+		}
+		h.Lines = append(h.Lines, Line{
+			Kind: combinedKind(line[:parents]),
+			Text: line,
+			New:  num,
+		})
+		f.Lines = append(f.Lines, h.Lines[len(h.Lines)-1])
+		num++
+	}
+}
+
+// combinedColumns reports whether s is made of the three column characters.
+func combinedColumns(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] != ' ' && s[i] != '+' && s[i] != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// combinedKind reads the columns: removed from any parent is a deletion, added
+// to any is an addition.
+func combinedKind(columns string) LineKind {
+	switch {
+	case strings.Contains(columns, "-"):
+		return Deletion
+	case strings.Contains(columns, "+"):
+		return Addition
+	default:
+		return Context
+	}
+}
+
+// combinedNewStart is the first line number of the result side.
+func combinedNewStart(header string) int {
+	i := strings.LastIndex(header, " +")
+	if i < 0 {
+		return 0
+	}
+	rest := header[i+2:]
+	if j := strings.IndexAny(rest, ", @"); j >= 0 {
+		rest = rest[:j]
+	}
+	n, _ := strconv.Atoi(rest)
+	return n
+}
+
+// preambleOf trims the blank lines around the mail a patch came in.
+func preambleOf(lines []string) []string {
+	for len(lines) > 0 && strings.TrimSpace(lines[0]) == "" {
+		lines = lines[1:]
+	}
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
 
 // parseDiffGitLine parses the paths out of a "diff --git a/x b/y" line.

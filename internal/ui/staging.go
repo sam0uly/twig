@@ -25,13 +25,15 @@ const maxUndo = 32
 // plain reader.
 func (m *model) syncStaging() {
 	on := m.cfg.Stage &&
+		!m.pinned &&
 		m.state == stateShowList &&
 		m.files.Tab() == filelist.TabFiles &&
 		(m.allChanges || m.lastLoaded.path != "")
 	m.view.SetSelectable(on)
 	// The commits tab has nothing to stage, so its rail marks the section being
-	// read: the commit metadata, a file band or a hunk header.
-	m.view.SetReadRail(m.state == stateShowList && m.files.Tab() == filelist.TabCommits)
+	// read: the commit metadata, a file band or a hunk header. A pinned commit
+	// or range is the same kind of document.
+	m.view.SetReadRail(m.state == stateShowList && (m.files.Tab() == filelist.TabCommits || m.pinned))
 	m.view.SetCursorFocus(m.focus == focusMain)
 	m.view.SetSelectMode(m.cfg.StageApply == config.StageApplySelect)
 	if !on {

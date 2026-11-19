@@ -53,8 +53,66 @@ twig              # unstaged changes
 twig --staged     # staged changes
 twig HEAD~2       # what a commit changed
 twig main..HEAD   # what a range changed
+twig -C src/app   # do it in another repository
 twig log          # browse commits, open any of them
 ```
+
+Refs come before `--` and paths after it, the way git reads them:
+
+```sh
+twig --staged -- internal/      # only what is staged under internal/
+twig main..HEAD -- README.md    # one file out of a range
+```
+
+### Without a terminal
+
+When standard output is not a terminal, twig prints instead of opening the
+viewer, so it composes with the rest of the shell:
+
+```sh
+twig --patch > change.diff          # save the diff, or let redirection pick it
+twig --patch --exit-code && echo ok  # 1 when there is something to review
+twig --color always --patch | less -R
+git config --global pager.diff "twig pager"   # git diff opens twig
+git config --global pager.show "twig pager"   # and so does git show
+```
+
+Hunks are cut with the viewer's `context` setting and slid to a readable
+boundary, so the patch reads like the pane does rather than like `git diff`
+byte for byte. The trailing context a patch reader needs is kept, so `git apply`
+takes it; reach for `git diff` when a tool wants its bytes exactly.
+
+`twig pager` reads a patch on standard input. On a terminal it opens the viewer
+on it; piped it hands the bytes back untouched unless `--color always` asks for
+paint; anything that is not a patch passes straight through.
+
+Set `pager.diff` and `pager.show` rather than `core.pager`: twig passes
+everything that is not a diff back out unpaged, so a global `core.pager` would
+leave `git log` and `git status` without `less`.
+
+It is deliberately not a `diff.external` driver: twig reads git's diff rather
+than replacing it, so what git computed is what a tool downstream still gets.
+
+A path a merge left unmerged is shown as it stands in the working tree, conflict
+markers and all: there are no two versions to compare, and resolving it starts
+with reading it. A patch that arrived by mail keeps its message above the file
+list, and a combined diff read from the pager is passed back unpainted, because
+one column per parent has no plain patch form.
+
+### Flags
+
+| Flag | What it does |
+| --- | --- |
+| `-C`, `--chdir` | run in another repository, repeatable |
+| `-s`, `--staged` | show the index instead of the working tree |
+| `-U`, `--unified` | context lines around hunks |
+| `-w`, `--ignore-whitespace` | ignore whitespace changes |
+| `--patch` | print the diff instead of opening the viewer |
+| `--color` | `auto` (default), `always` or `never`; `NO_COLOR` is honoured |
+| `--exit-code` | exit 1 when there is a diff, needs a text output |
+| `--wrap`, `--line-numbers`, `--sidebar-width` | view settings, overriding the config |
+| `--no-watch` | stop following changes on disk |
+| `--config` | config file, default `$TWIG_CONFIG` then `$XDG_CONFIG_HOME/twig/twig.json` |
 
 ## Keys
 
