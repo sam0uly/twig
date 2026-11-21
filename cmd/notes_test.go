@@ -12,6 +12,9 @@ import (
 
 func runNotes(t *testing.T, stdin string, args ...string) (string, error) {
 	t.Helper()
+	// A config of its own: the reader's context decides the hunks the listing
+	// prints, and CI has none.
+	t.Setenv("TWIG_CONFIG", notesConfig(t))
 	var out bytes.Buffer
 	c := New()
 	c.SetArgs(args)
@@ -20,6 +23,16 @@ func runNotes(t *testing.T, stdin string, args ...string) (string, error) {
 	c.SetErr(&out)
 	err := c.Execute()
 	return out.String(), err
+}
+
+// notesConfig is a whole-file context, so the fixtures read as one hunk.
+func notesConfig(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "twig.json")
+	if err := os.WriteFile(path, []byte("{\"context\": 10}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func notesRepo(t *testing.T) string {
