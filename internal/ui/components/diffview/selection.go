@@ -598,6 +598,9 @@ func (m Model) itemAt(row int) Item {
 		return Item{}
 	}
 	for _, l := range m.linesAt(row) {
+		if l.Kind == diff.Note {
+			return Item{Kind: ItemLine, Hunk: m.hunkOfRow(row), Line: l}
+		}
 		if l.Kind != diff.Addition && l.Kind != diff.Deletion {
 			continue
 		}

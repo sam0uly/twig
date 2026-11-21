@@ -475,6 +475,9 @@ func (m Model) preText(f *diff.File) []string {
 	return out
 }
 
+// Refresh re-lays the rows without moving the cursor.
+func (m *Model) Refresh() { m.setContent() }
+
 // SetNotes replaces the metadata lines rendered above the diff.
 func (m *Model) SetNotes(lines []string) {
 	m.notes = lines
@@ -1334,6 +1337,33 @@ func (m *Model) SetFileAt(f *diff.File, line int) {
 	m.JumpToLine(line)
 }
 
+// RowLine is the diff line a row paints, if it paints one.
+func (m Model) RowLine(row int) (diff.Line, bool) {
+	lines := m.linesAt(row)
+	if len(lines) == 0 {
+		return diff.Line{}, false
+	}
+	return lines[0], true
+}
+
+// PreRows is how many rows the pane draws above the first diff line.
+func (m Model) PreRows() int { return len(m.preRows(m.file)) }
+
+// Wraps reports whether rows soft-wrap.
+func (m Model) Wraps() bool { return m.vp.SoftWrap }
+
+// NoteWidth is the cells a note body has, or 0 when rows soft-wrap.
+func (m Model) NoteWidth() int {
+	if m.vp.SoftWrap {
+		return 0
+	}
+	w := m.rowBudget()
+	if m.showLineNumbers && !m.split {
+		w -= m.gut.cells()
+	}
+	return max(1, w)
+}
+
 // JumpToLine puts the viewport on the row that paints flat line, immediately.
 func (m *Model) JumpToLine(line int) {
 	m.JumpTo(m.rowForLine(max(0, line)))
@@ -2019,11 +2049,38 @@ func tailTruncate(s string, w int) string {
 // renderLine renders one full-width diff line with word-level highlights and
 // search matches baked in. flatIdx is the line's index into the plain lines.
 func (m Model) renderLine(row int, l diff.Line, flatIdx int) string {
+	if l.Kind == diff.Note {
+		return m.renderNote(row, l)
+	}
 	if l.Text == "" {
 		return ""
 	}
 	base, out := m.styledText(row, l, flatIdx)
 	return m.padLine(out, base, m.foldMarkerWidth(row))
+}
+
+// renderNote draws the tag pill and the body; a tail row paints the pill's
+// width as blank.
+func (m Model) renderNote(row int, l diff.Line) string {
+	icon, word, pill, body := m.styles.Note(l.NoteTag)
+	label := " " + icon + " " + word + " "
+
+	var b strings.Builder
+	if l.NoteTail {
+		b.WriteString(body.Render(strings.Repeat(" ", lipgloss.Width(label))))
+	} else {
+		b.WriteString(pill.Render(label))
+		b.WriteString(body.Render(" "))
+	}
+	if l.Text != "" {
+		if l.NoteID == "" {
+			// Typing: the bubble paints itself, cursor and spacing included.
+			b.WriteString(l.Text)
+		} else {
+			b.WriteString(body.Render(l.Text))
+		}
+	}
+	return m.padLine(b.String(), body, m.foldMarkerWidth(row))
 }
 
 // styledText renders one line's text, resolving token, word and search styles
@@ -2470,6 +2527,9 @@ func diffLineStyle(st styles.Styles, l diff.Line) lipgloss.Style {
 		return st.DiffHunk()
 	case diff.NoNewline:
 		return st.DiffNoNewline()
+	case diff.Note:
+		_, _, _, body := st.Note(l.NoteTag)
+		return body
 	default:
 		return st.DiffContext()
 	}
@@ -2560,6 +2620,10 @@ func gutterText(g *gutterState, info viewport.GutterContext) string {
 	}
 
 	base := diffLineStyle(g.theme, l)
+	if l.Kind == diff.Note {
+		// The note wash starts after the number column.
+		base = g.theme.DiffContext()
+	}
 	if !g.focused {
 		base = base.Foreground(g.theme.DescNormalFg())
 	}
