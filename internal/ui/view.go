@@ -804,6 +804,8 @@ func (m model) helpColumns() []helpColumn {
 		"x", "discard",
 		"s", "stage file",
 		"u", "unstage",
+		"M", "note · tab tag",
+		"X", "drop note",
 		"C", "commit",
 	)
 	if m.cfg.StageApply == config.StageApplySelect {
