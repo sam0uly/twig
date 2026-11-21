@@ -45,9 +45,8 @@ type snapFile struct {
 	headOID  string
 	indexOID string
 
-	// indexMode and workMode are the modes of the two sides. A partial stage
-	// has to repeat the index mode in the record it writes, and a new file's
-	// mode comes from the worktree, so both are worth keeping.
+	// headMode, indexMode and workMode are the modes of the three sides.
+	headMode  string
 	indexMode string
 	workMode  string
 }
@@ -116,6 +115,8 @@ func (rc *repoContext) buildSnapshot() (*snapshot, error) {
 			snap.add(path, &snapFile{
 				path: path, untracked: true, unstagedKind: diff.Added,
 			})
+		case strings.HasPrefix(tok, "u "):
+			parseUnmerged(snap, strings.SplitN(tok, " ", 11))
 		}
 	}
 
@@ -136,13 +137,13 @@ func (rc *repoContext) buildSnapshot() (*snapshot, error) {
 			})
 			continue
 		}
-		if f.unstagedKind != diff.Modified && f.unstagedKind != diff.Added && f.unstagedKind != diff.Deleted {
-			continue
+		switch f.unstagedKind {
+		case diff.Modified, diff.Added, diff.Deleted, diff.Unmerged:
+			snap.unstaged = append(snap.unstaged, FileStatus{
+				Path:   f.path,
+				Letter: letterFor(f.unstagedKind),
+			})
 		}
-		snap.unstaged = append(snap.unstaged, FileStatus{
-			Path:   f.path,
-			Letter: letterFor(f.unstagedKind),
-		})
 	}
 
 	sortStatus(snap.staged)
@@ -246,16 +247,35 @@ func parseOrdinary(snap *snapshot, f []string) {
 		})
 	}
 
-	// Both records above merge into one entry, so the modes are attached once,
-	// here, where both halves are in scope.
+	// The index mode is kept even when the index did not change: it is the old
+	// side of a chmod.
 	if f, ok := snap.files[path]; ok {
-		if xy[0] != '.' && mI != "000000" {
+		if mH != "000000" {
+			f.headMode = mH
+		}
+		if mI != "000000" {
 			f.indexMode = mI
 		}
 		if xy[1] != '.' && mW != "000000" {
 			f.workMode = mW
 		}
 	}
+}
+
+// parseUnmerged handles "u" records: a path left in pieces by a merge.
+func parseUnmerged(snap *snapshot, f []string) {
+	if len(f) < 11 {
+		return
+	}
+	path, mW := f[10], f[6]
+	if path == "" {
+		return
+	}
+	entry := &snapFile{path: path, unstagedKind: diff.Unmerged}
+	if mW != "000000" {
+		entry.workMode = mW
+	}
+	snap.add(path, entry)
 }
 
 // parseRename handles "2" records: the path in the record, the original path
@@ -377,6 +397,8 @@ type diffJob struct {
 	staged      bool
 	oldPath     string
 	modeChanged bool
+	oldMode     string
+	newMode     string
 }
 
 // build generates the diff a job describes.
@@ -386,6 +408,15 @@ func (j diffJob) build() *diff.File {
 	file.NewPath = j.path
 	if j.staged && j.oldPath != "" {
 		file.OldPath = j.oldPath
+	}
+	// State both modes when they differ, and the one side that exists.
+	switch {
+	case j.oldMode != j.newMode && j.oldMode != "" && j.newMode != "":
+		file.OldMode, file.NewMode = j.oldMode, j.newMode
+	case j.kind == diff.Added:
+		file.NewMode = j.newMode
+	case j.kind == diff.Deleted:
+		file.OldMode = j.oldMode
 	}
 	if j.modeChanged && len(file.Hunks) == 0 {
 		file.Lines = append(file.Lines, diff.Line{
@@ -417,15 +448,27 @@ func (rc *repoContext) prepareDiff(f *snapFile, staged bool, opts Options) (diff
 		newSide = workSig(rc.root, f.path)
 	}
 
+	// The modes a patch would state, so a chmod shows in the diff.
+	oldMode, newMode := f.indexMode, f.workMode
+	if staged {
+		oldMode, newMode = f.headMode, f.indexMode
+	}
+	if newMode == "" && kind == diff.Added {
+		// Git reports no mode for a path it has never tracked.
+		newMode = workModeOf(filepath.Join(rc.root, f.path))
+	}
+
 	j := diffJob{
-		key: fmt.Sprintf("%s|%s|%d|%t|%s|%t|%d", oldOID, newSide, opts.Context,
-			opts.IgnoreWhitespace, f.path, staged, kind),
+		key: fmt.Sprintf("%s|%s|%d|%t|%s|%t|%d|%s|%s", oldOID, newSide, opts.Context,
+			opts.IgnoreWhitespace, f.path, staged, kind, oldMode, newMode),
 		path:        f.path,
 		kind:        kind,
 		opts:        generateOptions(opts),
 		staged:      staged,
 		oldPath:     f.oldPath,
 		modeChanged: f.modeChanged,
+		oldMode:     oldMode,
+		newMode:     newMode,
 	}
 	if cached, ok := rc.diffs.get(j.key); ok {
 		j.file = cached
@@ -516,6 +559,22 @@ func (rc *repoContext) buildJobs(jobs []diffJob) []*diff.File {
 	return files
 }
 
+// workModeOf is the mode of a worktree file, in git's six digit form.
+func workModeOf(path string) string {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return ""
+	}
+	switch {
+	case info.Mode()&os.ModeSymlink != 0:
+		return "120000"
+	case info.Mode().Perm()&0o111 != 0:
+		return "100755"
+	default:
+		return "100644"
+	}
+}
+
 // statusFiles diffs one column of the snapshot.
 func (rc *repoContext) statusFiles(staged bool, opts Options) ([]*diff.File, error) {
 	snap, err := rc.snapshotFor(false)
@@ -529,6 +588,10 @@ func (rc *repoContext) statusFiles(staged bool, opts Options) ([]*diff.File, err
 			continue
 		}
 		if !staged && (f.untracked || f.unstagedKind == 0) {
+			continue
+		}
+		if f.unstagedKind == diff.Unmerged {
+			files = append(files, rc.mergedFile(f))
 			continue
 		}
 		file, err := rc.diffFile(f, staged, opts)
@@ -549,6 +612,31 @@ func (rc *repoContext) stagedFiles(opts Options) ([]*diff.File, error) {
 	return rc.statusFiles(true, opts)
 }
 
+// mergedFile shows a conflicted path as it stands: both sides between markers.
+func (rc *repoContext) mergedFile(f *snapFile) *diff.File {
+	file := &diff.File{Kind: diff.Unmerged, OldPath: f.path, NewPath: f.path}
+	file.OldMode, file.NewMode = f.indexMode, f.workMode
+	file.Lines = append(file.Lines, diff.Line{
+		Kind: diff.NoNewline,
+		Text: "unmerged: the working tree, conflict markers and all",
+	})
+
+	text, err := rc.worktreeContent(f.path)
+	if err != nil {
+		file.Lines = append(file.Lines, diff.Line{Kind: diff.NoNewline, Text: err.Error()})
+		return file
+	}
+	text = strings.TrimSuffix(text, "\n")
+	if text == "" {
+		return file
+	}
+	for i, line := range strings.Split(text, "\n") {
+		file.Lines = append(file.Lines, diff.Line{Kind: diff.Context, Text: " " + line, New: i + 1})
+	}
+	return file
+}
+
+// letterFor names a change the way git's listing does.
 func letterFor(kind diff.ChangeKind) string {
 	switch kind {
 	case diff.Added:
@@ -559,6 +647,8 @@ func letterFor(kind diff.ChangeKind) string {
 		return "R"
 	case diff.Copied:
 		return "C"
+	case diff.Unmerged:
+		return "U"
 	default:
 		return "M"
 	}

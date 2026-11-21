@@ -144,14 +144,17 @@ func tailPlan(old, new text, delta, context int) *plan {
 			newLen:   int32(ctx),
 		})
 	}
-	// Starts are 1-based where a count is not zero, as the general path leaves them.
+	// Starts are 1-based where a count is not zero, as the general path leaves
+	// them. With no context the tail edit sits after everything the shorter
+	// side has, and both sides anchor there: the header then reports the line
+	// before for the side whose count is zero.
 	var oldStart, newStart int
 	if ctx > 0 {
 		oldStart, newStart = common-ctx+1, common-ctx+1
 	} else if delta > 0 {
-		newStart = old.n() + 1
+		oldStart, newStart = old.n()+1, old.n()+1
 	} else {
-		oldStart = new.n() + 1
+		oldStart, newStart = new.n()+1, new.n()+1
 	}
 	if delta > 0 {
 		p.ops = append(p.ops, op{kind: opInsert, newStart: int32(old.n()), newLen: int32(delta)})
@@ -825,6 +828,10 @@ func slideWindows(windows []hunkWindow, valid []edit, old, new text, context int
 		}
 		w.start += best
 		w.end += best
+		// Keep a line of trailing context, without eating the next hunk's rows.
+		if w.end > w.start && w.end < nextStart && valid[w.end-1].kind != editEqual {
+			w.end++
+		}
 	}
 }
 
@@ -971,12 +978,20 @@ func buildPlan(old, new text, edits []edit, windows []hunkWindow) *plan {
 				if oldStart == 0 {
 					oldStart = int(e.oldIdx) + 1
 				}
+				if newStart == 0 {
+					// A window with no new-side rows still has a position in the
+					// new file, which its header names when the count is zero.
+					newStart = int(e.newIdx) + 1
+				}
 				oldCount++
 				change = append(change, e)
 
 			default:
 				if newStart == 0 {
 					newStart = int(e.newIdx) + 1
+				}
+				if oldStart == 0 {
+					oldStart = int(e.oldIdx) + 1
 				}
 				newCount++
 				change = append(change, e)
@@ -1053,13 +1068,15 @@ func (f *File) attachHunks() {
 }
 
 func hunkHeader(oldStart, oldCount, nStart, newCount int) string {
-	// Starts are 1-based already; a zero-count side reports 0, like git.
+	// Starts are 1-based already, and a zero-count side names the line the
+	// change sits after, which is git's convention: appending to a ten line
+	// file gives "@@ -10,0 +11 @@".
 	oldStart, newStart := oldStart, nStart
 	if oldCount == 0 {
-		oldStart = 0
+		oldStart = max(0, oldStart-1)
 	}
 	if newCount == 0 {
-		newStart = 0
+		newStart = max(0, newStart-1)
 	}
 	o := strconv.Itoa(oldStart)
 	if oldCount != 1 {

@@ -166,3 +166,24 @@ func TestWatchDebounceIsClamped(t *testing.T) {
 		}
 	}
 }
+
+func TestPathHonoursTwigConfig(t *testing.T) {
+	t.Setenv("TWIG_CONFIG", "/tmp/from-env/twig.json")
+
+	got, err := Path("")
+	if err != nil {
+		t.Fatalf("Path: %v", err)
+	}
+	if got != "/tmp/from-env/twig.json" {
+		t.Fatalf("Path() = %q, want the TWIG_CONFIG value", got)
+	}
+
+	// An explicit path is what the caller asked for, so it wins.
+	got, err = Path("/tmp/from-flag/twig.json")
+	if err != nil {
+		t.Fatalf("Path: %v", err)
+	}
+	if got != "/tmp/from-flag/twig.json" {
+		t.Fatalf("Path(explicit) = %q, want the flag value", got)
+	}
+}

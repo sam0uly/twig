@@ -129,9 +129,10 @@ func Load(path string) (Config, error) {
 
 	data, err := os.ReadFile(file)
 	if err != nil {
-		// A missing config file in the search path is fine; anything else is a
-		// problem.
-		if errors.Is(err, os.ErrNotExist) && path == "" {
+		// A config file that is not there means the defaults. A path the reader
+		// named is theirs to get right, and saying so is the caller's job, not
+		// this one's.
+		if errors.Is(err, os.ErrNotExist) {
 			return cfg, nil
 		}
 		return cfg, fmt.Errorf("read config: %w", err)
@@ -187,11 +188,16 @@ func userConfigDir() (string, error) {
 	return filepath.Join(home, ".config", "twig"), nil
 }
 
-// Path resolves where twig reads and writes its config file: the explicit
-// path when one was given, $XDG_CONFIG_HOME/twig/twig.json otherwise.
+// Path resolves where twig reads and writes its config file: the explicit path
+// when one was given, $TWIG_CONFIG when it is set, and
+// $XDG_CONFIG_HOME/twig/twig.json otherwise. The environment variable lets a
+// repository or a script point twig at a config without repeating the flag.
 func Path(explicit string) (string, error) {
 	if explicit != "" {
 		return explicit, nil
+	}
+	if env := os.Getenv("TWIG_CONFIG"); env != "" {
+		return env, nil
 	}
 	dir, err := userConfigDir()
 	if err != nil {

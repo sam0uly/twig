@@ -13,13 +13,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"samouly.fun/twig/internal/config"
 	"samouly.fun/twig/internal/diff"
 	"samouly.fun/twig/internal/git"
 	"samouly.fun/twig/internal/notes"
 )
 
 // newNotesCommand reads and writes notes. Use --json from a tool.
-func newNotesCommand() *cobra.Command {
+func newNotesCommand(o *options) *cobra.Command {
 	var (
 		asJSON bool
 		under  string
@@ -42,7 +43,7 @@ drifted flag, for a tool to consume.`,
 `,
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
-			return listNotes(c, asJSON, under, brief)
+			return listNotes(c, o, asJSON, under, brief)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print one JSON object for a tool")
@@ -50,7 +51,7 @@ drifted flag, for a tool to consume.`,
 	cmd.Flags().BoolVar(&brief, "brief", false, "one line per note, no code context")
 
 	cmd.AddCommand(
-		newNotesAddCommand(),
+		newNotesAddCommand(o),
 		newNotesRemoveCommand(),
 		newNotesClearCommand(),
 	)
@@ -101,8 +102,12 @@ type noteView struct {
 	Drifted bool      `json:"drifted"`
 }
 
-func listNotes(c *cobra.Command, asJSON bool, under string, brief bool) error {
+func listNotes(c *cobra.Command, o *options, asJSON bool, under string, brief bool) error {
 	store, _, root, err := openNotes()
+	if err != nil {
+		return err
+	}
+	cfg, _, err := o.loadConfig(c)
 	if err != nil {
 		return err
 	}
@@ -129,12 +134,12 @@ func listNotes(c *cobra.Command, asJSON bool, under string, brief bool) error {
 	diffs := map[string]*diff.File{}
 	drifted := func(note notes.Note) bool {
 		if note.Kind == notes.Hunk {
-			return hunkDrifted(note, diffs)
+			return hunkDrifted(note, diffs, cfg)
 		}
 		return note.Drifted(root)
 	}
 	context := func(note notes.Note) []string {
-		return noteContext(note, noteDiff(note.Path, diffs))
+		return noteContext(note, noteDiff(note.Path, diffs, cfg))
 	}
 
 	if !asJSON {
@@ -195,8 +200,8 @@ func listNotes(c *cobra.Command, asJSON bool, under string, brief bool) error {
 }
 
 // hunkDrifted reports whether the hunk is gone or its header moved.
-func hunkDrifted(note notes.Note, cache map[string]*diff.File) bool {
-	file := noteDiff(note.Path, cache)
+func hunkDrifted(note notes.Note, cache map[string]*diff.File, cfg config.Config) bool {
+	file := noteDiff(note.Path, cache, cfg)
 	if file == nil {
 		return true
 	}
@@ -208,20 +213,16 @@ func hunkDrifted(note notes.Note, cache map[string]*diff.File) bool {
 }
 
 // noteDiff is the worktree diff of a path, or its staged one.
-func noteDiff(path string, cache map[string]*diff.File) *diff.File {
+func noteDiff(path string, cache map[string]*diff.File, cfg config.Config) *diff.File {
 	if file, seen := cache[path]; seen {
 		return file
 	}
-	file := buildNoteDiff(path)
+	file := buildNoteDiff(path, cfg)
 	cache[path] = file
 	return file
 }
 
-func buildNoteDiff(path string) *diff.File {
-	cfg, _, err := loadConfig("")
-	if err != nil {
-		return nil
-	}
+func buildNoteDiff(path string, cfg config.Config) *diff.File {
 	opts := git.Options{Context: cfg.Context, IgnoreWhitespace: cfg.IgnoreWhitespace}
 	if file, err := git.FileDiff(path, false, opts); err == nil {
 		return file
@@ -298,7 +299,7 @@ func anchorRow(file *diff.File, note notes.Note) int {
 	return fallback
 }
 
-func newNotesAddCommand() *cobra.Command {
+func newNotesAddCommand(o *options) *cobra.Command {
 	var (
 		message string
 		tag     string
@@ -340,9 +341,13 @@ path:START-END. Without --message the body is read from standard input.`,
 			if note.Path, err = repoPath(root, note.Path); err != nil {
 				return err
 			}
+			cfg, _, err := o.loadConfig(c)
+			if err != nil {
+				return err
+			}
 			switch note.Kind {
 			case notes.Hunk:
-				if err := resolveHunk(&note); err != nil {
+				if err := resolveHunk(&note, cfg); err != nil {
 					return err
 				}
 			case notes.Lines:
@@ -373,8 +378,8 @@ path:START-END. Without --message the body is read from standard input.`,
 }
 
 // resolveHunk fills a hunk note's header from the current diff.
-func resolveHunk(note *notes.Note) error {
-	file := buildNoteDiff(note.Path)
+func resolveHunk(note *notes.Note, cfg config.Config) error {
+	file := buildNoteDiff(note.Path, cfg)
 	if file == nil {
 		return fmt.Errorf("no diff to note: %s", note.Path)
 	}
