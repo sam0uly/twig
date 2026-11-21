@@ -395,7 +395,9 @@ func resolveHunk(note *notes.Note, cfg config.Config) error {
 func repoPath(root, arg string) (string, error) {
 	path := arg
 	if !filepath.IsAbs(path) {
-		cwd, err := os.Getwd()
+		// The session cwd is symlink-resolved, so it matches the root git
+		// reports; os.Getwd can answer in the link's spelling.
+		cwd, err := git.Cwd()
 		if err != nil {
 			return "", err
 		}

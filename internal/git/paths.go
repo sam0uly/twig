@@ -11,6 +11,16 @@ func RepoRoot() (string, error) {
 	return rc.root, nil
 }
 
+// Cwd is the directory twig is working in, with symlinks resolved the way git
+// resolves them. A path typed from here can be made relative to RepoRoot.
+func Cwd() (string, error) {
+	rc, err := open()
+	if err != nil {
+		return "", err
+	}
+	return rc.cwd, nil
+}
+
 // GitDir is the repository's own directory.
 func GitDir() (string, error) {
 	rc, err := open()
