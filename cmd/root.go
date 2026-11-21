@@ -120,6 +120,7 @@ search, stage and unstage files, and copy patches to the clipboard.
 		},
 	}
 	root.AddCommand(logCmd)
+	root.AddCommand(newNotesCommand())
 
 	logCmd.Flags().IntVarP(&logLimit, "limit", "n", 0, "number of commits to load (overrides config)")
 
