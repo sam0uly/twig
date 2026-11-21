@@ -5,6 +5,8 @@ package diff
 import (
 	"strconv"
 	"strings"
+
+	"samouly.fun/twig/internal/notes"
 )
 
 // ChangeKind describes how a file changed relative to its previous state.
@@ -50,6 +52,8 @@ const (
 	HunkHeader
 	// NoNewline is a "\\ No newline at end of file" line.
 	NoNewline
+	// Note is a row a note was inserted for, not a line of either file.
+	Note
 )
 
 // Line is a single rendered diff line.
@@ -63,9 +67,30 @@ type Line struct {
 	Old int
 	New int
 
+	// NoteID names a Note row's note; empty while it is being typed.
+	NoteID string
+
+	// NoteTag is a Note row's tag.
+	NoteTag notes.Tag
+
+	// NoteTail marks a continuation row of the note above it.
+	NoteTail bool
+
 	// words holds changed-word spans (see worddiff.go), as byte offsets into
 	// Text.
 	words []Span
+}
+
+// Content is the line's text without its sign.
+func (l Line) Content() string {
+	text := strings.TrimSuffix(l.Text, "\r")
+	if text == "" {
+		return ""
+	}
+	if l.Kind == Addition || l.Kind == Deletion {
+		return text[1:]
+	}
+	return strings.TrimPrefix(text, " ")
 }
 
 // Hunk is a contiguous group of changes in a file.
