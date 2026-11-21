@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"charm.land/tone"
 
+	"samouly.fun/twig/internal/notes"
 	"samouly.fun/twig/internal/syntax"
 )
 
@@ -555,6 +556,33 @@ func (s Styles) DiffNoNewline() lipgloss.Style { return s.diffNoNewline }
 
 // DiffBinary returns the style for binary file notices.
 func (s Styles) DiffBinary() lipgloss.Style { return s.diffBinary }
+
+// noteSpec is one tag's glyph, word and colours.
+type noteSpec struct {
+	icon, word string
+	pill       color.Color
+	fg         color.Color
+	text       color.Color
+	wash       color.Color
+}
+
+var noteSpecs = map[notes.Tag]noteSpec{
+	notes.Fyi:   {icon: "i", word: "FYI", pill: tone.Sardine, fg: tone.Salt, text: tone.Lichen, wash: tone.Oceania},
+	notes.Todo:  {icon: "☐", word: "TODO", pill: tone.Charple, fg: tone.Butter, text: tone.Butter, wash: tone.Jelly},
+	notes.Warn:  {icon: "!", word: "WARN", pill: tone.Paprika, fg: tone.Salt, text: tone.Yam, wash: tone.Toast},
+	notes.Error: {icon: "×", word: "ERROR", pill: tone.Cherry, fg: tone.Salt, text: tone.Salmon, wash: tone.Steak},
+}
+
+// Note returns the pill and body styles of one tag.
+func (s Styles) Note(tag notes.Tag) (icon, word string, pill, body lipgloss.Style) {
+	spec, ok := noteSpecs[tag]
+	if !ok {
+		spec = noteSpecs[notes.Fyi]
+	}
+	pill = lipgloss.NewStyle().Bold(true).Foreground(spec.fg).Background(spec.pill)
+	body = lipgloss.NewStyle().Foreground(spec.text).Background(spec.wash)
+	return spec.icon, spec.word, pill, body
+}
 
 // Syntax returns the style a token class takes on a kind of diff row.
 func (s Styles) Syntax(kind int, class syntax.Class) lipgloss.Style {
