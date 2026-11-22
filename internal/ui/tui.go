@@ -419,6 +419,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.noteStore, m.notesPath, m.notesRoot = msg.store, msg.path, msg.root
 			m.notesStamp = fileStamp(msg.path)
+			m.view.SetNoteDrift(m.noteDrifted)
 			m.reannotate()
 		}
 		return m, nil
@@ -726,7 +727,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		first := msg.from == 0
-		m.view.AppendBlocksSided(msg.files, blockSides(m.cfg, msg.entries, msg.from, len(msg.files)))
+		m.view.AppendBlocksSided(m.annotateFiles(msg.files), blockSides(m.cfg, msg.entries, msg.from, len(msg.files)))
 		for i, f := range msg.files {
 			m.allAdds += f.Additions
 			m.allDels += f.Deletions
@@ -1122,7 +1123,7 @@ func (m model) showFile(path string, staged bool) (tea.Model, tea.Cmd) {
 	m.syncWatch()
 	if e, ok := m.cache.Get(fileCacheKey(path, staged, m.cfg)); ok {
 		m.view.SetNotes(nil)
-		m.view.SetFile(e.file)
+		m.view.SetFile(withNotes(e.file, m.noteStore.For(path), m.noteWidth()))
 		m.d = &diff.Diff{Additions: e.file.Additions, Deletions: e.file.Deletions}
 		m.lastLoaded.path, m.lastLoaded.staged = path, staged
 		return m, nil
@@ -1991,7 +1992,7 @@ func (m model) startAllChanges() (tea.Model, tea.Cmd) {
 	// sidebar selects, which is what the reader just asked for.
 	m.allRestore, m.allAnchor = m.allAnchor, -1
 	m.view.SetNotes(nil)
-	m.view.SetDocument(blockLoader(entries, opts))
+	m.view.SetDocument(blockLoader(entries, opts, m.noteStore, m.noteWidth()))
 	m.d = &diff.Diff{}
 
 	return m, loadAllChangesCmd(entries, m.allGen, opts)
@@ -2000,7 +2001,7 @@ func (m model) startAllChanges() (tea.Model, tea.Cmd) {
 // blockLoader re-diffs block i when the virtual document needs its rows
 // again. The status snapshot and the content-addressed diff cache make this a
 // map lookup in the common case.
-func blockLoader(entries []filelist.Entry, opts git.Options) func(i int) *diff.File {
+func blockLoader(entries []filelist.Entry, opts git.Options, store notes.Store, width int) func(i int) *diff.File {
 	return func(i int) *diff.File {
 		if i < 0 || i >= len(entries) {
 			return nil
@@ -2015,7 +2016,7 @@ func blockLoader(entries []filelist.Entry, opts git.Options) func(i int) *diff.F
 				Lines:   []diff.Line{{Kind: diff.NoNewline, Text: "diff unavailable"}},
 			}
 		}
-		return f
+		return withNotes(f, store.For(e.Status.Path), width)
 	}
 }
 

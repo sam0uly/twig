@@ -94,6 +94,10 @@ func withNotes(f *diff.File, list []notes.Note, width int) *diff.File {
 	if f == nil || len(list) == 0 || len(f.Lines) == 0 {
 		return f
 	}
+	// A file can arrive already carrying rows from an earlier pass (the
+	// all-changes loader annotates, then the chunk annotates again): strip them
+	// so a note is never drawn twice.
+	f = withoutNotes(f)
 
 	var head []notes.Note
 	after := map[int][]notes.Note{}
@@ -284,11 +288,17 @@ func (m model) cursorLine() (string, int, bool) {
 	if file == nil {
 		return "", 0, false
 	}
-	line, ok := m.view.RowLine(m.view.CursorRow())
+	line, ok := m.view.RowAnchor(m.view.CursorRow())
 	if !ok || line.New == 0 {
 		return "", 0, false
 	}
 	path := m.lastLoaded.path
+	if path == "" {
+		// All changes: the document holds several files, so ask the row.
+		if p, ok := m.view.CursorFile(); ok {
+			path = p
+		}
+	}
 	if path == "" {
 		path = file.Path()
 	}
@@ -305,22 +315,52 @@ func (m *model) reannotate() {
 		return
 	}
 	line := 0
-	if l, ok := m.view.RowLine(m.view.CursorRow()); ok {
+	onNote := ""
+	if l, ok := m.view.RowAnchor(m.view.CursorRow()); ok {
 		line = l.New
+		if l.Kind == diff.Note {
+			onNote = l.NoteID
+		}
 	}
 	selectable := m.view.Selectable()
+	off := m.view.YOffset()
+	m.view.SetNoteDrift(m.noteDrifted)
 
 	plain := withoutNotes(file)
 	annotated := withNotes(plain, m.noteStore.For(m.lastLoaded.path), m.noteWidth())
 	m.view.SetFile(annotated)
 	m.view.SetSelectable(selectable)
+
+	// SetFile starts at the top: put the reader back where they were reading,
+	// after the cursor has been placed, so the cursor never drags the pane.
+	defer m.view.SetScroll(off)
+
+	// A reload must not walk the cursor off the note it was on: X would then
+	// drop every note sharing that line.
+	if onNote != "" {
+		for row := 0; row < m.view.Rows(); row++ {
+			if l, ok := m.view.RowLine(row); ok && l.Kind == diff.Note && l.NoteID == onNote {
+				m.view.CursorTo(row)
+				return
+			}
+		}
+	}
 	if line == 0 {
 		return
 	}
 	if row := indexOfLine(annotated, line); row >= 0 {
 		m.view.CursorTo(row + m.view.PreRows())
-		m.view.JumpTo(row)
 	}
+}
+
+// noteDrifted reports whether a note's anchor moved, so its row can say so.
+func (m model) noteDrifted(id string) bool {
+	for _, note := range m.noteStore.Notes {
+		if note.ID == id {
+			return note.Drifted(m.notesRoot)
+		}
+	}
+	return false
 }
 
 // noteWidth is 0 when the viewport soft-wraps rows itself.
@@ -522,17 +562,14 @@ func (m model) saveNote() (tea.Model, tea.Cmd) {
 		return m.notify(err.Error())
 	}
 	m.noteStore, m.notesPath, m.notesRoot = store, path, root
+	m.view.SetNoteDrift(m.noteDrifted)
 	m.finishDraft(added.ID, tag, text)
 	return m.notify("note " + added.ID + " added")
 }
 
 // dropNote removes the note under the cursor, or those on its line.
 func (m model) dropNote() (tea.Model, tea.Cmd) {
-	file := m.view.File()
-	if file == nil {
-		return m.notify("no line under the cursor")
-	}
-	row, ok := m.view.RowLine(m.view.CursorRow())
+	row, ok := m.view.RowAnchor(m.view.CursorRow())
 	if !ok {
 		return m.notify("no line under the cursor")
 	}

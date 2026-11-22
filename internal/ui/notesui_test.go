@@ -685,3 +685,192 @@ func TestDraftSelectionHasAColour(t *testing.T) {
 		t.Fatalf("the selection is not painted:\n%s", m.view.View())
 	}
 }
+
+// A split row holds a deletion on the left and its replacement on the right.
+// The note belongs on the replacement, not on nothing.
+func TestNoteInSplitViewLandsOnTheAddition(t *testing.T) {
+	noteRepo(t)
+	m := testModel(120, 30)
+	m.noteStore, m.notesPath, m.notesRoot = mustNoteStore(t)
+	m.lastLoaded.path = "a.go"
+	m.view.SetSplit(true)
+	m.setSize()
+	m.view.SetFile(parsedFile(t))
+	m.view.SetSelectable(true)
+
+	row := -1
+	for i := 0; i < 20; i++ {
+		if l, ok := m.view.RowAnchor(i); ok && l.New == 2 {
+			row = i
+			break
+		}
+	}
+	if row < 0 {
+		t.Fatal("no row for line 2")
+	}
+	m.view.CursorTo(row)
+
+	next, _ := m.startNote()
+	m = next.(model)
+	if !m.noteMode {
+		t.Fatal("split view refused a note on a changed line")
+	}
+	m.noteInput.SetValue("split note")
+	m.paintDraft()
+	next, _ = m.saveNote()
+	m = next.(model)
+
+	if len(m.noteStore.Notes) != 1 {
+		t.Fatalf("notes = %+v", m.noteStore.Notes)
+	}
+	if got := m.noteStore.Notes[0].Start; got != 2 {
+		t.Fatalf("note anchored to line %d, want 2", got)
+	}
+}
+
+// A note spans the pane in split view: painted once, not once per column.
+func TestSplitViewPaintsTheNoteOnce(t *testing.T) {
+	noteRepo(t)
+	m := testModel(100, 20)
+	m.noteStore, m.notesPath, m.notesRoot = mustNoteStore(t)
+	m.lastLoaded.path = "a.go"
+	m.view.SetSplit(true)
+	m.setSize()
+	m.view.SetFile(withNotes(parsedFile(t), []notes.Note{
+		{Kind: notes.Lines, Path: "a.go", Start: 2, End: 2, Body: "unique note body"},
+	}, 0))
+
+	if n := strings.Count(m.view.View(), "unique note body"); n != 1 {
+		t.Fatalf("the note is painted %d times in split view:\n%s", n, m.view.View())
+	}
+}
+
+// Adding or dropping a note must not throw the pane back to the top.
+func TestNoteEditsKeepTheScroll(t *testing.T) {
+	noteRepo(t)
+	m := testModel(100, 20)
+	m.noteStore, m.notesPath, m.notesRoot = mustNoteStore(t)
+	m.lastLoaded.path = "a.go"
+
+	var oldText, newText strings.Builder
+	for i := 1; i <= 60; i++ {
+		fmt.Fprintf(&oldText, "line %d\n", i)
+		if i%5 == 0 {
+			fmt.Fprintf(&newText, "changed %d\n", i)
+		} else {
+			fmt.Fprintf(&newText, "line %d\n", i)
+		}
+	}
+	f := diff.Generate("a.go", diff.Modified, oldText.String(), newText.String(), diff.GenerateOptions{Context: 3})
+	_ = m.noteStore.Add(notes.Note{Kind: notes.Lines, Path: "a.go", Start: 40, End: 40, Body: "here"})
+	if err := m.noteStore.Save(m.notesPath); err != nil {
+		t.Fatal(err)
+	}
+	m.view.SetFile(withNotes(f, m.noteStore.For("a.go"), m.noteWidth()))
+	m.view.SetSelectable(true)
+	m.view.SetCursorFocus(true)
+	m.view.JumpTo(30)
+
+	row := -1
+	for i := 0; i < m.view.Rows(); i++ {
+		if l, ok := m.view.RowLine(i); ok && l.Kind == diff.Note {
+			row = i
+		}
+	}
+	if row < 0 {
+		t.Fatal("no note row")
+	}
+	m.view.CursorTo(row)
+	before := m.view.YOffset()
+
+	next, _ := m.dropNote()
+	m = next.(model)
+	if got := m.view.YOffset(); got != before {
+		t.Fatalf("dropping a note moved the pane from %d to %d", before, got)
+	}
+}
+
+// X works in the all-changes document, and the note leaves the store on disk.
+func TestDroppingANoteInAllChanges(t *testing.T) {
+	noteRepo(t)
+	m := testModel(120, 30)
+	m.focus = focusMain
+	m.allChanges = true
+	m.lastLoaded.path = ""
+
+	store, path, root := mustNoteStore(t)
+	note := store.Add(notes.Note{Kind: notes.Lines, Path: "a.go", Start: 2, End: 2, Body: "here"})
+	if err := note.Resolve(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	m.noteStore, m.notesPath, m.notesRoot = store, path, root
+
+	f := diff.Generate("a.go", diff.Modified, "one\ntwo\nthree\n", "one\nTWO\nthree\n", diff.GenerateOptions{Context: 1})
+	annotated := withNotes(f, store.For("a.go"), m.noteWidth())
+	m.view.SetDocument(func(int) *diff.File { return annotated })
+	m.view.AppendBlocks([]*diff.File{annotated})
+	m.view.SetSelectable(true)
+	m.view.SetCursorFocus(true)
+
+	row := -1
+	for i := 0; i < m.view.Rows(); i++ {
+		if l, ok := m.view.RowAnchor(i); ok && l.Kind == diff.Note {
+			row = i
+		}
+	}
+	if row < 0 {
+		t.Fatal("no note row in the document")
+	}
+	m.view.CursorTo(row)
+
+	next, _ := m.dropNote()
+	m = next.(model)
+	if len(m.noteStore.Notes) != 0 {
+		t.Fatalf("notes after X = %+v", m.noteStore.Notes)
+	}
+	loaded, _, _, err := openNoteStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Notes) != 0 {
+		t.Fatalf("the note is still on disk: %+v", loaded.Notes)
+	}
+}
+
+// A note whose text is gone says so in the pane.
+func TestDriftedNoteSaysSo(t *testing.T) {
+	noteRepo(t)
+	m := testModel(100, 24)
+	m.noteStore, m.notesPath, m.notesRoot = mustNoteStore(t)
+	m.lastLoaded.path = "a.go"
+	_ = m.noteStore.Add(notes.Note{Kind: notes.Lines, Path: "a.go", Start: 2, End: 2, Text: []string{"gone"}, Body: "stale"})
+	if err := m.noteStore.Save(m.notesPath); err != nil {
+		t.Fatal(err)
+	}
+	m.view.SetFile(withNotes(parsedFile(t), m.noteStore.For("a.go"), m.noteWidth()))
+	m.reannotate()
+
+	if !strings.Contains(m.view.View(), "drifted") {
+		t.Fatalf("the note does not say it drifted:\n%s", m.view.View())
+	}
+}
+
+// Annotating an already annotated file must not draw the note twice.
+func TestAnnotatingTwiceKeepsOneRow(t *testing.T) {
+	note := notes.Note{Kind: notes.Lines, Path: "a.go", Start: 2, End: 2, Body: "once"}
+	once := withNotes(parsedFile(t), []notes.Note{note}, 0)
+	twice := withNotes(once, []notes.Note{note}, 0)
+
+	rows := 0
+	for _, l := range twice.Lines {
+		if l.Kind == diff.Note && strings.Contains(l.Text, "once") {
+			rows++
+		}
+	}
+	if rows != 1 {
+		t.Fatalf("the note is drawn %d times", rows)
+	}
+}
