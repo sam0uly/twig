@@ -23,6 +23,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"samouly.fun/twig/internal/diff"
+	"samouly.fun/twig/internal/notes"
 	"samouly.fun/twig/internal/stage"
 	"samouly.fun/twig/internal/syntax"
 	"samouly.fun/twig/internal/ui/styles"
@@ -73,7 +74,8 @@ type contentRow struct {
 	// pre marks rows whose text is already rendered (notes, file header).
 	pre  bool
 	text string
-	// fullWidth rows span both columns even in split mode (hunk headers, markers).
+	// fullWidth rows span both columns even in split mode (hunk headers, markers,
+	// notes).
 	fullWidth bool
 	line      diff.Line
 	flat      int
@@ -131,9 +133,13 @@ type Model struct {
 
 	contentWidth int // widest rendered line, drives the horizontal scrollbar
 
-	term     string
-	matches  []Match
-	matchIdx int
+	term string
+	// tagMatch is set while a "tag:" search runs: it picks the note rows.
+	tagMatch func(diff.Line) bool
+	// noteDrift answers whether a note's anchor moved, so its row can say so.
+	noteDrift func(id string) bool
+	matches   []Match
+	matchIdx  int
 	// searchSeq numbers the running search so late results can be dropped.
 	searchSeq int
 	// folded is an ASCII-lowercased mirror of plain, so search can use strings.Index
@@ -891,7 +897,11 @@ type SearchResultsMsg struct {
 // whole document in the background, delivered as SearchResultsMsg.
 func (m *Model) Search(term string) (int, tea.Cmd) {
 	m.term = term
-	m.rx = searchRegexp(term)
+	m.tagMatch, _ = noteFilter(term)
+	m.rx = nil
+	if m.tagMatch == nil {
+		m.rx = searchRegexp(term)
+	}
 	m.searchSeq++
 	m.matches = nil
 	m.matchIdx = -1
@@ -912,6 +922,9 @@ func (m *Model) Search(term string) (int, tea.Cmd) {
 
 // scanWindow finds the matches of term in document lines [from, to).
 func (m Model) scanWindow(term string, from, to int) []Match {
+	if m.tagMatch != nil {
+		return m.scanNotes(from, to)
+	}
 	if m.rx != nil {
 		return scanRegex(m.nlines(), m.lineAt, m.rx, from, to, m.lineBase())
 	}
@@ -921,6 +934,55 @@ func (m Model) scanWindow(term string, from, to int) []Match {
 	return scanLines(m.nlines(), m.lineAt, m.foldedFor(), term, from, to, m.lineBase())
 }
 
+// scanNotes finds note rows in document lines [from, to), one match per note: a
+// wrapped body is several rows of the same note.
+func (m Model) scanNotes(from, to int) []Match {
+	if m.tagMatch == nil {
+		return nil
+	}
+	if m.doc != nil {
+		var out []Match
+		for i := max(0, from); i < min(to, m.doc.nlines()); i++ {
+			if l, ok := m.doc.lineForRow(i); ok && m.tagMatch(l) {
+				out = append(out, Match{Line: m.lineBase() + i})
+			}
+		}
+		return out
+	}
+	if m.file == nil {
+		return nil
+	}
+	// Rows carry the metadata and the file header; a diff line does not.
+	pre := len(m.plain) - len(m.file.Lines)
+	from, to = max(0, from-pre), min(to-pre, len(m.file.Lines))
+	var out []Match
+	for i := from; i < to; i++ {
+		if m.tagMatch(m.file.Lines[i]) {
+			out = append(out, Match{Line: m.lineBase() + pre + i})
+		}
+	}
+	return out
+}
+
+// noteFilter reads "tag:" and "tag:<tag>" as a predicate over note rows.
+func noteFilter(term string) (func(diff.Line) bool, bool) {
+	rest, ok := strings.CutPrefix(strings.ToLower(strings.TrimSpace(term)), "tag:")
+	if !ok {
+		return nil, false
+	}
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return func(l diff.Line) bool { return l.Kind == diff.Note && !l.NoteTail }, true
+	}
+	tag, err := notes.ParseTag(rest)
+	if err != nil {
+		return func(diff.Line) bool { return false }, true
+	}
+	return func(l diff.Line) bool {
+		return l.Kind == diff.Note && !l.NoteTail && l.NoteTag == tag
+	}, true
+}
+
 // scanAllCmd scans the whole document off the UI goroutine. A single paged file
 // scans its sources; everything else folds line by line.
 func (m Model) scanAllCmd(term string) tea.Cmd {
@@ -928,6 +990,13 @@ func (m Model) scanAllCmd(term string) tea.Cmd {
 		return nil
 	}
 	seq := m.searchSeq
+	if m.tagMatch != nil {
+		matches := m.scanNotes(0, m.nlines())
+		term := m.term
+		return func() tea.Msg {
+			return SearchResultsMsg{Seq: seq, Term: term, Matches: matches}
+		}
+	}
 	if m.rx != nil {
 		rx := m.rx
 		count, text, base := m.nlines(), m.lineAt, m.lineBase()
@@ -998,6 +1067,11 @@ func (m Model) visibleLineRange() (int, int) {
 	if m.doc != nil {
 		return m.doc.lineRange(m.vp.YOffset(), m.vpHeight())
 	}
+	if m.split {
+		// A split row holds two lines, so a row offset is not a line offset. The
+		// file behind a split is small enough to scan whole.
+		return 0, m.nlines()
+	}
 	from := max(0, m.logicalAt(m.vp.YOffset()))
 	return from, min(m.nlines(), from+m.vpHeight())
 }
@@ -1010,8 +1084,7 @@ func (m Model) foldedFor() []string {
 	return m.folded
 }
 
-// ApplySearchResults installs the completed match list and jumps to the first
-// match at or below the current position.
+// ApplySearchResults installs the completed match list.
 func (m *Model) ApplySearchResults(msg SearchResultsMsg) bool {
 	if msg.Seq != m.searchSeq || msg.Term != m.term || m.term == "" {
 		return false
@@ -1023,7 +1096,7 @@ func (m *Model) ApplySearchResults(msg SearchResultsMsg) bool {
 	}
 	m.rebuild()
 	if m.matchIdx >= 0 {
-		m.showMatch()
+		m.showMatch(false)
 	}
 	return true
 }
@@ -1165,7 +1238,11 @@ func (m *Model) indexAll() {
 		m.matchIdx = -1
 		return
 	}
-	m.matches = scanLines(m.nlines(), m.lineAt, m.foldedFor(), m.term, 0, m.nlines(), m.lineBase())
+	if m.tagMatch != nil {
+		m.matches = m.scanNotes(0, m.nlines())
+	} else {
+		m.matches = scanLines(m.nlines(), m.lineAt, m.foldedFor(), m.term, 0, m.nlines(), m.lineBase())
+	}
 	if m.matchIdx >= len(m.matches) {
 		m.matchIdx = len(m.matches) - 1
 	}
@@ -1213,43 +1290,95 @@ func isASCII(s string) bool {
 // ClearSearch removes the search highlights.
 func (m *Model) ClearSearch() {
 	m.term = ""
+	m.tagMatch = nil
 	m.matches = nil
 	m.matchIdx = -1
 	m.rebuild()
 }
 
-// HighlightNext moves to the next search match.
+// HighlightNext moves to the first match below the reader. It is answered from
+// where the reader is, not from a remembered index, so a search and its n both
+// start from the same place.
 func (m *Model) HighlightNext() {
-	if len(m.matches) == 0 {
-		return
+	if i, ok := m.matchAfter(m.readerRow(), false); ok {
+		m.matchIdx = i
+		m.rebuild()
+		m.showMatch(true)
 	}
-	m.matchIdx = (m.matchIdx + 1) % len(m.matches)
-	m.rebuild()
-	m.showMatch()
 }
 
-// HighlightPrevious moves to the previous search match.
+// HighlightPrevious moves to the last match above the reader.
 func (m *Model) HighlightPrevious() {
-	if len(m.matches) == 0 {
-		return
+	if i, ok := m.matchAfter(m.readerRow(), true); ok {
+		m.matchIdx = i
+		m.rebuild()
+		m.showMatch(true)
 	}
-	m.matchIdx = (m.matchIdx - 1 + len(m.matches)) % len(m.matches)
-	m.rebuild()
-	m.showMatch()
 }
 
-func (m *Model) showMatch() {
+func (m *Model) showMatch(moveCursor bool) {
 	if m.matchIdx < 0 || m.matchIdx >= len(m.matches) {
 		return
 	}
 	mt := m.matches[m.matchIdx]
+	row := m.rowForLine(mt.Line)
 	before := m.vp.YOffset()
-	m.vp.EnsureVisible(m.rowForLine(mt.Line), mt.Start, mt.End)
+	m.vp.EnsureVisible(row, mt.Start, mt.End)
 	if after := m.vp.YOffset(); after != before {
 		// EnsureVisible scrolls sideways, which is wanted; the vertical part glides.
 		m.vp.SetYOffset(before)
 		m.glideTo(after)
 	}
+	// A note has no text to highlight, so the cursor is what says which one this
+	// is. While the term is still being typed it stays put.
+	if moveCursor && m.selectable {
+		if l, ok := m.RowAnchor(row); ok && l.Kind == diff.Note {
+			m.CursorTo(row)
+		}
+	}
+}
+
+// readerRow is the row the reader is on: the cursor when the pane has one, the
+// reading rail when it does not, and the top of the window otherwise.
+func (m Model) readerRow() int {
+	if m.cursor >= 0 && m.cursorOn {
+		return m.cursor
+	}
+	if row := m.readBarRow(); row >= 0 {
+		return row
+	}
+	return m.vp.YOffset()
+}
+
+// matchAfter is the nearest match below (or above) row, wrapping to the other
+// end when there is none, which is what n and N do at the edges.
+func (m Model) matchAfter(row int, back bool) (int, bool) {
+	best := -1
+	for i := range m.matches {
+		at := m.rowForLine(m.matches[i].Line)
+		if at < 0 {
+			continue
+		}
+		if back {
+			if at < row && (best < 0 || at > m.rowForLine(m.matches[best].Line)) {
+				best = i
+			}
+			continue
+		}
+		if at > row && (best < 0 || at < m.rowForLine(m.matches[best].Line)) {
+			best = i
+		}
+	}
+	if best >= 0 {
+		return best, true
+	}
+	if len(m.matches) == 0 {
+		return 0, false
+	}
+	if back {
+		return len(m.matches) - 1, true
+	}
+	return 0, true
 }
 
 // nearestMatch is the first match at or below row from.
@@ -1262,12 +1391,23 @@ func (m Model) nearestMatch(from int) int {
 	return len(m.matches) - 1
 }
 
-// rowForLine maps a flat line index onto the row that paints it.
+// rowForLine maps a flat line index onto the row that paints it. Split mode
+// pairs two lines into one row, so the row is not the index.
 func (m Model) rowForLine(flat int) int {
 	if m.doc != nil {
 		return m.displayOfLogical(m.doc.rowForLine(flat - m.lineBase()))
 	}
-	return flat
+	if m.split {
+		for i, r := range m.rows {
+			if r.pre {
+				continue
+			}
+			if (r.hasLeft && r.leftFlat == flat) || (r.hasRight && r.rightFlat == flat) {
+				return m.displayOfLogical(i)
+			}
+		}
+	}
+	return m.displayOfLogical(flat)
 }
 
 // ScrollTo glides (or jumps) to a rendered-line offset and returns the command
@@ -1345,6 +1485,28 @@ func (m *Model) SetFileAt(f *diff.File, line int) {
 // RowLine is the diff line a row paints, if it paints one.
 func (m Model) RowLine(row int) (diff.Line, bool) {
 	lines := m.linesAt(row)
+	if len(lines) == 0 {
+		return diff.Line{}, false
+	}
+	return lines[0], true
+}
+
+// SetNoteDrift installs the predicate that marks drifted note rows.
+func (m *Model) SetNoteDrift(fn func(id string) bool) {
+	m.noteDrift = fn
+	m.cache.reset()
+}
+
+// RowAnchor is the line a note on this row anchors to. A split row can hold a
+// deletion on the left and its replacement on the right, and only the side with
+// a new number is somewhere a note can live.
+func (m Model) RowAnchor(row int) (diff.Line, bool) {
+	lines := m.linesAt(row)
+	for _, l := range lines {
+		if l.New != 0 {
+			return l, true
+		}
+	}
 	if len(lines) == 0 {
 		return diff.Line{}, false
 	}
@@ -1688,7 +1850,7 @@ func splitRows(lines []diff.Line, base int) []contentRow {
 			continue
 		}
 
-		full := l.Kind == diff.HunkHeader || l.Kind == diff.NoNewline
+		full := l.Kind == diff.HunkHeader || l.Kind == diff.NoNewline || l.Kind == diff.Note
 		rows = append(rows, contentRow{
 			fullWidth: full,
 			line:      l,
@@ -2085,6 +2247,9 @@ func (m Model) renderNote(row int, l diff.Line) string {
 		} else {
 			b.WriteString(body.Render(l.Text))
 		}
+	}
+	if !l.NoteTail && l.NoteID != "" && m.noteDrift != nil && m.noteDrift(l.NoteID) {
+		b.WriteString(m.styles.NoteDrift().Render("  drifted"))
 	}
 	return m.padLine(b.String(), body, m.foldMarkerWidth(row))
 }
@@ -2636,6 +2801,9 @@ func gutterText(g *gutterState, info viewport.GutterContext) string {
 	text := strings.Repeat(" ", g.cells())
 	if !info.Soft {
 		switch l.Kind {
+		case diff.Note:
+			// A note is not a line of the file: a number here reads as a
+			// duplicate of the line it sits under.
 		case diff.HunkHeader:
 			text = "  ·  "
 			if pad := g.cells() - ansi.StringWidth(text); pad > 0 {
@@ -2652,7 +2820,7 @@ func gutterText(g *gutterState, info viewport.GutterContext) string {
 	if hasBackground(base) {
 		return base.Render(text)
 	}
-	return text
+	return base.Foreground(g.theme.DescNormalFg()).Render(text)
 }
 
 // lineNum formats a line number, leaving absent sides (0) blank.
