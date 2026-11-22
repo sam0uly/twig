@@ -628,6 +628,36 @@ func (s Styles) ModalHint() lipgloss.Style { return s.modalHint }
 // ModalKeycap returns the key cap style used in the dialog footer.
 func (s Styles) ModalKeycap() lipgloss.Style { return s.modalKeycap }
 
+// NoteDrift marks a note whose anchor no longer holds.
+func (s Styles) NoteDrift() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(tone.Paprika).Bold(true)
+}
+
+// SearchBand is the strip the diff search sits on.
+func (s Styles) SearchBand() lipgloss.Style {
+	return lipgloss.NewStyle().Background(tone.BBQ)
+}
+
+// SearchPrompt styles the marker in front of the query.
+func (s Styles) SearchPrompt() lipgloss.Style {
+	return lipgloss.NewStyle().Background(tone.BBQ).Foreground(tone.Zest).Bold(true)
+}
+
+// SearchText styles the query.
+func (s Styles) SearchText() lipgloss.Style {
+	return lipgloss.NewStyle().Background(tone.BBQ).Foreground(tone.Salt)
+}
+
+// SearchHint styles the placeholder that says what the box takes.
+func (s Styles) SearchHint() lipgloss.Style {
+	return lipgloss.NewStyle().Background(tone.BBQ).Foreground(tone.Squid)
+}
+
+// SearchCursor is the colour of the caret in the search box.
+func (s Styles) SearchCursor() lipgloss.Style {
+	return lipgloss.NewStyle().Background(tone.Zest).Foreground(tone.Pepper)
+}
+
 // SearchHi returns the style for search matches.
 func (s Styles) SearchHi() lipgloss.Style { return s.searchHi }
 

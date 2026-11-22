@@ -23,7 +23,7 @@ type Model struct {
 func New(st styles.Styles) Model {
 	ti := textinput.New()
 	ti.Prompt = "/"
-	ti.Placeholder = "search in diff…"
+	ti.Placeholder = "search · tag: for notes · esc clears"
 	ti.CharLimit = 512
 	return Model{input: ti, styles: st}
 }
@@ -51,7 +51,19 @@ func (m *Model) Deactivate() {
 func (m *Model) Clear() { m.input.SetValue("") }
 
 // SetStyles updates the theme.
-func (m *Model) SetStyles(st styles.Styles) { m.styles = st }
+func (m *Model) SetStyles(st styles.Styles) {
+	m.styles = st
+	state := textinput.StyleState{
+		Text:        st.SearchText(),
+		Placeholder: st.SearchHint(),
+		Prompt:      st.SearchPrompt(),
+	}
+	m.input.SetStyles(textinput.Styles{
+		Focused: state,
+		Blurred: state,
+		Cursor:  textinput.CursorStyle{Color: st.SearchCursor().GetBackground()},
+	})
+}
 
 // SetWidth sizes the input.
 func (m *Model) SetWidth(width int) { m.input.SetWidth(max(1, width-4)) }
@@ -85,9 +97,9 @@ func (m Model) View(width int, matchMsg string) string {
 	// without counting in its width.
 	in.SetWidth(max(4, width-4-ansi.StringWidth(count)))
 
-	bar := ansi.Truncate(m.styles.Subtle().Render("  ")+in.View()+count, width, "…")
+	bar := ansi.Truncate("  "+in.View()+count, width, "…")
 	if pad := width - ansi.StringWidth(bar); pad > 0 {
 		bar += strings.Repeat(" ", pad)
 	}
-	return bar
+	return m.styles.SearchBand().Render(bar)
 }
