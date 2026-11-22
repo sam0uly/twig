@@ -278,6 +278,13 @@ var errDiffFound = errors.New("differences found")
 
 func isTerminal(f *os.File) bool { return term.IsTerminal(f.Fd()) }
 
+// isTerminalWriter reports whether the command's output is a terminal, which is
+// what decides colour when the flag says auto.
+func isTerminalWriter(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	return ok && isTerminal(f)
+}
+
 func resolveColor(mode string, tty bool) (bool, error) {
 	switch mode {
 	case "never":

@@ -11,12 +11,14 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
 	"samouly.fun/twig/internal/config"
 	"samouly.fun/twig/internal/diff"
 	"samouly.fun/twig/internal/git"
 	"samouly.fun/twig/internal/notes"
+	"samouly.fun/twig/internal/ui/styles"
 )
 
 // newNotesCommand reads and writes notes. Use --json from a tool.
@@ -143,6 +145,12 @@ func listNotes(c *cobra.Command, o *options, asJSON bool, under string, brief bo
 	}
 
 	if !asJSON {
+		color, colorErr := resolveColor(o.color, isTerminalWriter(c.OutOrStdout()))
+		if colorErr != nil {
+			return colorErr
+		}
+		ink := newInk(color)
+
 		var b strings.Builder
 		// Notes on one anchor are listed together, above the code they share.
 		for i := 0; i < len(list); {
@@ -150,13 +158,22 @@ func listNotes(c *cobra.Command, o *options, asJSON bool, under string, brief bo
 			first := i
 			for i < len(list) && list[i].Anchor() == anchor {
 				note := list[i]
-				fmt.Fprintf(&b, "%-5s %s  %s", strings.ToUpper(note.Tag.String()), note.ID, anchor)
-				if drifted(note) {
-					b.WriteString("  (drifted)")
+				body := note.Body
+				if brief {
+					body = ink.oneLine(body)
 				}
-				b.WriteString("  ")
-				b.WriteString(strings.ReplaceAll(note.Body, "\n", "\n      "))
+				lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+				head := ink.tag(note.Tag) + " " + ink.dim(note.ID) + "  " + ink.tone(note.Tag, anchor) + "  "
+				b.WriteString(head + ink.tone(note.Tag, lines[0]))
+				if drifted(note) {
+					b.WriteString(ink.drifted())
+				}
 				b.WriteString("\n")
+				// A multi-line body hangs under the text it continues.
+				pad := strings.Repeat(" ", lipgloss.Width(head))
+				for _, part := range lines[1:] {
+					b.WriteString(pad + ink.tone(note.Tag, part) + "\n")
+				}
 				i++
 			}
 			if brief {
@@ -164,7 +181,7 @@ func listNotes(c *cobra.Command, o *options, asJSON bool, under string, brief bo
 			}
 			for _, line := range context(list[first]) {
 				b.WriteString("      ")
-				b.WriteString(line)
+				b.WriteString(ink.code(list[first].Tag, line))
 				b.WriteString("\n")
 			}
 		}
@@ -212,6 +229,93 @@ func hunkDrifted(note notes.Note, cache map[string]*diff.File, cfg config.Config
 	return note.Header != "" && note.Header != hunk.Header
 }
 
+// ink paints the listing: a tag pill, its body colour, and the diff signs, or
+// the plain words when the output is not a terminal.
+type ink struct {
+	st styles.Styles
+	on bool
+}
+
+func newInk(on bool) ink { return ink{st: styles.New(), on: on} }
+
+// tag is the tag column: a pill on a terminal, a padded word otherwise.
+func (i ink) tag(tag notes.Tag) string {
+	if !i.on {
+		return fmt.Sprintf("%-5s", strings.ToUpper(tag.String()))
+	}
+	icon, word, pill, _ := i.st.Note(tag)
+	return pill.Render(" " + icon + " " + word + " ")
+}
+
+// tone paints a note's own words in its tag's colour.
+func (i ink) tone(tag notes.Tag, s string) string {
+	if !i.on {
+		return s
+	}
+	_, _, _, body := i.st.Note(tag)
+	return lipgloss.NewStyle().Foreground(body.GetForeground()).Render(s)
+}
+
+// dim paints what is there for orientation, not for reading.
+func (i ink) dim(s string) string {
+	if !i.on {
+		return s
+	}
+	return i.st.Subtle().Render(s)
+}
+
+// oneLine folds a multi-line body into the one line --brief promises.
+func (i ink) oneLine(body string) string {
+	var parts []string
+	for _, part := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
+		if part = strings.TrimSpace(part); part != "" {
+			parts = append(parts, part)
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// drifted is the suffix a note carries when its anchor no longer holds.
+func (i ink) drifted() string {
+	if !i.on {
+		return "  (drifted)"
+	}
+	return "  " + i.st.NoteDrift().Render("(drifted)")
+}
+
+// code paints one context row by its diff sign, with the marker in the note's
+// own colour so it reads as part of the note.
+func (i ink) code(tag notes.Tag, line string) string {
+	if !i.on || line == "" {
+		return line
+	}
+	// The row carries the anchor marker before the diff sign.
+	prefix, rest := "  ", line
+	if strings.HasPrefix(line, "→ ") {
+		prefix, rest = line[:len("→ ")], line[len("→ "):]
+	} else if strings.HasPrefix(line, "  ") {
+		prefix, rest = line[:2], line[2:]
+	}
+	if rest == "" {
+		return line
+	}
+	mark := ""
+	if prefix != "  " {
+		mark = i.tone(tag, strings.TrimSuffix(prefix, " ")) + " "
+	} else {
+		mark = prefix
+	}
+	switch rest[0] {
+	case '+':
+		return mark + lipgloss.NewStyle().Foreground(i.st.StatAddFg()).Render(rest)
+	case '-':
+		return mark + lipgloss.NewStyle().Foreground(i.st.StatDelFg()).Render(rest)
+	case '@':
+		return mark + i.st.Subtle().Render(rest)
+	}
+	return line
+}
+
 // noteDiff is the worktree diff of a path, or its staged one.
 func noteDiff(path string, cache map[string]*diff.File, cfg config.Config) *diff.File {
 	if file, seen := cache[path]; seen {
@@ -248,18 +352,27 @@ func noteContext(note notes.Note, file *diff.File) []string {
 	case notes.Lines:
 		row := anchorRow(file, note)
 		if row < 0 {
-			return nil
-		}
-		start, end := max(0, row-2), min(len(file.Lines), row+3)
-		for i := row; i >= 0; i-- {
-			if file.Lines[i].Kind == diff.HunkHeader {
-				start = min(start, i)
-				break
+			// The text is gone: show what the note was written against.
+			out := make([]string, 0, len(note.Text))
+			for i, text := range note.Text {
+				mark := "  "
+				if i == 0 {
+					mark = "→ "
+				}
+				out = append(out, mark+text)
 			}
+			return out
 		}
+		start, end := max(0, row-4), min(len(file.Lines), row+5)
 		out := make([]string, 0, end-start)
 		for _, line := range file.Lines[start:end] {
-			out = append(out, line.Text)
+			// The marker says which row the note sits on, so a reader or a tool
+			// never has to count lines under a hunk header.
+			mark := "  "
+			if line.New != 0 && line.New >= note.Start && line.New <= note.End {
+				mark = "→ "
+			}
+			out = append(out, mark+line.Text)
 		}
 		return out
 	default:

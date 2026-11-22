@@ -203,8 +203,9 @@ lead with a tag (`todo: fix this`, `warn`, `error:`), `tab` cycles the tag,
 The row grows with the note, and a long body wraps to the pane on its own instead
 of following the diff's wrap setting. The cursor scrolls onto note rows, so `X`
 drops the one under it. A note keeps the text it was written against, so it still
-lands on that line when the numbers move. A note written by the shell appears
-while the pane is open, and `--json` is the form a tool reads.
+lands on that line when the numbers move. `/tag:` searches the notes and `n`/`N`
+walk them, with `tag:todo` narrowing it to one tag. A note written by the shell
+appears while the pane is open, and `--json` is the form a tool reads.
 
 ```sh
 twig notes                          # each note, then the code it sits on

@@ -202,7 +202,7 @@ func TestNotesShowTheirCodeContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	for _, want := range []string{"@@ -1,10 +1,10 @@", "-two", "+TWO"} {
+	for _, want := range []string{"→ ", "-two", "+TWO"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("the context is missing %q:\n%s", want, out)
 		}
@@ -212,7 +212,7 @@ func TestNotesShowTheirCodeContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("brief: %v", err)
 	}
-	if strings.Contains(brief, "@@") || strings.Contains(brief, "+TWO") {
+	if strings.Contains(brief, "→") || strings.Contains(brief, "+TWO") {
 		t.Fatalf("--brief still prints context:\n%s", brief)
 	}
 	if !strings.Contains(brief, "the line") {
@@ -223,7 +223,7 @@ func TestNotesShowTheirCodeContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json: %v", err)
 	}
-	if !strings.Contains(js, `"context":[`) || !strings.Contains(js, "@@ -1,10 +1,10 @@") {
+	if !strings.Contains(js, `"context":[`) || !strings.Contains(js, "→ ") {
 		t.Fatalf("the json has no context:\n%s", js)
 	}
 }
@@ -242,8 +242,8 @@ func TestNotesOnOneAnchorShareTheirContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if got := strings.Count(out, "@@ -1,10 +1,10 @@"); got != 1 {
-		t.Fatalf("the hunk header is printed %d times:\n%s", got, out)
+	if got := strings.Count(out, "→ "); got != 1 {
+		t.Fatalf("the anchored row is marked %d times:\n%s", got, out)
 	}
 	if got := strings.Count(out, "-two"); got != 1 {
 		t.Fatalf("the context is printed %d times:\n%s", got, out)
@@ -255,7 +255,7 @@ func TestNotesOnOneAnchorShareTheirContext(t *testing.T) {
 	}
 	// Both notes come first, then their one block of code.
 	second := strings.Index(out, "second")
-	if hunk := strings.Index(out, "@@"); second > hunk {
+	if code := strings.Index(out, "→ "); second > code {
 		t.Fatalf("a note is listed below the code:\n%s", out)
 	}
 }
@@ -330,5 +330,39 @@ func TestNotesClearByPath(t *testing.T) {
 	out, _ := runNotes(t, "", "notes")
 	if strings.Contains(out, "sub/c.go") || !strings.Contains(out, "a.go") {
 		t.Fatalf("clear --path sub left the wrong notes:\n%s", out)
+	}
+}
+
+// A multi-line body hangs under the line it continues, and --brief keeps its
+// one-line promise.
+func TestMultilineBodyLayout(t *testing.T) {
+	notesRepo(t)
+	if _, err := runNotes(t, "first\nsecond\n", "notes", "add", "a.go:2"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	out, err := runNotes(t, "", "notes")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	aligned := false
+	for _, line := range strings.Split(out, "\n") {
+		if line == "second" {
+			t.Fatalf("the continuation is not indented:\n%s", out)
+		}
+		if strings.HasSuffix(line, "second") && strings.HasPrefix(line, " ") {
+			aligned = true
+		}
+	}
+	if !aligned {
+		t.Fatalf("the continuation is not aligned:\n%s", out)
+	}
+
+	brief, err := runNotes(t, "", "notes", "--brief")
+	if err != nil {
+		t.Fatalf("brief: %v", err)
+	}
+	if strings.Contains(brief, "first\n") || !strings.Contains(brief, "first · second") {
+		t.Fatalf("--brief is not one line per note:\n%s", brief)
 	}
 }
