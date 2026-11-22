@@ -318,7 +318,8 @@ func (n *Note) Resolve(root string) error {
 	return nil
 }
 
-// Drifted reports whether the anchor still holds.
+// Drifted reports whether the anchor still holds. Text that moved with the
+// lines around it has not drifted: the note follows it, the way the pane does.
 func (n Note) Drifted(root string) bool {
 	if n.Kind == Hunk {
 		return false
@@ -330,11 +331,36 @@ func (n Note) Drifted(root string) bool {
 		return false
 	}
 	lines, err := fileLines(root, n.Path)
-	if err != nil || n.End > len(lines) {
+	if err != nil {
 		return true
+	}
+	return !n.at(lines) && !n.found(lines)
+}
+
+// at reports whether the note's text still sits at its anchor.
+func (n Note) at(lines []string) bool {
+	if n.End > len(lines) {
+		return false
 	}
 	for i, want := range n.Text {
 		if lines[n.Start-1+i] != want {
+			return false
+		}
+	}
+	return true
+}
+
+// found reports whether the note's text appears anywhere in the file.
+func (n Note) found(lines []string) bool {
+	for i := 0; i+len(n.Text) <= len(lines); i++ {
+		match := true
+		for j, want := range n.Text {
+			if lines[i+j] != want {
+				match = false
+				break
+			}
+		}
+		if match {
 			return true
 		}
 	}

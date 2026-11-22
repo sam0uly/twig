@@ -114,6 +114,11 @@ func TestResolveAndDrift(t *testing.T) {
 		t.Fatal("a fresh note reads as drifted")
 	}
 
+	writeFile(t, root, "a.go", "zero\none\ntwo\nthree\n")
+	if note.Drifted(root) {
+		t.Fatal("text that only moved reads as drifted")
+	}
+
 	writeFile(t, root, "a.go", "one\nCHANGED\nthree\n")
 	if !note.Drifted(root) {
 		t.Fatal("an edited line did not drift")
