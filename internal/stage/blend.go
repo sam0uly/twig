@@ -80,11 +80,13 @@ func Blend(pre, post string, f *diff.File, sel *Selection) (string, error) {
 	for i := 0; i < len(f.Lines); {
 		row := f.Lines[i]
 		switch row.Kind {
-		case diff.HunkHeader, diff.NoNewline:
-			i++
-			continue
 		case diff.Context:
 			emitPre(row.Old - 1)
+			i++
+			continue
+		case diff.Deletion, diff.Addition:
+			// Change group handled below.
+		default:
 			i++
 			continue
 		}
@@ -97,16 +99,17 @@ func Blend(pre, post string, f *diff.File, sel *Selection) (string, error) {
 		start := i
 		for i < len(f.Lines) {
 			k := f.Lines[i].Kind
-			if k != diff.Deletion && k != diff.Addition {
+			if k != diff.Deletion && k != diff.Addition && k != diff.Note {
 				break
 			}
 			i++
 		}
 		var dels, adds []diff.Line
 		for _, r := range f.Lines[start:i] {
-			if r.Kind == diff.Deletion {
+			switch r.Kind {
+			case diff.Deletion:
 				dels = append(dels, r)
-			} else {
+			case diff.Addition:
 				adds = append(adds, r)
 			}
 		}
@@ -218,24 +221,24 @@ func Pair(f *diff.File, sel *Selection) *Selection {
 	}
 	out := sel.Clone()
 	for i := 0; i < len(f.Lines); {
-		switch f.Lines[i].Kind {
-		case diff.HunkHeader, diff.NoNewline, diff.Context:
+		if k := f.Lines[i].Kind; k != diff.Deletion && k != diff.Addition {
 			i++
 			continue
 		}
 		start := i
 		for i < len(f.Lines) {
 			k := f.Lines[i].Kind
-			if k != diff.Deletion && k != diff.Addition {
+			if k != diff.Deletion && k != diff.Addition && k != diff.Note {
 				break
 			}
 			i++
 		}
 		var dels, adds []diff.Line
 		for _, r := range f.Lines[start:i] {
-			if r.Kind == diff.Deletion {
+			switch r.Kind {
+			case diff.Deletion:
 				dels = append(dels, r)
-			} else {
+			case diff.Addition:
 				adds = append(adds, r)
 			}
 		}

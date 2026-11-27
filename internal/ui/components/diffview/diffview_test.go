@@ -6,11 +6,13 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"samouly.fun/twig/internal/diff"
+	"samouly.fun/twig/internal/notes"
 	"samouly.fun/twig/internal/syntax"
 	"samouly.fun/twig/internal/ui/styles"
 )
@@ -1017,5 +1019,226 @@ func TestSyntaxIndexCachesMisses(t *testing.T) {
 	}
 	if idx != nil {
 		t.Fatalf("unexpected index for an unknown language: %d bytes", idx.Bytes())
+	}
+}
+
+// "tag:" searches the notes, one match per note, and a tag name narrows it.
+func TestTagSearchWalksNotes(t *testing.T) {
+	f := sampleFile()
+	lines := make([]diff.Line, 0, len(f.Lines)+3)
+	for _, l := range f.Lines {
+		lines = append(lines, l)
+		if l.Kind == diff.Addition {
+			lines = append(
+				lines,
+				diff.Line{Kind: diff.Note, NoteID: "n1", NoteTag: notes.Todo, Text: "first"},
+				diff.Line{Kind: diff.Note, NoteID: "n1", NoteTag: notes.Todo, Text: "wrapped", NoteTail: true},
+				diff.Line{Kind: diff.Note, NoteID: "n2", NoteTag: notes.Warn, Text: "second"},
+			)
+			break
+		}
+	}
+	f.Lines = lines
+
+	m := New(false, styles.New())
+	m.SetSize(80, 20)
+	m.SetFile(f)
+
+	if got, _ := m.Search("tag:"); got != 2 {
+		t.Fatalf("tag: = %d matches, want 2 (one per note)", got)
+	}
+	if got, _ := m.Search("tag:todo"); got != 1 {
+		t.Fatalf("tag:todo = %d matches, want 1", got)
+	}
+	if got, _ := m.Search("tag:warn"); got != 1 {
+		t.Fatalf("tag:warn = %d matches, want 1", got)
+	}
+	if got, _ := m.Search("tag:error"); got != 0 {
+		t.Fatalf("tag:error = %d matches, want 0", got)
+	}
+	if got, _ := m.Search("tag:nonsense"); got != 0 {
+		t.Fatalf("an unknown tag = %d matches, want 0", got)
+	}
+	if got, _ := m.Search("first"); got != 1 {
+		t.Fatalf("a text search after a tag search = %d matches, want 1", got)
+	}
+}
+
+// The unified number is painted in the same dim tone the split columns use.
+func TestUnifiedNumberIsPainted(t *testing.T) {
+	st := styles.New()
+	g := &gutterState{
+		show: true, numW: 4, theme: st, focused: true,
+		file: &diff.File{Lines: []diff.Line{{Kind: diff.Context, Old: 3, New: 3, Text: " x"}}},
+	}
+	got := gutterText(g, viewport.GutterContext{Index: 0})
+	want := lipgloss.NewStyle().Foreground(st.DescNormalFg()).Render("3    ")
+	if got != want {
+		t.Fatalf("gutter = %q, want %q", got, want)
+	}
+}
+
+// n lands on the note itself: a zero-width match has nothing to highlight, so
+// the cursor bar is the marker.
+func TestNextNoteMovesTheCursor(t *testing.T) {
+	f := sampleFile()
+	lines := make([]diff.Line, 0, len(f.Lines)+1)
+	for _, l := range f.Lines {
+		lines = append(lines, l)
+		if l.Kind == diff.Addition {
+			lines = append(lines, diff.Line{Kind: diff.Note, NoteID: "n1", NoteTag: notes.Todo, Text: "a note"})
+			break
+		}
+	}
+	f.Lines = lines
+
+	m := New(false, styles.New())
+	m.SetSize(80, 20)
+	m.SetSelectable(true)
+	m.SetCursorFocus(true)
+	m.SetFile(f)
+
+	if got, _ := m.Search("tag:"); got != 1 {
+		t.Fatalf("tag: = %d matches, want 1", got)
+	}
+	m.HighlightNext()
+
+	l, ok := m.RowAnchor(m.CursorRow())
+	if !ok || l.Kind != diff.Note {
+		t.Fatalf("the cursor is on %q, not on the note", l.Text)
+	}
+	if got := m.barAt(m.CursorRow()); !strings.Contains(got, "┃") {
+		t.Fatal("the cursor bar is not painted on the note")
+	}
+}
+
+// A split row pairs two lines, so the note's row is not its line index.
+func TestTagSearchInSplitView(t *testing.T) {
+	f := sampleFile()
+	lines := make([]diff.Line, 0, len(f.Lines)+1)
+	for _, l := range f.Lines {
+		lines = append(lines, l)
+		if l.Kind == diff.Addition {
+			lines = append(lines, diff.Line{Kind: diff.Note, NoteID: "n1", NoteTag: notes.Todo, Text: "a note"})
+			break
+		}
+	}
+	f.Lines = lines
+
+	m := New(false, styles.New())
+	m.SetSize(80, 20)
+	m.SetSplit(true)
+	m.SetSelectable(true)
+	m.SetCursorFocus(true)
+	m.SetFile(f)
+
+	if got, _ := m.Search("tag:"); got != 1 {
+		t.Fatalf("tag: in split = %d matches, want 1", got)
+	}
+	m.HighlightNext()
+	l, ok := m.RowAnchor(m.CursorRow())
+	if !ok || l.Kind != diff.Note {
+		t.Fatalf("the cursor is on %q, not on the note", l.Text)
+	}
+	if got := m.barAt(m.CursorRow()); !strings.Contains(got, "┃") {
+		t.Fatalf("no cursor bar on the note: %q", got)
+	}
+}
+
+// All changes is a virtual document: the notes inside its blocks are searched.
+func TestTagSearchInAllChanges(t *testing.T) {
+	first := docTestFile("a.go", 12, "changed")
+	first.Lines = append(first.Lines, diff.Line{Kind: diff.Note, NoteID: "n1", NoteTag: notes.Warn, Text: "from a"})
+	second := docTestFile("b.go", 12, "changed")
+	second.Lines = append(second.Lines, diff.Line{Kind: diff.Note, NoteID: "n2", NoteTag: notes.Fyi, Text: "from b"})
+
+	loads := 0
+	m := newDocView(t, []*diff.File{first, second}, &loads)
+	m.SetSize(80, 60)
+	m.SetSelectable(true)
+	m.SetCursorFocus(true)
+
+	if got, _ := m.Search("tag:"); got != 2 {
+		t.Fatalf("tag: in the document = %d matches, want 2", got)
+	}
+	if got, _ := m.Search("tag:warn"); got != 1 {
+		t.Fatalf("tag:warn in the document = %d matches, want 1", got)
+	}
+	m.HighlightNext()
+	l, ok := m.RowAnchor(m.CursorRow())
+	if !ok || l.Kind != diff.Note {
+		t.Fatalf("the cursor is on %q, not on the note", l.Text)
+	}
+}
+
+// n walks the notes in split view in order, one press once.
+func TestSplitTagSearchWalk(t *testing.T) {
+	f := sampleFile()
+	lines := make([]diff.Line, 0, len(f.Lines)+3)
+	for i, l := range f.Lines {
+		lines = append(lines, l)
+		if l.Kind == diff.Context && i > 2 {
+			lines = append(
+				lines,
+				diff.Line{Kind: diff.Note, NoteID: "n1", NoteTag: notes.Todo, Text: "one"},
+				diff.Line{Kind: diff.Note, NoteID: "n2", NoteTag: notes.Fyi, Text: "two"},
+			)
+			break
+		}
+	}
+	f.Lines = lines
+
+	m := New(false, styles.New())
+	m.SetSize(80, 30)
+	m.SetSplit(true)
+	m.SetSelectable(true)
+	m.SetCursorFocus(true)
+	m.SetFile(f)
+
+	if got, _ := m.Search("tag:"); got != 2 {
+		t.Fatalf("tag: = %d matches, want 2", got)
+	}
+	for i, want := range []string{"one", "two"} {
+		m.HighlightNext()
+		l, _ := m.RowAnchor(m.CursorRow())
+		if l.Kind != diff.Note || l.Text != want {
+			t.Fatalf("press %d landed on %q (%v), want %q", i+1, l.Text, l.Kind, want)
+		}
+	}
+}
+
+// Split scans the whole file, so the count is every note and not just the rows
+// in the window.
+func TestSplitSearchCountsEveryNote(t *testing.T) {
+	var oldText, newText strings.Builder
+	for i := 1; i <= 200; i++ {
+		fmt.Fprintf(&oldText, "line %d\n", i)
+		if i%80 == 20 {
+			fmt.Fprintf(&newText, "changed %d\n", i)
+		} else {
+			fmt.Fprintf(&newText, "line %d\n", i)
+		}
+	}
+	f := diff.Generate("a.go", diff.Modified, oldText.String(), newText.String(), diff.GenerateOptions{Context: 3})
+
+	lines := make([]diff.Line, 0, len(f.Lines)+3)
+	added := 0
+	for _, l := range f.Lines {
+		lines = append(lines, l)
+		if l.Kind == diff.Addition {
+			added++
+			lines = append(lines, diff.Line{Kind: diff.Note, NoteID: fmt.Sprintf("n%d", added), NoteTag: notes.Fyi, Text: "note"})
+		}
+	}
+	f.Lines = lines
+
+	m := New(false, styles.New())
+	m.SetSize(80, 8)
+	m.SetSplit(true)
+	m.SetSelectable(true)
+	m.SetFile(f)
+
+	if got, _ := m.Search("tag:"); got != 3 {
+		t.Fatalf("split count = %d, want 3", got)
 	}
 }

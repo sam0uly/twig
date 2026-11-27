@@ -140,6 +140,8 @@ Search and the list filters run as you type, and `esc` clears either.
 | `z`                      | undo the last staging operation                 |
 | `x`                      | discard what the cursor is on                   |
 | `s` / `u`                | stage / unstage the whole file or folder        |
+| `M`                      | note the line the cursor is on                  |
+| `X`                      | drop the notes on that line                     |
 | `C` / `P`                | commit / push                                   |
 | `y` / `Y`                | copy the patch / the hunk                       |
 | `v` / `w`                | split view / soft wrap                          |
@@ -187,6 +189,42 @@ conversion.
 `x` discards the same three scopes after showing the lines, scrollable, saying where
 in the list you are: `enter` discards, `esc` keeps, `y` stays yank, `z` undoes it.
 The lines are re-checked at write time, so a moved file is refused, not half-applied.
+
+## Notes
+
+A note sits on one file, one hunk or a range of lines, and reads like a footer
+notice: the tag's icon and word in a pill — `FYI`, `TODO`, `WARN`, `ERROR` — then
+the body in that tag's brighter colour on its wash. File notes go above the first
+hunk, line notes under their line, hunk notes after the hunk's last change.
+
+`M` opens an input row at the cursor, its keys written in it: type the body, or
+lead with a tag (`todo: fix this`, `warn`, `error:`), `tab` cycles the tag,
+`alt+enter` starts a new line, `enter` saves, `esc` leaves the pane where it was.
+The row grows with the note, and a long body wraps to the pane on its own instead
+of following the diff's wrap setting. The cursor scrolls onto note rows, so `X`
+drops the one under it. A note keeps the text it was written against, so it still
+lands on that line when the numbers move. `/tag:` searches the notes and `n`/`N`
+walk them, with `tag:todo` narrowing it to one tag. A note written by the shell
+appears while the pane is open, and `--json` is the form a tool reads.
+
+```sh
+twig notes                          # each note, then the code it sits on
+twig notes --brief                  # one line per note
+twig notes --json                   # one object: tag, anchor, context, body
+twig notes add internal/ui/tui.go:120 -m "this hides the cursor" --tag warn
+twig notes add internal/ui/tui.go#3 -m "the whole hunk"
+twig notes add internal/ui/tui.go -m "read the header first"
+twig notes rm n1 n2
+twig notes clear --path internal/ui
+```
+
+Anchors are `path`, `path#HUNK` (1-based in that file's diff), `path:LINE` and
+`path:START-END`, stored relative to the work tree root even when typed from a
+subdirectory; without `-m` the body comes from standard input. Notes live in
+`.git/twig-notes.json`, so they never show up in `git status`. Every read says
+whether an anchor still holds: a line note drifts when the lines change, a hunk
+note when its header moves, a file note when the path is gone. Drifted notes are
+listed, not hidden.
 
 ## Config
 

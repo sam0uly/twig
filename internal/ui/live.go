@@ -268,7 +268,7 @@ func (m *model) changedFiles(entries []filelist.Entry) []filelist.Entry {
 
 // liveFollow picks the change to chase.
 func (m *model) liveFollow(changed []filelist.Entry) (filelist.Entry, bool) {
-	if !m.cfg.Follow || !m.cfg.Watch || m.anchorWait || m.state != stateShowList || len(changed) == 0 {
+	if !m.cfg.Follow || !m.cfg.Watch || m.anchorWait || m.noteMode || m.state != stateShowList || len(changed) == 0 {
 		return filelist.Entry{}, false
 	}
 	// A burst can touch several files: the one written last is where the tool is. The
@@ -306,7 +306,7 @@ func (m *model) followLine(path string, staged bool, next *diff.File) (diff.Line
 // followShown moves the pane to a line that just arrived on screen, and reports
 // whether it went anywhere.
 func (m *model) followShown(path string, staged bool, next *diff.File) bool {
-	if !m.cfg.Follow || !m.cfg.Watch || m.anchorWait || m.state != stateShowList {
+	if !m.cfg.Follow || !m.cfg.Watch || m.anchorWait || m.noteMode || m.state != stateShowList {
 		return false
 	}
 	line, ok := m.followLine(path, staged, next)

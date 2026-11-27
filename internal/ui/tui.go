@@ -11,6 +11,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	uv "github.com/charmbracelet/ultraviolet"
@@ -20,6 +21,7 @@ import (
 	"samouly.fun/twig/internal/config"
 	"samouly.fun/twig/internal/diff"
 	"samouly.fun/twig/internal/git"
+	"samouly.fun/twig/internal/notes"
 	"samouly.fun/twig/internal/ui/components/composer"
 	"samouly.fun/twig/internal/ui/components/diffview"
 	"samouly.fun/twig/internal/ui/components/filelist"
@@ -99,6 +101,9 @@ type model struct {
 	// cfgStamp fingerprints the config file, so an outside edit is picked up.
 	cfgStamp      string
 	configTicking bool
+	notesStamp    string
+	// noteWrapWidth is what the notes on screen were wrapped to.
+	noteWrapWidth int
 	src           git.Source
 	// pinned is true when the viewer was opened on a commit or a range: there is
 	// no live worktree behind that diff, so it is read only and never refreshes.
@@ -242,7 +247,19 @@ type model struct {
 	status  *statusbar.Model
 	search  *searchbar.Model
 	compose *composer.Model
-	spinner spinner.Model
+
+	// The note store, and the input row while a note is being typed.
+	noteStore     notes.Store
+	notesPath     string
+	notesRoot     string
+	noteMode      bool
+	notePath      string
+	noteLine      int
+	noteRow       int
+	noteInput     textarea.Model
+	noteDraftRows int
+	noteTag       notes.Tag
+	spinner       spinner.Model
 
 	// pane rects, computed by setSize.
 	sideRect       uv.Rectangle
@@ -264,7 +281,7 @@ func newModel(opts Options, branch, project string) model {
 		showRight:  opts.Config.ShowRightSidebar,
 		cfg:        opts.Config,
 		cfgPath:    opts.ConfigPath,
-		cfgStamp:   configStamp(opts.ConfigPath),
+		cfgStamp:   fileStamp(opts.ConfigPath),
 		src:        opts.Source,
 		pinned:     opts.Source.Pinned() || opts.Document != nil,
 		branch:     branch,
@@ -278,6 +295,7 @@ func newModel(opts Options, branch, project string) model {
 		view:       newDiffview(opts.Config.SmoothScroll, st),
 		status:     newStatusbar(st),
 		search:     newSearchbar(st),
+		noteInput:  newNoteInput(),
 		compose:    newComposer(st),
 		spinner:    spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(st.SpinnerStyle())),
 	}
@@ -314,8 +332,10 @@ func (m model) Init() tea.Cmd {
 		tea.RequestBackgroundColor,
 		loadRepoInfoCmd(),
 		loadStatusCmd(false),
+		loadNotesCmd(),
 		loadLogCmd(m.cfg.LogLimit),
 		configTick(),
+		notesTick(),
 		m.statusTick(),
 	)
 }
@@ -395,6 +415,15 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyStyles(styles.New())
 		return m, nil
 
+	case notesLoadedMsg:
+		if msg.err == nil {
+			m.noteStore, m.notesPath, m.notesRoot = msg.store, msg.path, msg.root
+			m.notesStamp = fileStamp(msg.path)
+			m.view.SetNoteDrift(m.noteDrifted)
+			m.reannotate()
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.setSize()
@@ -442,6 +471,11 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			unstaged = nil
 		}
 		m.files.SetFiles(m.withinPaths(staged), m.withinPaths(unstaged))
+		if m.noteMode {
+			// A note is being typed: keep the listing fresh, but leave the pane
+			// and its cursor alone or the input row would disappear mid-word.
+			return m, watchCmd
+		}
 		if m.advanceList {
 			// A whole file was dealt with: move on to the next one, so the next
 			// keystroke lands on the next piece of work instead of on a file
@@ -569,6 +603,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case configTickMsg:
 		return m.watchConfig()
 
+	case notesTickMsg:
+		return m.watchNotes()
+
 	case watchStartedMsg:
 		m.watchStarting = false
 		if msg.err != nil || msg.w == nil || !m.cfg.Watch {
@@ -640,7 +677,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case blockUpdateMsg:
-		if !m.allChanges || m.files.Tab() != filelist.TabFiles || msg.gen != m.allGen {
+		if !m.allChanges || m.files.Tab() != filelist.TabFiles || msg.gen != m.allGen || m.noteMode {
 			return m, nil
 		}
 		// A block index is the listing's row, and the listing can change while the
@@ -669,7 +706,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case allChunkMsg:
-		if msg.gen != m.allGen {
+		if msg.gen != m.allGen || m.noteMode {
 			return m, nil
 		}
 		if msg.err != nil {
@@ -690,7 +727,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		first := msg.from == 0
-		m.view.AppendBlocksSided(msg.files, blockSides(m.cfg, msg.entries, msg.from, len(msg.files)))
+		m.view.AppendBlocksSided(m.annotateFiles(msg.files), blockSides(m.cfg, msg.entries, msg.from, len(msg.files)))
 		for i, f := range msg.files {
 			m.allAdds += f.Additions
 			m.allDels += f.Deletions
@@ -803,14 +840,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.rememberDiff(msg.path, msg.file, msg.staged)
 				return m, nil
 			}
-			m.view.SetFileAt(msg.file, m.view.Anchor())
+			m.view.SetFileAt(withNotes(msg.file, m.noteStore.For(msg.path), m.noteWidth()), m.view.Anchor())
 			m.d = &diff.Diff{Additions: msg.file.Additions, Deletions: msg.file.Deletions}
 			m.followShown(msg.path, msg.staged, msg.file)
 			m.rememberDiff(msg.path, msg.file, msg.staged)
 			return m, nil
 		}
 		m.view.SetNotes(nil)
-		m.view.SetFile(msg.file)
+		m.view.SetFile(withNotes(msg.file, m.noteStore.For(msg.path), m.noteWidth()))
 		m.d = &diff.Diff{Additions: msg.file.Additions, Deletions: msg.file.Deletions}
 		m.lastLoaded.path, m.lastLoaded.staged = msg.path, msg.staged
 		// The pane moved to another file because a live change picked it, or the reader
@@ -858,7 +895,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = msg.err.Error()
 			return m, setMessageCmd(m.message)
 		}
-		m.view.AppendBlocks(msg.files)
+		m.view.AppendBlocks(m.annotateFiles(msg.files))
 		for i, f := range msg.files {
 			if j := msg.from + i; j < len(m.commitFileList) && m.commitFileList[j] != nil {
 				m.commitFileList[j].Additions, m.commitFileList[j].Deletions = f.Additions, f.Deletions
@@ -1064,7 +1101,7 @@ func (m *model) applyView(msg tea.Msg) tea.Cmd {
 
 // autoLoadFile loads the selected file's diff so the pane never goes stale.
 func (m model) autoLoadFile() (tea.Model, tea.Cmd) {
-	if m.files.Tab() != filelist.TabFiles || m.allChanges || m.pinned {
+	if m.files.Tab() != filelist.TabFiles || m.allChanges || m.pinned || m.noteMode {
 		return m, nil
 	}
 	fs, _ := m.files.SelectedFile()
@@ -1086,7 +1123,7 @@ func (m model) showFile(path string, staged bool) (tea.Model, tea.Cmd) {
 	m.syncWatch()
 	if e, ok := m.cache.Get(fileCacheKey(path, staged, m.cfg)); ok {
 		m.view.SetNotes(nil)
-		m.view.SetFile(e.file)
+		m.view.SetFile(withNotes(e.file, m.noteStore.For(path), m.noteWidth()))
 		m.d = &diff.Diff{Additions: e.file.Additions, Deletions: e.file.Deletions}
 		m.lastLoaded.path, m.lastLoaded.staged = path, staged
 		return m, nil
@@ -1475,6 +1512,9 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.search.Active() {
 		return m.updateSearch(msg)
 	}
+	if m.noteMode {
+		return m.updateNoteKey(msg)
+	}
 	if m.state == stateFatal {
 		return m, tea.Quit
 	}
@@ -1495,6 +1535,10 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.help = !m.help
 		m.setSize()
 		return m, nil
+	case key.Matches(msg, m.keys.NoteAdd):
+		return m.startNote()
+	case key.Matches(msg, m.keys.NoteDrop):
+		return m.dropNote()
 	case key.Matches(msg, m.keys.Refresh):
 		m.message = ""
 		return m.refresh()
@@ -1948,7 +1992,7 @@ func (m model) startAllChanges() (tea.Model, tea.Cmd) {
 	// sidebar selects, which is what the reader just asked for.
 	m.allRestore, m.allAnchor = m.allAnchor, -1
 	m.view.SetNotes(nil)
-	m.view.SetDocument(blockLoader(entries, opts))
+	m.view.SetDocument(blockLoader(entries, opts, m.noteStore, m.noteWidth()))
 	m.d = &diff.Diff{}
 
 	return m, loadAllChangesCmd(entries, m.allGen, opts)
@@ -1957,7 +2001,7 @@ func (m model) startAllChanges() (tea.Model, tea.Cmd) {
 // blockLoader re-diffs block i when the virtual document needs its rows
 // again. The status snapshot and the content-addressed diff cache make this a
 // map lookup in the common case.
-func blockLoader(entries []filelist.Entry, opts git.Options) func(i int) *diff.File {
+func blockLoader(entries []filelist.Entry, opts git.Options, store notes.Store, width int) func(i int) *diff.File {
 	return func(i int) *diff.File {
 		if i < 0 || i >= len(entries) {
 			return nil
@@ -1972,7 +2016,7 @@ func blockLoader(entries []filelist.Entry, opts git.Options) func(i int) *diff.F
 				Lines:   []diff.Line{{Kind: diff.NoNewline, Text: "diff unavailable"}},
 			}
 		}
-		return f
+		return withNotes(f, store.For(e.Status.Path), width)
 	}
 }
 
@@ -2233,6 +2277,14 @@ func (m *model) setSize() {
 
 	m.status.SetWidth(w)
 	m.search.SetWidth(max(1, m.mainRect.Dx()-2*inset))
+
+	// Notes wrap on their own, so a resize lays them out again.
+	if nw := m.noteWidth(); nw != m.noteWrapWidth {
+		m.noteWrapWidth = nw
+		if len(m.noteStore.Notes) > 0 && !m.noteMode {
+			m.reannotate()
+		}
+	}
 }
 
 func nextContext(current int) int {
@@ -2634,9 +2686,33 @@ func configTick() tea.Cmd {
 	})
 }
 
-// configStamp fingerprints the config file by mtime and size. An empty stamp
-// means the file does not exist yet.
-func configStamp(path string) string {
+type notesTickMsg struct{}
+
+const notesWatchInterval = time.Second
+
+func notesTick() tea.Cmd {
+	return tea.Tick(notesWatchInterval, func(time.Time) tea.Msg {
+		return notesTickMsg{}
+	})
+}
+
+// watchNotes reloads the store when another process wrote it, and leaves a
+// draft in progress alone.
+func (m model) watchNotes() (tea.Model, tea.Cmd) {
+	if m.notesPath == "" || m.noteMode {
+		return m, notesTick()
+	}
+	stamp := fileStamp(m.notesPath)
+	if stamp == m.notesStamp {
+		return m, notesTick()
+	}
+	m.notesStamp = stamp
+	return m, tea.Batch(loadNotesCmd(), notesTick())
+}
+
+// fileStamp fingerprints one file by mtime and size. An empty stamp means the
+// file does not exist yet.
+func fileStamp(path string) string {
 	if path == "" {
 		return ""
 	}
@@ -2720,7 +2796,7 @@ func (m *model) saveConfig() error {
 	if err := config.Save(m.cfgPath, m.cfg); err != nil {
 		return err
 	}
-	m.cfgStamp = configStamp(m.cfgPath)
+	m.cfgStamp = fileStamp(m.cfgPath)
 	return nil
 }
 
@@ -2733,7 +2809,7 @@ func (m model) watchConfig() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	stamp := configStamp(m.cfgPath)
+	stamp := fileStamp(m.cfgPath)
 	if stamp == m.cfgStamp {
 		return m, configTick()
 	}

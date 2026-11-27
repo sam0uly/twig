@@ -42,6 +42,8 @@ type KeyMap struct {
 	YankFile   key.Binding
 	YankHunk   key.Binding
 	ToggleWrap key.Binding
+	NoteAdd    key.Binding
+	NoteDrop   key.Binding
 
 	// Partial staging in the diff pane. One verb, whose object is whatever the
 	// cursor is on, so there is no mode to be in.
@@ -232,6 +234,14 @@ func DefaultKeyMap() KeyMap {
 		ToggleWrap: key.NewBinding(
 			key.WithKeys("w"),
 			key.WithHelp("w", "wrap"),
+		),
+		NoteAdd: key.NewBinding(
+			key.WithKeys("M"),
+			key.WithHelp("M", "note line"),
+		),
+		NoteDrop: key.NewBinding(
+			key.WithKeys("X"),
+			key.WithHelp("X", "drop note"),
 		),
 		ToggleWS: key.NewBinding(
 			key.WithKeys("Z"),

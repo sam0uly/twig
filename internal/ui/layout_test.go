@@ -1233,7 +1233,7 @@ func TestSmoothScrollTogglesAndPersists(t *testing.T) {
 	m.cfg.SmoothScroll = false
 	m.view.SetSmooth(false)
 	m.cfgPath = path
-	m.cfgStamp = configStamp(path)
+	m.cfgStamp = fileStamp(path)
 	m.focus = focusMain
 
 	next, _ := m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
@@ -1265,7 +1265,7 @@ func TestConfigReloadsOnExternalEdit(t *testing.T) {
 
 	m := testModel(100, 30)
 	m.cfgPath = path
-	m.cfgStamp = configStamp(path)
+	m.cfgStamp = fileStamp(path)
 
 	edited := config.Default()
 	edited.Wrap = true

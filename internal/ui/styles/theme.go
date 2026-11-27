@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"charm.land/tone"
 
+	"samouly.fun/twig/internal/notes"
 	"samouly.fun/twig/internal/syntax"
 )
 
@@ -556,6 +557,33 @@ func (s Styles) DiffNoNewline() lipgloss.Style { return s.diffNoNewline }
 // DiffBinary returns the style for binary file notices.
 func (s Styles) DiffBinary() lipgloss.Style { return s.diffBinary }
 
+// noteSpec is one tag's glyph, word and colours.
+type noteSpec struct {
+	icon, word string
+	pill       color.Color
+	fg         color.Color
+	text       color.Color
+	wash       color.Color
+}
+
+var noteSpecs = map[notes.Tag]noteSpec{
+	notes.Fyi:   {icon: "i", word: "FYI", pill: tone.Sardine, fg: tone.Salt, text: tone.Lichen, wash: tone.Oceania},
+	notes.Todo:  {icon: "☐", word: "TODO", pill: tone.Charple, fg: tone.Butter, text: tone.Butter, wash: tone.Jelly},
+	notes.Warn:  {icon: "!", word: "WARN", pill: tone.Paprika, fg: tone.Salt, text: tone.Yam, wash: tone.Toast},
+	notes.Error: {icon: "×", word: "ERROR", pill: tone.Cherry, fg: tone.Salt, text: tone.Salmon, wash: tone.Steak},
+}
+
+// Note returns the pill and body styles of one tag.
+func (s Styles) Note(tag notes.Tag) (icon, word string, pill, body lipgloss.Style) {
+	spec, ok := noteSpecs[tag]
+	if !ok {
+		spec = noteSpecs[notes.Fyi]
+	}
+	pill = lipgloss.NewStyle().Bold(true).Foreground(spec.fg).Background(spec.pill)
+	body = lipgloss.NewStyle().Foreground(spec.text).Background(spec.wash)
+	return spec.icon, spec.word, pill, body
+}
+
 // Syntax returns the style a token class takes on a kind of diff row.
 func (s Styles) Syntax(kind int, class syntax.Class) lipgloss.Style {
 	return s.syn[kind][class]
@@ -599,6 +627,36 @@ func (s Styles) ModalHint() lipgloss.Style { return s.modalHint }
 
 // ModalKeycap returns the key cap style used in the dialog footer.
 func (s Styles) ModalKeycap() lipgloss.Style { return s.modalKeycap }
+
+// NoteDrift marks a note whose anchor no longer holds.
+func (s Styles) NoteDrift() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(tone.Paprika).Bold(true)
+}
+
+// SearchBand is the strip the diff search sits on.
+func (s Styles) SearchBand() lipgloss.Style {
+	return lipgloss.NewStyle().Background(tone.BBQ)
+}
+
+// SearchPrompt styles the marker in front of the query.
+func (s Styles) SearchPrompt() lipgloss.Style {
+	return lipgloss.NewStyle().Background(tone.BBQ).Foreground(tone.Zest).Bold(true)
+}
+
+// SearchText styles the query.
+func (s Styles) SearchText() lipgloss.Style {
+	return lipgloss.NewStyle().Background(tone.BBQ).Foreground(tone.Salt)
+}
+
+// SearchHint styles the placeholder that says what the box takes.
+func (s Styles) SearchHint() lipgloss.Style {
+	return lipgloss.NewStyle().Background(tone.BBQ).Foreground(tone.Squid)
+}
+
+// SearchCursor is the colour of the caret in the search box.
+func (s Styles) SearchCursor() lipgloss.Style {
+	return lipgloss.NewStyle().Background(tone.Zest).Foreground(tone.Pepper)
+}
 
 // SearchHi returns the style for search matches.
 func (s Styles) SearchHi() lipgloss.Style { return s.searchHi }

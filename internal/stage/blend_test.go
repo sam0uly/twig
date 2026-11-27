@@ -292,3 +292,41 @@ func TestSelectionToggle(t *testing.T) {
 		t.Fatal("editing a clone must not touch the original")
 	}
 }
+
+// TestPairAndBlendIgnoreNoteRows ensures inline diff.Note rows (file notes,
+// hunk notes, and line notes embedded inside a change group) never stall Pair
+// or Blend and never split a replacement group's deletion/addition pairing.
+func TestPairAndBlendIgnoreNoteRows(t *testing.T) {
+	pre := "keep\nold one\nold two\nkeep\n"
+	post := "keep\nnew one\nnew two\nkeep\n"
+	f := gen(t, pre, post)
+
+	// Inject a file note at index 0 AND an inline note between the two
+	// additions of the replacement group.
+	annotated := *f
+	lines := make([]diff.Line, 0, len(f.Lines)+2)
+	lines = append(lines, diff.Line{Kind: diff.Note, Text: "file note"})
+	for _, l := range f.Lines {
+		lines = append(lines, l)
+		if l.Kind == diff.Addition && l.New == 2 {
+			lines = append(lines, diff.Line{Kind: diff.Note, Text: "line note", New: 2})
+		}
+	}
+	annotated.Lines = lines
+
+	sel := NewSelection()
+	sel.Add(NewPost(3)) // second addition only
+	paired := Pair(&annotated, sel)
+	if !paired.Has(NewPre(3)) || !paired.Has(NewPost(3)) {
+		t.Fatalf("Pair should pair NewPost(3) with NewPre(3) across an inline note row; got %v", paired.Lines())
+	}
+
+	got, err := Blend(pre, post, &annotated, paired)
+	if err != nil {
+		t.Fatalf("Blend with notes: %v", err)
+	}
+	want := "keep\nold one\nnew two\nkeep\n"
+	if got != want {
+		t.Fatalf("Blend with notes: got %q, want %q", got, want)
+	}
+}
